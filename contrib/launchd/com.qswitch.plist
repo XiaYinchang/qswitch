@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.qswitch</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>QSWITCHD</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>QSWITCH_DIR</key>
+    <string>HOME/.qswitch</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <false/>
+  <key>StandardOutPath</key>
+  <string>HOME/Library/Logs/qswitch.log</string>
+  <key>StandardErrorPath</key>
+  <string>HOME/Library/Logs/qswitch.error.log</string>
+  <key>Umask</key>
+  <integer>63</integer>
+</dict>
+</plist>

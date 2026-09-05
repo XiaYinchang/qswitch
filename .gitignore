@@ -1,0 +1,9 @@
+/bin/
+*.test
+*.out
+.DS_Store
+.env
+*.enc
+*.db
+*.db-wal
+*.db-shm
