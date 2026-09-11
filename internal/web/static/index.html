@@ -179,7 +179,8 @@ function render(ov) {
       if (ac.plan && ac.plan !== "-") badges.push(`<span class="badge">${ac.plan}</span>`);
       if (ac.stale_cli) badges.push(`<span class="badge">CLI 偏旧</span>`);
       if (ac.desktop) badges.push(`<span class="badge">桌面快照</span>`);
-      const cool = ac.cooling_until ? `冷却到 ${fmtTime(ac.cooling_until)}` : "";
+      const cool = (ac.class === "exhausted" && ac.cooling_until && ac.cooling_until * 1000 > Date.now())
+        ? `冷却到 ${fmtTime(ac.cooling_until)}` : "";
       card.innerHTML = `
         <div class="who">
           <div>

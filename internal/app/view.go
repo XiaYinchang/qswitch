@@ -63,6 +63,7 @@ func remainingPct(class string, used float64) *float64 {
 
 func (a *App) Overview() Overview {
 	var out Overview
+	now := a.now().Unix()
 	for _, t := range adapter.AllTools() {
 		p, _ := a.State.GetPointer(string(t))
 		ad := a.Adapters[t]
@@ -83,14 +84,24 @@ func (a *App) Overview() Overview {
 		}
 		accs, _ := a.State.ListAccounts(string(t))
 		for _, ac := range accs {
-			tv.Accounts = append(tv.Accounts, accountView(ac, p.StableID))
+			tv.Accounts = append(tv.Accounts, accountView(ac, p.StableID, now))
 		}
 		out.Tools = append(out.Tools, tv)
 	}
 	return out
 }
 
-func accountView(ac state.Account, liveID string) AccountView {
+func visibleCooling(ac state.Account, now int64) int64 {
+	if quota.Class(ac.LastQuotaClass) != quota.Exhausted {
+		return 0
+	}
+	if ac.CoolingUntil <= now {
+		return 0
+	}
+	return ac.CoolingUntil
+}
+
+func accountView(ac state.Account, liveID string, now int64) AccountView {
 	plan := ac.PlanHint
 	if plan == "" {
 		plan = "-"
@@ -109,7 +120,7 @@ func accountView(ac state.Account, liveID string) AccountView {
 		Class:          class,
 		UsedPct:        ac.LastUsedPct,
 		RemainingPct:   remainingPct(class, ac.LastUsedPct),
-		CoolingUntil:   ac.CoolingUntil,
+		CoolingUntil:   visibleCooling(ac, now),
 		ResetsAt:       ac.LastResetsAt,
 		Incomplete:     ac.Incomplete,
 		StaleCLI:       ac.StaleCLI,

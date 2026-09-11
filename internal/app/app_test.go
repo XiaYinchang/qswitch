@@ -315,6 +315,70 @@ func TestProbeRecoveredAfterCooling(t *testing.T) {
 	}
 }
 
+func TestProbeOKClearsCooling(t *testing.T) {
+	a, _ := setup(t)
+	if _, _, err := a.Capture(adapter.Codex); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	a.Clock = clock.Fixed{T: now}
+	if err := a.State.SetCooling("codex", "acc-a", now.Add(-time.Hour).Unix()); err != nil {
+		t.Fatal(err)
+	}
+	a.HTTP.Client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		body := `{"rate_limit":{"primary_window":{"used_percent":50}}}`
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header), Request: req}, nil
+	})}
+	res := a.ProbeAccount(context.Background(), adapter.Codex, "acc-a")
+	if res.Class != "ok" {
+		t.Fatalf("class %s", res.Class)
+	}
+	ac, err := a.State.GetAccount("codex", "acc-a")
+	if err != nil || ac.CoolingUntil != 0 {
+		t.Fatalf("cooling %d err=%v", ac.CoolingUntil, err)
+	}
+}
+
+func TestOverviewHidesStaleCooling(t *testing.T) {
+	a, _ := setup(t)
+	if _, _, err := a.Capture(adapter.Codex); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	a.Clock = clock.Fixed{T: now}
+	past := now.Add(-3 * 24 * time.Hour).Unix()
+	if err := a.State.UpdateQuotaSnapshot("codex", "acc-a", "ok", 50, now.Add(24*time.Hour).Unix(), now.Unix()); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.State.SetCooling("codex", "acc-a", past); err != nil {
+		t.Fatal(err)
+	}
+	if got := coolingOf(a.Overview(), "acc-a"); got != 0 {
+		t.Fatalf("ok account still showing cooling %d", got)
+	}
+	until := now.Add(3 * time.Hour).Unix()
+	if err := a.State.UpdateQuotaSnapshot("codex", "acc-a", "exhausted", 100, until, now.Unix()); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.State.SetCooling("codex", "acc-a", until); err != nil {
+		t.Fatal(err)
+	}
+	if got := coolingOf(a.Overview(), "acc-a"); got != until {
+		t.Fatalf("want cooling %d got %d", until, got)
+	}
+}
+
+func coolingOf(ov Overview, id string) int64 {
+	for _, tool := range ov.Tools {
+		for _, ac := range tool.Accounts {
+			if ac.StableID == id {
+				return ac.CoolingUntil
+			}
+		}
+	}
+	return -1
+}
+
 func TestProbeRecoveredCodexBeforeAdvertisedReset(t *testing.T) {
 	a, n := setup(t)
 	if _, _, err := a.Capture(adapter.Codex); err != nil {

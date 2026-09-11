@@ -469,8 +469,8 @@ func (a *App) List(tool string) string {
 			mark = "*"
 		}
 		cool := "-"
-		if ac.CoolingUntil > a.now().Unix() {
-			cool = time.Unix(ac.CoolingUntil, 0).UTC().Format(time.RFC3339)
+		if until := visibleCooling(ac, a.now().Unix()); until > 0 {
+			cool = time.Unix(until, 0).UTC().Format(time.RFC3339)
 		}
 		plan := ac.PlanHint
 		if plan == "" {
@@ -1069,8 +1069,11 @@ func (a *App) probeAccount(ctx context.Context, tool adapter.Tool, id string, ga
 	}
 	_ = a.State.UpdateQuota(string(tool), id, string(res.Class), res.UsedPct, res.ResetsAt, now.Unix(), now.Unix(), backoff)
 	_ = a.State.LogQuota(string(tool), id, string(res.Class), res.Source, res.UsedPct, now)
-	if res.Class == quota.Exhausted {
+	switch res.Class {
+	case quota.Exhausted:
 		a.setCooling(string(tool), id, res.ResetsAt)
+	case quota.OK, quota.Soft:
+		_ = a.State.SetCooling(string(tool), id, 0)
 	}
 	return res
 }
