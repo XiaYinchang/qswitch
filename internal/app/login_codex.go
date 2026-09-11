@@ -84,16 +84,24 @@ func isolatedCodexEnv(parent []string, home string) []string {
 }
 
 func (a *App) loginCodexHTTP(ctx context.Context, announce func(userCode, verifyURL string)) (adapter.Identity, error) {
-	if a.HTTP.Client == nil && secutil.InTest() {
-		return adapter.Identity{}, errors.New("codex login: no http client")
-	}
-	st, err := a.HTTP.CodexDeviceStart(ctx)
+	st, err := a.BeginCodexDeviceLogin(ctx)
 	if err != nil {
 		return adapter.Identity{}, err
 	}
 	if announce != nil {
 		announce(st.UserCode, quota.CodexDeviceURL)
 	}
+	return a.CompleteCodexDeviceLogin(ctx, st)
+}
+
+func (a *App) BeginCodexDeviceLogin(ctx context.Context) (quota.CodexDeviceStart, error) {
+	if a.HTTP.Client == nil && secutil.InTest() {
+		return quota.CodexDeviceStart{}, errors.New("codex login: no http client")
+	}
+	return a.HTTP.CodexDeviceStart(ctx)
+}
+
+func (a *App) CompleteCodexDeviceLogin(ctx context.Context, st quota.CodexDeviceStart) (adapter.Identity, error) {
 	deadline := st.ExpiresAt
 	if deadline.IsZero() {
 		deadline = a.now().Add(15 * time.Minute)

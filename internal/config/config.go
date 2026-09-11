@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	toml "github.com/pelletier/go-toml/v2"
@@ -29,6 +30,7 @@ type Config struct {
 	Codex   Tool    `toml:"codex"`
 	Grok    Tool    `toml:"grok"`
 	Cursor  Tool    `toml:"cursor"`
+	Web     Web     `toml:"web"`
 }
 
 type General struct {
@@ -54,6 +56,13 @@ type Tool struct {
 	Enabled bool `toml:"enabled"`
 }
 
+type Web struct {
+	Enabled bool   `toml:"enabled"`
+	Addr    string `toml:"addr"`
+}
+
+const DefaultWebAddr = "127.0.0.1:7432"
+
 func Default() Config {
 	return Config{
 		General: General{
@@ -73,6 +82,7 @@ func Default() Config {
 		Codex:  Tool{Enabled: true},
 		Grok:   Tool{Enabled: true},
 		Cursor: Tool{Enabled: false},
+		Web:    Web{Enabled: true, Addr: DefaultWebAddr},
 	}
 }
 
@@ -106,6 +116,13 @@ func (c Config) Jitter() time.Duration  { return parseDur(c.Quota.Jitter, Defaul
 func (c Config) Backoff() time.Duration { return parseDur(c.Quota.HTTPBackoff, DefaultBackoff) }
 func (c Config) CursorPoll() time.Duration {
 	return DefaultCursorPoll
+}
+
+func (c Config) WebAddr() string {
+	if strings.TrimSpace(c.Web.Addr) == "" {
+		return DefaultWebAddr
+	}
+	return c.Web.Addr
 }
 
 func parseDur(s string, fallback time.Duration) time.Duration {

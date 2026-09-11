@@ -16,4 +16,7 @@ func TestIntervalBounds(t *testing.T) {
 	if c.ETAChecks() != 6 {
 		t.Fatalf("eta %v", c.ETAChecks())
 	}
+	if !c.Web.Enabled || c.WebAddr() != DefaultWebAddr {
+		t.Fatalf("web %+v", c.Web)
+	}
 }

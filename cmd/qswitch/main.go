@@ -10,6 +10,7 @@ import (
 
 	"qswitch/internal/adapter"
 	"qswitch/internal/app"
+	"qswitch/internal/web"
 )
 
 func main() {
@@ -67,6 +68,16 @@ func run(args []string) int {
 	case "doctor":
 		fmt.Print(a.Doctor())
 		return 0
+	case "serve":
+		addr := a.Cfg.WebAddr()
+		if v, ok := flagVal(rest, "--addr"); ok {
+			a.Cfg.Web.Addr = v
+			addr = v
+		}
+		fmt.Printf("qswitch web http://%s\n", addr)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		return fail(web.New(a, addr).Run(ctx))
 	case "probe":
 		tools := adapter.AllTools()
 		if t, ok := flagTool(rest); ok {
@@ -182,6 +193,18 @@ func setAuto(a *app.App, rest []string, on bool) int {
 	return fail(a.SaveConfig())
 }
 
+func flagVal(args []string, name string) (string, bool) {
+	for i, a := range args {
+		if a == name && i+1 < len(args) {
+			return args[i+1], true
+		}
+		if strings.HasPrefix(a, name+"=") {
+			return strings.TrimPrefix(a, name+"="), true
+		}
+	}
+	return "", false
+}
+
 func flagTool(args []string) (adapter.Tool, bool) {
 	for i, a := range args {
 		if a == "--tool" && i+1 < len(args) {
@@ -246,5 +269,6 @@ func usage() {
   qswitch disable-auto [--tool ...]
   qswitch forget <tool> <id|email>
   qswitch doctor
+  qswitch serve [--addr 127.0.0.1:7432]
 `)
 }

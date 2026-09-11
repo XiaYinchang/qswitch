@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>qswitch</title>
+<style>
+  :root {
+    --bg: #111318;
+    --card: #1a1d24;
+    --line: #2a2e38;
+    --text: #e8eaed;
+    --muted: #9aa0a6;
+    --ok: #3dd68c;
+    --soft: #e6b84d;
+    --bad: #f07178;
+    --live: #7aa2f7;
+    --btn: #2b313c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, "PingFang SC", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    padding: 20px 24px 8px;
+    border-bottom: 1px solid var(--line);
+  }
+  header h1 { font-size: 18px; font-weight: 600; margin: 0; }
+  header p { color: var(--muted); margin: 0; font-size: 13px; }
+  main { padding: 16px 24px 40px; display: grid; gap: 20px; }
+  section h2 { font-size: 15px; margin: 0 0 10px; display: flex; gap: 10px; align-items: center; }
+  .meta { color: var(--muted); font-size: 12px; font-weight: 400; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+  button {
+    background: var(--btn);
+    color: var(--text);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 6px 10px;
+    cursor: pointer;
+    font: inherit;
+  }
+  button:hover { border-color: #4a5160; }
+  button.danger { color: var(--bad); }
+  button.primary { border-color: var(--live); color: var(--live); }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 12px 14px;
+    margin-bottom: 8px;
+  }
+  .card.live { border-color: #3d4c7a; }
+  .who { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
+  .email { font-weight: 600; }
+  .id { color: var(--muted); font-size: 12px; word-break: break-all; }
+  .bar {
+    height: 8px;
+    background: #2a2e38;
+    border-radius: 99px;
+    overflow: hidden;
+    margin: 8px 0 4px;
+  }
+  .bar > i { display: block; height: 100%; background: var(--ok); }
+  .bar.empty > i { width: 0; }
+  .stats { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; }
+  .badge {
+    font-size: 11px;
+    padding: 1px 7px;
+    border-radius: 99px;
+    border: 1px solid var(--line);
+    color: var(--muted);
+  }
+  .badge.ok { color: var(--ok); border-color: #245c42; }
+  .badge.soft { color: var(--soft); border-color: #5c4a20; }
+  .badge.exhausted, .badge.expired { color: var(--bad); border-color: #5c2a30; }
+  .badge.live { color: var(--live); border-color: #3d4c7a; }
+  .msg { color: var(--muted); font-size: 13px; min-height: 1.2em; }
+  .msg.err { color: var(--bad); }
+  dialog {
+    border: 1px solid var(--line);
+    background: var(--card);
+    color: var(--text);
+    border-radius: 12px;
+    padding: 18px 20px;
+    max-width: 440px;
+  }
+  dialog::backdrop { background: #0008; }
+  .code {
+    font: 22px/1.3 ui-monospace, SFMono-Regular, Menlo, monospace;
+    letter-spacing: 0.08em;
+    margin: 10px 0;
+  }
+  a { color: var(--live); }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>qswitch</h1>
+    <p>本机账号余量。token 不会出现在这个页面上。</p>
+  </div>
+  <button id="reload">刷新列表</button>
+</header>
+<main id="root"></main>
+<p class="msg" id="msg" style="padding:0 24px"></p>
+<dialog id="loginDlg">
+  <h3>ChatGPT Device Code 加号</h3>
+  <p>用浏览器打开链接，输入一次性代码。不要在 ChatGPT.app 里换号，也不要 logout。</p>
+  <p><a id="loginUrl" target="_blank" rel="noopener"></a></p>
+  <div class="code" id="loginCode"></div>
+  <p class="msg" id="loginMsg">等你在浏览器里确认…</p>
+  <div class="row">
+    <button id="loginCancel">取消</button>
+  </div>
+</dialog>
+<script>
+const $ = (id) => document.getElementById(id);
+const msg = (t, err) => { const el = $("msg"); el.textContent = t || ""; el.className = "msg" + (err ? " err" : ""); };
+const api = (path, opt) => fetch(path, Object.assign({ headers: { "Content-Type": "application/json" } }, opt)).then(async r => {
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+});
+const clsLabel = { ok: "正常", soft: "接近用尽", exhausted: "已用尽", expired: "票失效", unknown: "未知" };
+function barColor(cls, rem) {
+  if (cls === "exhausted" || cls === "expired") return "var(--bad)";
+  if (cls === "soft" || (rem != null && rem < 20)) return "var(--soft)";
+  return "var(--ok)";
+}
+function fmtTime(sec) {
+  if (!sec) return "";
+  const d = new Date(sec * 1000);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleString();
+}
+function toolTitle(t) {
+  if (t === "codex") return "ChatGPT / Codex";
+  if (t === "grok") return "Grok";
+  if (t === "cursor") return "Cursor";
+  return t;
+}
+function render(ov) {
+  const root = $("root");
+  root.innerHTML = "";
+  (ov.tools || []).forEach(tool => {
+    const sec = document.createElement("section");
+    const flags = [];
+    if (tool.auto) flags.push("自动切换开");
+    if (tool.busy) flags.push("CLI 占用中");
+    if (tool.chatgpt_app) flags.push("ChatGPT.app 在跑");
+    if (tool.cursor_app) flags.push("Cursor.app 在跑");
+    if (tool.desync) flags.push("桌面/CLI 不一致");
+    sec.innerHTML = `<h2>${toolTitle(tool.tool)} <span class="meta">${flags.join(" · ") || "空闲"}</span></h2>`;
+    const row = document.createElement("div");
+    row.className = "row";
+    row.innerHTML = `
+      <button data-act="capture" data-tool="${tool.tool}">收录当前登录</button>
+      <button data-act="probe-tool" data-tool="${tool.tool}">刷新用量</button>
+      ${tool.tool === "codex" ? `<button class="primary" data-act="login-codex">Device Code 加号</button>` : ""}
+    `;
+    sec.appendChild(row);
+    (tool.accounts || []).forEach(ac => {
+      const rem = ac.remaining_pct;
+      const remText = rem == null ? "余量未知" : `还剩 ${rem.toFixed(0)}%`;
+      const used = ac.class === "unknown" ? "" : `已用 ${Number(ac.used_pct || 0).toFixed(0)}%`;
+      const width = rem == null ? 0 : rem;
+      const card = document.createElement("div");
+      card.className = "card" + (ac.live ? " live" : "");
+      const badges = [];
+      if (ac.live) badges.push(`<span class="badge live">当前</span>`);
+      badges.push(`<span class="badge ${ac.class}">${clsLabel[ac.class] || ac.class}</span>`);
+      if (ac.plan && ac.plan !== "-") badges.push(`<span class="badge">${ac.plan}</span>`);
+      if (ac.stale_cli) badges.push(`<span class="badge">CLI 偏旧</span>`);
+      if (ac.desktop) badges.push(`<span class="badge">桌面快照</span>`);
+      const cool = ac.cooling_until ? `冷却到 ${fmtTime(ac.cooling_until)}` : "";
+      card.innerHTML = `
+        <div class="who">
+          <div>
+            <div class="email">${ac.email || "(无邮箱)"} ${badges.join(" ")}</div>
+            <div class="id">${ac.stable_id}</div>
+          </div>
+        </div>
+        <div class="bar${rem == null ? " empty" : ""}"><i style="width:${width}%;background:${barColor(ac.class, rem)}"></i></div>
+        <div class="stats"><span>${remText}${used ? " · " + used : ""}</span><span>${cool}</span></div>
+        <div class="row" style="margin:8px 0 0">
+          <button data-act="probe" data-tool="${ac.tool}" data-id="${ac.stable_id}">查用量</button>
+          ${ac.live || ac.desktop ? "" : `<button data-act="switch" data-tool="${ac.tool}" data-id="${ac.stable_id}">切到这个号</button>`}
+          ${ac.live ? "" : `<button class="danger" data-act="forget" data-tool="${ac.tool}" data-id="${ac.stable_id}">删除</button>`}
+        </div>`;
+      sec.appendChild(card);
+    });
+    if (!(tool.accounts || []).length) {
+      const p = document.createElement("p");
+      p.className = "msg";
+      p.textContent = "还没有收录账号。先在官方客户端登录，再点「收录当前登录」。";
+      sec.appendChild(p);
+    }
+    root.appendChild(sec);
+  });
+}
+async function load() {
+  try {
+    render(await api("/api/overview"));
+    msg("");
+  } catch (e) { msg(e.message, true); }
+}
+async function onClick(e) {
+  const b = e.target.closest("button");
+  if (!b || !b.dataset.act) return;
+  const act = b.dataset.act, tool = b.dataset.tool, id = b.dataset.id;
+  try {
+    if (act === "capture") {
+      const r = await api("/api/capture", { method: "POST", body: JSON.stringify({ tool }) });
+      msg("已收录 " + (r.captured || []).map(x => x.email || x.stable_id).join(", "));
+      await load();
+    } else if (act === "probe" || act === "probe-tool") {
+      msg("正在查用量…");
+      await api("/api/probe", { method: "POST", body: JSON.stringify({ tool, id: act === "probe" ? id : "" }) });
+      await load();
+      msg("用量已更新");
+    } else if (act === "forget") {
+      if (!confirm("从仓库删掉这个账号？当前登录不会动。")) return;
+      await api("/api/forget", { method: "POST", body: JSON.stringify({ tool, id }) });
+      await load();
+    } else if (act === "switch") {
+      const kill = confirm("若 CLI 占着登录槽，是否在空闲后结束 CLI 再切？确定=结束 CLI，取消=不杀进程。");
+      await api("/api/switch", { method: "POST", body: JSON.stringify({ tool, id, kill_cli: kill }) });
+      await load();
+      msg("已写入新号。新开的进程才会用它。");
+    } else if (act === "login-codex") {
+      startLogin();
+    }
+  } catch (err) { msg(err.message, true); }
+}
+let loginTimer = null, loginId = "";
+async function startLogin() {
+  const r = await api("/api/login/codex", { method: "POST", body: "{}" });
+  loginId = r.id;
+  $("loginUrl").href = r.url;
+  $("loginUrl").textContent = r.url;
+  $("loginCode").textContent = r.user_code;
+  $("loginMsg").textContent = "等你在浏览器里确认…";
+  $("loginDlg").showModal();
+  loginTimer = setInterval(pollLogin, 2000);
+}
+async function pollLogin() {
+  if (!loginId) return;
+  try {
+    const r = await api("/api/login/codex?id=" + encodeURIComponent(loginId));
+    if (r.status === "ok") {
+      clearInterval(loginTimer);
+      $("loginDlg").close();
+      msg("已加上 " + (r.email || r.stable_id) + "，当前登录没动。");
+      load();
+    } else if (r.status === "error") {
+      clearInterval(loginTimer);
+      $("loginMsg").textContent = r.error || "失败";
+    }
+  } catch (e) { $("loginMsg").textContent = e.message; }
+}
+$("loginCancel").onclick = async () => {
+  clearInterval(loginTimer);
+  if (loginId) await api("/api/login/codex/cancel", { method: "POST", body: JSON.stringify({ id: loginId }) }).catch(() => {});
+  $("loginDlg").close();
+};
+$("reload").onclick = load;
+document.addEventListener("click", onClick);
+load();
+</script>
+</body>
+</html>

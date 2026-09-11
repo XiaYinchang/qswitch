@@ -42,7 +42,10 @@ qswitch probe [--tool codex|grok|cursor]
 qswitch switch codex <id-or-email>
 qswitch switch cursor <desktop-id> --force-align   # 须先退出 Cursor.app
 qswitch doctor
+qswitch serve [--addr 127.0.0.1:7432]
 ```
+
+本机页面默认 `http://127.0.0.1:7432`（只绑 loopback）。`qswitchd` 起来后也能开。用来看余量、收录当前登录、ChatGPT Device Code 加号、删除仓库里的号。页面上不会出现 token。
 
 Cursor 自动切换默认关，直到桌面与 CLI 对齐。
 

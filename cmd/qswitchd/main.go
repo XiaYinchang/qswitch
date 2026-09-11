@@ -9,6 +9,7 @@ import (
 	"syscall"
 
 	"qswitch/internal/app"
+	"qswitch/internal/web"
 )
 
 func main() {
@@ -29,6 +30,15 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if a.Cfg.Web.Enabled {
+		addr := a.Cfg.WebAddr()
+		go func() {
+			fmt.Fprintln(os.Stderr, "web http://"+addr)
+			if err := web.New(a, addr).Run(ctx); err != nil && ctx.Err() == nil {
+				fmt.Fprintln(os.Stderr, "web:", err)
+			}
+		}()
+	}
 	if err := a.RunDaemon(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
