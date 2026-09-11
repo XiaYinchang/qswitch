@@ -250,14 +250,16 @@ function toolTitle(t) {
   if (t === "codex") return "ChatGPT / Codex";
   if (t === "grok") return "Grok";
   if (t === "cursor") return "Cursor";
+  if (t === "grokbot") return "Grok Bot";
   return t;
 }
 function attr(s) {
   return String(s ?? "").replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
 }
 function toolActions(tool) {
-  const t = attr(tool.tool);
+  const t = attr(tool.tool === "grokbot" ? "cursor" : tool.tool);
   let html = `<button data-act="probe-tool" data-tool="${t}">刷新用量</button>`;
+  if (tool.tool === "grokbot") return html;
   html += `<button data-act="capture" data-tool="${t}">收录</button>`;
   if (tool.tool === "codex") html += `<button class="primary" data-act="login-codex">加号</button>`;
   if (tool.tool === "grok") html += `<button class="primary" data-act="login-grok">加号</button>`;
@@ -267,6 +269,7 @@ function cardActions(ac) {
   const t = attr(ac.tool), id = attr(ac.stable_id);
   const bits = [];
   if (!ac.desktop) bits.push(`<button class="ghost" data-act="probe" data-tool="${t}" data-id="${id}">查询</button>`);
+  if (ac.derived) return bits.join("");
   if (!ac.live && !ac.desktop) bits.push(`<button data-act="switch" data-tool="${t}" data-id="${id}">切换</button>`);
   if (!ac.live) bits.push(`<button class="ghost danger" data-act="forget" data-tool="${t}" data-id="${id}">删除</button>`);
   return bits.join("");
@@ -282,6 +285,7 @@ function render(ov) {
     if (tool.chatgpt_app) flags.push("ChatGPT.app 在跑");
     if (tool.cursor_app) flags.push("Cursor.app 在跑");
     if (tool.desync) flags.push("桌面/CLI 不一致");
+    if (tool.tool === "grokbot") flags.push("随 Cursor 账号");
     sec.innerHTML = `<div class="sec-head">
       <h2>${toolTitle(tool.tool)} <span class="meta">${flags.join(" · ") || "空闲"}</span></h2>
       <div class="actions">${toolActions(tool)}</div>

@@ -44,6 +44,7 @@ type AccountView struct {
 	LastProbedAt   int64          `json:"last_probed_at"`
 	LastCapturedAt int64          `json:"last_captured_at"`
 	Buckets        []quota.Bucket `json:"buckets,omitempty"`
+	Derived        bool           `json:"derived,omitempty"`
 }
 
 func remainingPct(class string, used float64) *float64 {
@@ -87,9 +88,66 @@ func (a *App) Overview() Overview {
 		for _, ac := range accs {
 			tv.Accounts = append(tv.Accounts, accountView(ac, p.StableID, now))
 		}
+		if t == adapter.Cursor {
+			cursor, bot := splitCursorBot(tv)
+			out.Tools = append(out.Tools, cursor)
+			if len(bot.Accounts) > 0 {
+				out.Tools = append(out.Tools, bot)
+			}
+			continue
+		}
 		out.Tools = append(out.Tools, tv)
 	}
 	return out
+}
+
+func splitCursorBot(tv ToolView) (ToolView, ToolView) {
+	bot := ToolView{
+		Tool:      "grokbot",
+		LiveID:    tv.LiveID,
+		Busy:      tv.Busy,
+		CursorApp: tv.CursorApp,
+	}
+	cursor := tv
+	cursor.Accounts = nil
+	for _, ac := range tv.Accounts {
+		var rest []quota.Bucket
+		var botB *quota.Bucket
+		for i := range ac.Buckets {
+			if ac.Buckets[i].ID == "bot" {
+				b := ac.Buckets[i]
+				botB = &b
+				continue
+			}
+			rest = append(rest, ac.Buckets[i])
+		}
+		ac.Buckets = rest
+		cursor.Accounts = append(cursor.Accounts, ac)
+		if botB == nil || ac.Desktop {
+			continue
+		}
+		used := botB.UsedPct
+		class := "ok"
+		switch {
+		case used >= 99.5:
+			class = "exhausted"
+		case used >= 90:
+			class = "soft"
+		}
+		bc := ac
+		bc.Tool = "cursor"
+		bc.Plan = "Grok Bot"
+		bc.Class = class
+		bc.UsedPct = used
+		bc.RemainingPct = remainingPct(class, used)
+		bc.ResetsAt = botB.ResetsAt
+		bc.CoolingUntil = 0
+		bc.Buckets = nil
+		bc.StaleCLI = false
+		bc.Derived = true
+		bot.Accounts = append(bot.Accounts, bc)
+	}
+	return cursor, bot
 }
 
 func visibleCooling(ac state.Account, now int64) int64 {

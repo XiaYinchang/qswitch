@@ -315,6 +315,47 @@ func TestProbeRecoveredAfterCooling(t *testing.T) {
 	}
 }
 
+func TestOverviewSplitsGrokBot(t *testing.T) {
+	a, _ := setup(t)
+	if err := a.State.UpsertAccount(state.Account{
+		Tool: "cursor", StableID: "u1", Email: "c@x.com", PlanHint: "ultra",
+		LastQuotaClass: "soft", LastUsedPct: 97.9,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.State.SetQuotaDetail("cursor", "u1", `[{"id":"auto","used_pct":50},{"id":"api","used_pct":97.9},{"id":"bot","used_pct":12,"resets_at":1789309692}]`); err != nil {
+		t.Fatal(err)
+	}
+	ov := a.Overview()
+	var cursor, bot *ToolView
+	for i := range ov.Tools {
+		switch ov.Tools[i].Tool {
+		case "cursor":
+			cursor = &ov.Tools[i]
+		case "grokbot":
+			bot = &ov.Tools[i]
+		}
+	}
+	if cursor == nil || len(cursor.Accounts) != 1 {
+		t.Fatalf("cursor %+v", cursor)
+	}
+	for _, b := range cursor.Accounts[0].Buckets {
+		if b.ID == "bot" {
+			t.Fatal("bot bucket still on cursor card")
+		}
+	}
+	if bot == nil || len(bot.Accounts) != 1 {
+		t.Fatalf("bot %+v", bot)
+	}
+	ac := bot.Accounts[0]
+	if !ac.Derived || ac.UsedPct != 12 || ac.Class != "ok" || ac.Plan != "Grok Bot" || ac.ResetsAt != 1789309692 {
+		t.Fatalf("bot account %+v", ac)
+	}
+	if ac.Tool != "cursor" || ac.StableID != "u1" {
+		t.Fatalf("probe target %+v", ac)
+	}
+}
+
 func TestProbeOKClearsCooling(t *testing.T) {
 	a, _ := setup(t)
 	if _, _, err := a.Capture(adapter.Codex); err != nil {
