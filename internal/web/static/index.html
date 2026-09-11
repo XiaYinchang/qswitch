@@ -116,8 +116,14 @@
     overflow: hidden;
     margin: 8px 0 4px;
   }
-  .bar > i { display: block; height: 100%; background: var(--ok); }
-  .bar.empty > i { width: 0; }
+  .bar > i {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background: var(--ok);
+    transition: width .35s ease, background-color .35s ease;
+  }
+  .bar.empty > i { width: 0; background: transparent; }
   .stats {
     display: flex;
     justify-content: space-between;
@@ -130,7 +136,7 @@
     margin-left: auto;
     text-align: right;
     white-space: nowrap;
-    min-width: 4.8em;
+    min-width: 5.6em;
   }
   .buckets { margin-top: 8px; display: grid; gap: 6px; }
   .bucket {
@@ -217,10 +223,35 @@ const api = (path, opt) => fetch(path, Object.assign({ cache: "no-store", header
   return j;
 });
 const clsLabel = { ok: "正常", soft: "接近用尽", exhausted: "已用尽", expired: "票失效", unknown: "未知" };
-function barColor(cls, rem) {
-  if (cls === "exhausted" || cls === "expired") return "var(--bad)";
-  if (cls === "soft" || (rem != null && rem < 20)) return "var(--soft)";
-  return "var(--ok)";
+function clampPct(n) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return null;
+  return Math.max(0, Math.min(100, x));
+}
+function mixRGB(a, b, t) {
+  const u = Math.max(0, Math.min(1, t));
+  return `rgb(${Math.round(a[0] + (b[0] - a[0]) * u)},${Math.round(a[1] + (b[1] - a[1]) * u)},${Math.round(a[2] + (b[2] - a[2]) * u)})`;
+}
+function usedColor(used) {
+  const p = clampPct(used);
+  if (p == null) return "transparent";
+  const g = [61, 214, 140], y = [230, 184, 77], r = [240, 113, 120];
+  if (p <= 50) return mixRGB(g, g, 0);
+  if (p <= 80) return mixRGB(g, y, (p - 50) / 30);
+  return mixRGB(y, r, (p - 80) / 20);
+}
+function barColor(used, cls) {
+  if (cls === "expired") return "var(--bad)";
+  if (cls === "exhausted") return "var(--bad)";
+  return usedColor(used);
+}
+function usedText(used) {
+  if (used == null) return "用量未知";
+  return `已用 ${used.toFixed(0)}%`;
+}
+function barStyle(used, cls) {
+  if (used == null) return "";
+  return `width:${used}%;background:${barColor(used, cls)}`;
 }
 function fmtTime(sec) {
   if (!sec) return "";
@@ -245,10 +276,9 @@ function bucketHTML(ac) {
   const rows = ac.buckets || [];
   if (!rows.length) return "";
   return `<div class="buckets">${rows.map(b => {
-    const used = Number(b.used_pct || 0);
-    const rem = Math.max(0, 100 - used);
+    const used = clampPct(b.used_pct) ?? 0;
     const cls = used >= 99.5 ? "exhausted" : used >= 90 ? "soft" : "ok";
-    return `<div class="bucket"><span class="name">${attr(bucketLabel(b.id))}</span><div class="bar"><i style="width:${rem}%;background:${barColor(cls, rem)}"></i></div><span class="rem">还剩 ${rem.toFixed(0)}%</span></div>`;
+    return `<div class="bucket"><span class="name">${attr(bucketLabel(b.id))}</span><div class="bar"><i style="${barStyle(used, cls)}"></i></div><span class="rem">${usedText(used)}</span></div>`;
   }).join("")}</div>`;
 }
 function toolTitle(t) {
@@ -296,9 +326,7 @@ function render(ov) {
       <div class="actions">${toolActions(tool)}</div>
     </div>`;
     (tool.accounts || []).forEach(ac => {
-      const rem = ac.remaining_pct;
-      const remText = rem == null ? "余量未知" : `还剩 ${rem.toFixed(0)}%`;
-      const width = rem == null ? 0 : rem;
+      const used = (ac.class === "unknown") ? null : clampPct(ac.used_pct);
       const card = document.createElement("div");
       const kinds = ["card"];
       if (ac.live) kinds.push("live");
@@ -321,8 +349,8 @@ function render(ov) {
         </div>
         ${ac.buckets && ac.buckets.length
           ? bucketHTML(ac) + (whenText(ac) ? `<div class="stats"><span>${whenText(ac)}</span><span></span></div>` : "")
-          : `<div class="bar${rem == null ? " empty" : ""}"><i style="width:${width}%;background:${barColor(ac.class, rem)}"></i></div>
-        <div class="stats"><span>${whenText(ac)}</span><span class="rem">${remText}</span></div>`}`;
+          : `<div class="bar${used == null ? " empty" : ""}"><i style="${barStyle(used, ac.class)}"></i></div>
+        <div class="stats"><span>${whenText(ac)}</span><span class="rem">${usedText(used)}</span></div>`}`;
       sec.appendChild(card);
     });
     if (!(tool.accounts || []).length) {
