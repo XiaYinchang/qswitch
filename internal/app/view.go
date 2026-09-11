@@ -28,21 +28,22 @@ type ToolView struct {
 }
 
 type AccountView struct {
-	Tool           string   `json:"tool"`
-	StableID       string   `json:"stable_id"`
-	Email          string   `json:"email"`
-	Plan           string   `json:"plan"`
-	Live           bool     `json:"live"`
-	Desktop        bool     `json:"desktop"`
-	Class          string   `json:"class"`
-	UsedPct        float64  `json:"used_pct"`
-	RemainingPct   *float64 `json:"remaining_pct"`
-	CoolingUntil   int64    `json:"cooling_until"`
-	ResetsAt       int64    `json:"resets_at"`
-	Incomplete     bool     `json:"incomplete"`
-	StaleCLI       bool     `json:"stale_cli"`
-	LastProbedAt   int64    `json:"last_probed_at"`
-	LastCapturedAt int64    `json:"last_captured_at"`
+	Tool           string         `json:"tool"`
+	StableID       string         `json:"stable_id"`
+	Email          string         `json:"email"`
+	Plan           string         `json:"plan"`
+	Live           bool           `json:"live"`
+	Desktop        bool           `json:"desktop"`
+	Class          string         `json:"class"`
+	UsedPct        float64        `json:"used_pct"`
+	RemainingPct   *float64       `json:"remaining_pct"`
+	CoolingUntil   int64          `json:"cooling_until"`
+	ResetsAt       int64          `json:"resets_at"`
+	Incomplete     bool           `json:"incomplete"`
+	StaleCLI       bool           `json:"stale_cli"`
+	LastProbedAt   int64          `json:"last_probed_at"`
+	LastCapturedAt int64          `json:"last_captured_at"`
+	Buckets        []quota.Bucket `json:"buckets,omitempty"`
 }
 
 func remainingPct(class string, used float64) *float64 {
@@ -126,6 +127,7 @@ func accountView(ac state.Account, liveID string, now int64) AccountView {
 		StaleCLI:       ac.StaleCLI,
 		LastProbedAt:   ac.LastProbedAt,
 		LastCapturedAt: ac.LastCapturedAt,
+		Buckets:        quota.DecodeBuckets(ac.QuotaDetail),
 	}
 }
 

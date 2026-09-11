@@ -1076,6 +1076,9 @@ func (a *App) probeAccount(ctx context.Context, tool adapter.Tool, id string, ga
 		backoff = now.Add(a.Cfg.Backoff()).Unix()
 	}
 	_ = a.State.UpdateQuota(string(tool), id, string(res.Class), res.UsedPct, res.ResetsAt, now.Unix(), now.Unix(), backoff)
+	if len(res.Buckets) > 0 {
+		_ = a.State.SetQuotaDetail(string(tool), id, quota.EncodeBuckets(res.Buckets))
+	}
 	_ = a.State.LogQuota(string(tool), id, string(res.Class), res.Source, res.UsedPct, now)
 	switch res.Class {
 	case quota.Exhausted:

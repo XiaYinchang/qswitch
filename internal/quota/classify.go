@@ -25,11 +25,18 @@ const (
 	KindCursor Kind = "cursor"
 )
 
+type Bucket struct {
+	ID       string  `json:"id"`
+	UsedPct  float64 `json:"used_pct"`
+	ResetsAt int64   `json:"resets_at,omitempty"`
+}
+
 type Result struct {
 	Class    Class
 	UsedPct  float64
 	ResetsAt int64 // unix seconds, 0 if unknown
 	Source   string
+	Buckets  []Bucket
 }
 
 func ClassifyHTTP(status int, body []byte) Result {
@@ -50,6 +57,11 @@ func Classify(kind Kind, status int, body []byte) Result {
 	if status == 200 && json.Valid(body) && len(body) > 0 {
 		var v any
 		if err := json.Unmarshal(body, &v); err == nil {
+			if kind == KindCursor {
+				if r, ok := classifyCursorPeriod(v); ok {
+					return r
+				}
+			}
 			r := classifyValue(v, "http", kind)
 			if r.Class != Unknown {
 				return r
@@ -134,6 +146,101 @@ func classifyValue(v any, source string, kind Kind) Result {
 func asMap(v any) map[string]any {
 	m, _ := v.(map[string]any)
 	return m
+}
+
+func classifyCursorPeriod(v any) (Result, bool) {
+	m := asMap(v)
+	if m == nil {
+		return Result{}, false
+	}
+	pu := asMap(m["planUsage"])
+	if pu == nil {
+		return Result{}, false
+	}
+	auto, autoOK := asFloat(pu["autoPercentUsed"])
+	api, apiOK := asFloat(pu["apiPercentUsed"])
+	total, totalOK := asFloat(pu["totalPercentUsed"])
+	if !autoOK && !apiOK && !totalOK {
+		return Result{}, false
+	}
+	resets := findReset(m)
+	var buckets []Bucket
+	if autoOK {
+		buckets = append(buckets, Bucket{ID: "auto", UsedPct: auto, ResetsAt: resets})
+	}
+	if apiOK {
+		buckets = append(buckets, Bucket{ID: "api", UsedPct: api, ResetsAt: resets})
+	}
+	used := 0.0
+	switch {
+	case autoOK && apiOK:
+		used = auto
+		if api > used {
+			used = api
+		}
+	case totalOK:
+		used = total
+	case autoOK:
+		used = auto
+	default:
+		used = api
+	}
+	class := OK
+	switch {
+	case autoOK && apiOK && auto >= 99.5 && api >= 99.5:
+		class = Exhausted
+	case (!autoOK || !apiOK) && used >= 99.5:
+		class = Exhausted
+	case (autoOK && auto >= 90) || (apiOK && api >= 90) || used >= 90:
+		class = Soft
+	}
+	if class == Exhausted && cursorOnDemandAvailable(v) {
+		class = Soft
+	}
+	return Result{Class: class, UsedPct: used, ResetsAt: resets, Source: "http", Buckets: buckets}, true
+}
+
+func ParseCursorBot(body []byte) (Bucket, bool) {
+	var m map[string]any
+	if json.Unmarshal(body, &m) != nil {
+		return Bucket{}, false
+	}
+	p, ok := asFloat(m["usagePercent"])
+	if !ok {
+		return Bucket{}, false
+	}
+	b := Bucket{ID: "bot", UsedPct: p}
+	if s, _ := m["nextResetTimestampUtc"].(string); s != "" {
+		if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
+			b.ResetsAt = t.Unix()
+		} else if t, err := time.Parse(time.RFC3339, s); err == nil {
+			b.ResetsAt = t.Unix()
+		}
+	}
+	return b, true
+}
+
+func EncodeBuckets(b []Bucket) string {
+	if len(b) == 0 {
+		return ""
+	}
+	raw, err := json.Marshal(b)
+	if err != nil {
+		return ""
+	}
+	return string(raw)
+}
+
+func DecodeBuckets(s string) []Bucket {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	var b []Bucket
+	if json.Unmarshal([]byte(s), &b) != nil {
+		return nil
+	}
+	return b
 }
 
 func codexPlanNode(v any) any {

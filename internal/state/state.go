@@ -87,7 +87,11 @@ CREATE TABLE IF NOT EXISTS quota_log (
 );
 CREATE INDEX IF NOT EXISTS quota_log_ts ON quota_log(ts);
 `)
-	return err
+	if err != nil {
+		return err
+	}
+	_, _ = d.sql.Exec(`ALTER TABLE accounts ADD COLUMN quota_detail TEXT`)
+	return nil
 }
 
 type Account struct {
@@ -102,6 +106,7 @@ type Account struct {
 	HTTPBackoffUntil                int64
 	LastCapturedAt                  int64
 	VaultGen                        int64
+	QuotaDetail                     string
 }
 
 func (d *DB) UpsertAccount(a Account) error {
@@ -124,15 +129,15 @@ ON CONFLICT(tool,stable_id) DO UPDATE SET
 func (d *DB) GetAccount(tool, id string) (Account, error) {
 	var a Account
 	var inc, st int
-	err := d.sql.QueryRow(`SELECT tool,stable_id,email,plan_hint,incomplete,stale_cli,IFNULL(cooling_until,0),IFNULL(last_quota_class,''),IFNULL(last_used_pct,0),IFNULL(last_resets_at,0),IFNULL(last_probed_at,0),IFNULL(last_http_at,0),IFNULL(http_backoff_until,0),IFNULL(last_captured_at,0),vault_gen FROM accounts WHERE tool=? AND stable_id=?`, tool, id).
-		Scan(&a.Tool, &a.StableID, &a.Email, &a.PlanHint, &inc, &st, &a.CoolingUntil, &a.LastQuotaClass, &a.LastUsedPct, &a.LastResetsAt, &a.LastProbedAt, &a.LastHTTPAt, &a.HTTPBackoffUntil, &a.LastCapturedAt, &a.VaultGen)
+	err := d.sql.QueryRow(`SELECT tool,stable_id,email,plan_hint,incomplete,stale_cli,IFNULL(cooling_until,0),IFNULL(last_quota_class,''),IFNULL(last_used_pct,0),IFNULL(last_resets_at,0),IFNULL(last_probed_at,0),IFNULL(last_http_at,0),IFNULL(http_backoff_until,0),IFNULL(last_captured_at,0),vault_gen,IFNULL(quota_detail,'') FROM accounts WHERE tool=? AND stable_id=?`, tool, id).
+		Scan(&a.Tool, &a.StableID, &a.Email, &a.PlanHint, &inc, &st, &a.CoolingUntil, &a.LastQuotaClass, &a.LastUsedPct, &a.LastResetsAt, &a.LastProbedAt, &a.LastHTTPAt, &a.HTTPBackoffUntil, &a.LastCapturedAt, &a.VaultGen, &a.QuotaDetail)
 	a.Incomplete = inc == 1
 	a.StaleCLI = st == 1
 	return a, err
 }
 
 func (d *DB) ListAccounts(tool string) ([]Account, error) {
-	q := `SELECT tool,stable_id,email,plan_hint,incomplete,stale_cli,IFNULL(cooling_until,0),IFNULL(last_quota_class,''),IFNULL(last_used_pct,0),IFNULL(last_resets_at,0),IFNULL(last_probed_at,0),IFNULL(last_http_at,0),IFNULL(http_backoff_until,0),IFNULL(last_captured_at,0),vault_gen FROM accounts`
+	q := `SELECT tool,stable_id,email,plan_hint,incomplete,stale_cli,IFNULL(cooling_until,0),IFNULL(last_quota_class,''),IFNULL(last_used_pct,0),IFNULL(last_resets_at,0),IFNULL(last_probed_at,0),IFNULL(last_http_at,0),IFNULL(http_backoff_until,0),IFNULL(last_captured_at,0),vault_gen,IFNULL(quota_detail,'') FROM accounts`
 	var args []any
 	if tool != "" {
 		q += ` WHERE tool=?`
@@ -147,7 +152,7 @@ func (d *DB) ListAccounts(tool string) ([]Account, error) {
 	for rows.Next() {
 		var a Account
 		var inc, st int
-		if err := rows.Scan(&a.Tool, &a.StableID, &a.Email, &a.PlanHint, &inc, &st, &a.CoolingUntil, &a.LastQuotaClass, &a.LastUsedPct, &a.LastResetsAt, &a.LastProbedAt, &a.LastHTTPAt, &a.HTTPBackoffUntil, &a.LastCapturedAt, &a.VaultGen); err != nil {
+		if err := rows.Scan(&a.Tool, &a.StableID, &a.Email, &a.PlanHint, &inc, &st, &a.CoolingUntil, &a.LastQuotaClass, &a.LastUsedPct, &a.LastResetsAt, &a.LastProbedAt, &a.LastHTTPAt, &a.HTTPBackoffUntil, &a.LastCapturedAt, &a.VaultGen, &a.QuotaDetail); err != nil {
 			return nil, err
 		}
 		a.Incomplete = inc == 1
@@ -165,6 +170,11 @@ func (d *DB) DeleteAccount(tool, id string) error {
 func (d *DB) UpdateQuota(tool, id, class string, pct float64, resets, probed, httpAt, backoff int64) error {
 	_, err := d.sql.Exec(`UPDATE accounts SET last_quota_class=?, last_used_pct=?, last_resets_at=?, last_probed_at=?, last_http_at=?, http_backoff_until=? WHERE tool=? AND stable_id=?`,
 		class, pct, resets, probed, httpAt, backoff, tool, id)
+	return err
+}
+
+func (d *DB) SetQuotaDetail(tool, id, detail string) error {
+	_, err := d.sql.Exec(`UPDATE accounts SET quota_detail=? WHERE tool=? AND stable_id=?`, detail, tool, id)
 	return err
 }
 

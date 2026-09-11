@@ -58,6 +58,8 @@ func TestClassifyByKind(t *testing.T) {
 		{"grok 100% prepaid left", KindGrok, 200, `{"config":{"creditUsagePercent":100,"prepaidBalance":{"val":500}}}`, Soft, 100},
 		{"grok period only", KindGrok, 200, `{"config":{"currentPeriod":{"end":"2026-08-30T14:04:34Z"}}}`, Unknown, 0},
 		{"cursor remaining 0", KindCursor, 200, `{"planUsage":{"remaining":0,"limit":20}}`, Exhausted, 100},
+		{"cursor auto vs api", KindCursor, 200, `{"billingCycleEnd":"1789568819000","planUsage":{"autoPercentUsed":49.5,"apiPercentUsed":97.9,"totalPercentUsed":56.4,"limit":40000}}`, Soft, 97.9},
+		{"cursor both gone", KindCursor, 200, `{"planUsage":{"autoPercentUsed":100,"apiPercentUsed":100,"totalPercentUsed":100}}`, Exhausted, 100},
 		{"cursor on-demand still", KindCursor, 200, `{"planUsage":{"remaining":0,"limit":20,"totalPercentUsed":100},"spendLimitUsage":{"individualLimit":1000,"individualUsed":10,"individualRemaining":990}}`, Soft, 100},
 		{"cursor spend hit", KindCursor, 200, `{"planUsage":{"remaining":0,"limit":20},"spendLimitUsage":{"individualLimit":1000,"individualUsed":1000,"individualRemaining":0}}`, Exhausted, 100},
 		{"cursor high load", KindCursor, 503, `{"error":"ERROR_RESOURCE_EXHAUSTED","details":{"title":"High Load"}}`, Unknown, 0},

@@ -240,7 +240,8 @@ func (s *Server) postProbe(w http.ResponseWriter, r *http.Request) {
 	}
 	res := s.App.ProbeAccount(ctx, t, req.ID)
 	writeJSON(w, 200, map[string]any{
-		"class": res.Class, "used_pct": res.UsedPct, "resets_at": res.ResetsAt, "source": res.Source,
+		"buckets": res.Buckets,
+		"class":   res.Class, "used_pct": res.UsedPct, "resets_at": res.ResetsAt, "source": res.Source,
 	})
 }
 

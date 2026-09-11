@@ -65,7 +65,36 @@ func (h HTTP) Cursor(ctx context.Context, accessToken string) (Result, error) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Connect-Protocol-Version", "1")
 	req.Header.Set("User-Agent", "qswitch/0.1")
-	return h.do(KindCursor, req)
+	res, err := h.do(KindCursor, req)
+	if bot, ok := h.cursorBot(ctx, accessToken); ok {
+		res.Buckets = append(res.Buckets, bot)
+	}
+	return res, err
+}
+
+func (h HTTP) cursorBot(ctx context.Context, accessToken string) (Bucket, bool) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api2.cursor.sh/aiserver.v1.DashboardService/GetSandUsageStatus", bytes.NewReader([]byte("{}")))
+	if err != nil {
+		return Bucket{}, false
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Connect-Protocol-Version", "1")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "qswitch/0.1")
+	if err := checkHost(req.URL); err != nil {
+		return Bucket{}, false
+	}
+	resp, err := h.client().Do(req)
+	if err != nil {
+		return Bucket{}, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return Bucket{}, false
+	}
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	return ParseCursorBot(raw)
 }
 
 func (h HTTP) do(kind Kind, req *http.Request) (Result, error) {

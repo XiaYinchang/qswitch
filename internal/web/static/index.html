@@ -126,6 +126,17 @@
     font-size: 12px;
     font-variant-numeric: tabular-nums;
   }
+  .buckets { margin-top: 8px; display: grid; gap: 6px; }
+  .bucket {
+    display: grid;
+    grid-template-columns: 72px 1fr auto;
+    gap: 8px;
+    align-items: center;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .bucket .name { color: var(--text); }
+  .bucket .bar { margin: 0; height: 6px; }
   .badge {
     font-size: 11px;
     font-weight: 500;
@@ -218,6 +229,23 @@ function whenText(ac) {
   const label = ac.class === "exhausted" ? "冷却到" : "重置于";
   return `${label} ${fmtTime(ts)}`;
 }
+function bucketLabel(id) {
+  if (id === "auto") return "Auto";
+  if (id === "api") return "高级模型";
+  if (id === "bot") return "Bot";
+  return id;
+}
+function bucketHTML(ac) {
+  const rows = ac.buckets || [];
+  if (!rows.length) return "";
+  return `<div class="buckets">${rows.map(b => {
+    const used = Number(b.used_pct || 0);
+    const rem = Math.max(0, 100 - used);
+    const cls = used >= 99.5 ? "exhausted" : used >= 90 ? "soft" : "ok";
+    const when = b.resets_at && b.id === "bot" ? ` · ${fmtTime(b.resets_at)} 重置` : "";
+    return `<div class="bucket"><span class="name">${attr(bucketLabel(b.id))}</span><div class="bar"><i style="width:${rem}%;background:${barColor(cls, rem)}"></i></div><span>还剩 ${rem.toFixed(0)}%${when}</span></div>`;
+  }).join("")}</div>`;
+}
 function toolTitle(t) {
   if (t === "codex") return "ChatGPT / Codex";
   if (t === "grok") return "Grok";
@@ -283,8 +311,10 @@ function render(ov) {
           </div>
           ${acts ? `<div class="actions">${acts}</div>` : ""}
         </div>
-        <div class="bar${rem == null ? " empty" : ""}"><i style="width:${width}%;background:${barColor(ac.class, rem)}"></i></div>
-        <div class="stats"><span>${remText}${used ? " · " + used : ""}</span><span>${whenText(ac)}</span></div>`;
+        ${ac.buckets && ac.buckets.length
+          ? bucketHTML(ac) + (whenText(ac) ? `<div class="stats"><span></span><span>${whenText(ac)}</span></div>` : "")
+          : `<div class="bar${rem == null ? " empty" : ""}"><i style="width:${width}%;background:${barColor(ac.class, rem)}"></i></div>
+        <div class="stats"><span>${remText}${used ? " · " + used : ""}</span><span>${whenText(ac)}</span></div>`}`;
       sec.appendChild(card);
     });
     if (!(tool.accounts || []).length) {
