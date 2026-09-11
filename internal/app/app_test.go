@@ -482,6 +482,70 @@ func TestProbeRecoveredGrokWaitsReset(t *testing.T) {
 	}
 }
 
+func TestProbeLocalGrokIgnoresTUISessionDump(t *testing.T) {
+	a, _ := setup(t)
+	writeGrokLive(t, a.UserHome, "pid-g", "g@x.com")
+	if _, _, err := a.Capture(adapter.Grok); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(a.UserHome, ".grok", "logs"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	billing := `{"msg":"billing: fetched credits config","ctx":{"config":{"creditUsagePercent":7.0,"currentPeriod":{"end":"2026-09-13T14:04:34Z"}}}}` + "\n"
+	if err := os.WriteFile(filepath.Join(a.UserHome, ".grok", "logs", "unified.jsonl"), []byte(billing), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sess := filepath.Join(a.UserHome, ".grok", "sessions", "workspace", "updates.jsonl")
+	if err := os.MkdirAll(filepath.Dir(sess), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dump := `{"method":"session/update","params":{"update":{"content":[{"text":"usage balance exhausted status 402 payment required"}]}}}` + "\n"
+	if err := os.WriteFile(sess, []byte(dump), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a.ProbeLocal(adapter.Grok)
+	ac, err := a.State.GetAccount("grok", "pid-g")
+	if err != nil || ac.LastQuotaClass != "ok" || ac.LastUsedPct != 7 {
+		t.Fatalf("class=%s pct=%v err=%v", ac.LastQuotaClass, ac.LastUsedPct, err)
+	}
+}
+
+func TestProbeLocalGrokDoesNotOverwriteHTTPWithRequest402(t *testing.T) {
+	a, _ := setup(t)
+	writeGrokLive(t, a.UserHome, "pid-g", "g@x.com")
+	if _, _, err := a.Capture(adapter.Grok); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	a.Clock = clock.Fixed{T: now}
+	if err := a.State.UpdateQuota("grok", "pid-g", "ok", 6, now.Add(24*time.Hour).Unix(), now.Unix(), now.Unix(), 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(a.UserHome, ".grok", "logs"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fail := `{"msg":"shell.turn.inference_failed","ctx":{"message":"API error (status 402 Payment Required): Grok Build usage balance exhausted"}}` + "\n"
+	if err := os.WriteFile(filepath.Join(a.UserHome, ".grok", "logs", "unified.jsonl"), []byte(fail), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a.ProbeLocal(adapter.Grok)
+	ac, err := a.State.GetAccount("grok", "pid-g")
+	if err != nil || ac.LastQuotaClass != "ok" || ac.LastUsedPct != 6 {
+		t.Fatalf("class=%s pct=%v err=%v", ac.LastQuotaClass, ac.LastUsedPct, err)
+	}
+}
+
+func writeGrokLive(t *testing.T, home, id, email string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(home, ".grok"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	auth := []byte(`{"https://auth.x.ai::abc":{"principal_id":"` + id + `","email":"` + email + `","key":"k","refresh_token":"rt"}}`)
+	if err := os.WriteFile(filepath.Join(home, ".grok", "auth.json"), auth, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestProbeLocalIgnoresTPM429(t *testing.T) {
 	a, _ := setup(t)
 	if _, _, err := a.Capture(adapter.Codex); err != nil {

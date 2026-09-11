@@ -94,6 +94,16 @@ func TestTailGrok(t *testing.T) {
 			t.Fatalf("got ok=%v class=%s pct=%v", ok, r.Class, r.UsedPct)
 		}
 	})
+	t.Run("request 402 does not beat low billing percent", func(t *testing.T) {
+		p := writeJSONL(t,
+			`{"msg":"billing: fetched credits config","ctx":{"config":{"creditUsagePercent":6.0,"currentPeriod":{"end":"2026-09-13T14:04:34Z"}}}}`,
+			`{"msg":"shell.turn.inference_failed","ctx":{"message":"API error (status 402 Payment Required): Grok Build usage balance exhausted"}}`,
+		)
+		r, ok := Tail(KindGrok, p)
+		if !ok || r.Class != OK || r.UsedPct != 6 {
+			t.Fatalf("got ok=%v class=%s pct=%v", ok, r.Class, r.UsedPct)
+		}
+	})
 }
 
 func TestTailCursor(t *testing.T) {

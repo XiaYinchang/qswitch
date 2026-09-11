@@ -59,6 +59,9 @@ func Tail(kind Kind, path string) (Result, bool) {
 }
 
 func classifyTail(kind Kind, text string) (Result, bool) {
+	if kind == KindGrok {
+		return classifyGrokTail(text)
+	}
 	lines := strings.Split(text, "\n")
 	for i := len(lines) - 1; i >= 0; i-- {
 		line := strings.TrimSpace(lines[i])
@@ -68,10 +71,6 @@ func classifyTail(kind Kind, text string) (Result, bool) {
 		switch kind {
 		case KindCodex:
 			if r, ok := classifyCodexLine(line); ok {
-				return r, true
-			}
-		case KindGrok:
-			if r, ok := classifyGrokLine(line); ok {
 				return r, true
 			}
 		case KindCursor:
@@ -85,6 +84,33 @@ func classifyTail(kind Kind, text string) (Result, bool) {
 		}
 	}
 	return Result{Class: Unknown, Source: "jsonl"}, false
+}
+
+func classifyGrokTail(text string) (Result, bool) {
+	var billing, fail Result
+	var hasBilling, hasFail bool
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		r, ok := classifyGrokLine(line)
+		if !ok {
+			continue
+		}
+		if r.Source == "jsonl_402" {
+			fail, hasFail = r, true
+			continue
+		}
+		billing, hasBilling = r, true
+	}
+	if hasFail && (!hasBilling || billing.UsedPct >= 90) {
+		return fail, true
+	}
+	if hasBilling {
+		return billing, true
+	}
+	return Result{}, false
 }
 
 func classifyCodexLine(line string) (Result, bool) {
@@ -114,6 +140,8 @@ func classifyGrokLine(line string) (Result, bool) {
 	if json.Unmarshal([]byte(line), &obj) != nil {
 		return Result{}, false
 	}
+	// CLI unified.jsonl only. TUI session dumps have method/params and will
+	// contain source text like "usage balance exhausted".
 	msg, _ := obj["msg"].(string)
 	if msg == "" {
 		return Result{}, false

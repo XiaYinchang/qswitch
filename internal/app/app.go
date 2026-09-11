@@ -674,6 +674,17 @@ func (a *App) ProbeLocal(tool adapter.Tool) {
 	if !ok {
 		return
 	}
+	if tool == adapter.Grok && r.Class == quota.Exhausted && r.Source == "jsonl_402" {
+		acc, err := a.State.GetAccount(string(tool), p.StableID)
+		if err == nil {
+			switch quota.Class(acc.LastQuotaClass) {
+			case quota.OK, quota.Soft:
+				if acc.LastUsedPct < 90 && acc.LastHTTPAt > 0 {
+					return
+				}
+			}
+		}
+	}
 	_ = a.State.UpdateQuotaSnapshot(string(tool), p.StableID, string(r.Class), r.UsedPct, r.ResetsAt, a.now().Unix())
 	_ = a.State.LogQuota(string(tool), p.StableID, string(r.Class), r.Source, r.UsedPct, a.now())
 	if r.Class == quota.Exhausted {
@@ -710,18 +721,11 @@ func (a *App) localQuotaFiles(tool adapter.Tool) []string {
 		}
 		return []string{p}
 	case adapter.Grok:
-		var out []string
 		u := filepath.Join(home, ".grok", "logs", "unified.jsonl")
 		if st, err := os.Stat(u); err == nil && !st.IsDir() && st.Size() > 0 {
-			out = append(out, u)
+			return []string{u}
 		}
-		p, _, err := quota.NewestJSONLMatch(filepath.Join(home, ".grok", "sessions"), func(path string) bool {
-			return filepath.Base(path) == "updates.jsonl"
-		})
-		if err == nil && p != "" {
-			out = append(out, p)
-		}
-		return out
+		return nil
 	case adapter.Cursor:
 		p, _, err := quota.NewestJSONLMatch(filepath.Join(home, ".cursor", "projects"), func(path string) bool {
 			return strings.Contains(path, "agent-transcripts")
