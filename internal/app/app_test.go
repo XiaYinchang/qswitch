@@ -527,6 +527,14 @@ func TestIsolatedCodexEnvDropsParentHome(t *testing.T) {
 	}
 }
 
+func TestIsolatedGrokEnvDropsParentHome(t *testing.T) {
+	got := isolatedGrokEnv([]string{"PATH=/bin", "GROK_HOME=/old", "FOO=bar"}, "/tmp/new")
+	joined := strings.Join(got, ",")
+	if strings.Contains(joined, "GROK_HOME=/old") || !strings.Contains(joined, "GROK_HOME=/tmp/new") {
+		t.Fatalf("%v", got)
+	}
+}
+
 func TestLoginCodexEnrollsWithoutTouchingLive(t *testing.T) {
 	a, n := setup(t)
 	if _, _, err := a.Capture(adapter.Codex); err != nil {
@@ -577,6 +585,69 @@ func TestLoginCodexEnrollsWithoutTouchingLive(t *testing.T) {
 	if !found {
 		t.Fatalf("notify %v", n.Msgs)
 	}
+}
+
+func TestLoginGrokEnrollsWithoutTouchingLive(t *testing.T) {
+	a, n := setup(t)
+	os.MkdirAll(filepath.Join(a.UserHome, ".grok"), 0o700)
+	liveAuth := []byte(`{"https://auth.x.ai::abc":{"principal_id":"pid-live","email":"live@x.com","key":"k","refresh_token":"rt"}}`)
+	live := filepath.Join(a.UserHome, ".grok", "auth.json")
+	if err := os.WriteFile(live, liveAuth, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := a.Capture(adapter.Grok); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(live)
+	idTok := grokJWT("new@x.com", "pid-new")
+	polls := 0
+	a.HTTP.Client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Path {
+		case "/oauth2/device/code":
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"device_code":"dc","user_code":"AB","verification_uri":"https://accounts.x.ai/oauth2/device","expires_in":900,"interval":1}`)), Header: make(http.Header), Request: req}, nil
+		case "/oauth2/token":
+			polls++
+			if polls < 2 {
+				return &http.Response{StatusCode: 400, Body: io.NopCloser(strings.NewReader(`{"error":"authorization_pending"}`)), Header: make(http.Header), Request: req}, nil
+			}
+			body := `{"access_token":"` + idTok + `","refresh_token":"rt-new","expires_in":3600}`
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header), Request: req}, nil
+		case "/oauth2/userinfo":
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"email":"new@x.com"}`)), Header: make(http.Header), Request: req}, nil
+		default:
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{}`)), Header: make(http.Header), Request: req}, nil
+		}
+	})}
+	id, err := a.LoginGrok(context.Background(), func(string, string) {})
+	if err != nil || id.StableID != "pid-new" || id.Email != "new@x.com" {
+		t.Fatalf("%+v %v", id, err)
+	}
+	after, _ := os.ReadFile(live)
+	if !bytes.Equal(before, after) {
+		t.Fatal("login mutated live auth.json")
+	}
+	p, _ := a.State.GetPointer("grok")
+	if p.StableID != "pid-live" {
+		t.Fatalf("pointer moved %s", p.StableID)
+	}
+	if _, err := a.State.GetAccount("grok", "pid-new"); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, m := range n.Msgs {
+		if strings.Contains(m, "收录新账号") && strings.Contains(m, "new@x.com") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("notify %v", n.Msgs)
+	}
+}
+
+func grokJWT(email, pid string) string {
+	h := "eyJhbGciOiJub25lIn0"
+	payload := []byte(`{"principal_id":"` + pid + `","sub":"` + pid + `","email":"` + email + `","client_id":"abc"}`)
+	return h + "." + b64u(payload) + ".x"
 }
 
 func jwtWS(email, user, account, plan string) string {

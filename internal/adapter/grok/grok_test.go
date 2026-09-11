@@ -85,6 +85,45 @@ func TestNeedsRefreshAndApply(t *testing.T) {
 	}
 }
 
+func TestBlobFromTokens(t *testing.T) {
+	t.Setenv("QSWITCH_IN_TEST", "1")
+	h := "eyJhbGciOiJub25lIn0"
+	payload := []byte(`{"principal_id":"pid-9","sub":"pid-9","email":"n@x.com","client_id":"abc"}`)
+	tok := quota.GrokTokens{AccessToken: h + "." + b64u(payload) + ".x", RefreshToken: "rt", ExpiresIn: 3600}
+	blob, err := BlobFromTokens(tok, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	af, err := ReadAuth(blob)
+	if err != nil || af.PrincipalID != "pid-9" || af.Email != "n@x.com" || af.Refresh != "rt" || af.Key == "" {
+		t.Fatalf("%+v %v", af, err)
+	}
+	if blob.Identity.StableID != "pid-9" {
+		t.Fatalf("id %+v", blob.Identity)
+	}
+}
+
+func b64u(raw []byte) string {
+	const tbl = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+	out := make([]byte, 0, (len(raw)+2)/3*4)
+	for i := 0; i < len(raw); i += 3 {
+		var n uint32
+		remain := len(raw) - i
+		switch {
+		case remain >= 3:
+			n = uint32(raw[i])<<16 | uint32(raw[i+1])<<8 | uint32(raw[i+2])
+			out = append(out, tbl[n>>18], tbl[(n>>12)&63], tbl[(n>>6)&63], tbl[n&63])
+		case remain == 2:
+			n = uint32(raw[i])<<16 | uint32(raw[i+1])<<8
+			out = append(out, tbl[n>>18], tbl[(n>>12)&63], tbl[(n>>6)&63])
+		default:
+			n = uint32(raw[i]) << 16
+			out = append(out, tbl[n>>18], tbl[(n>>12)&63])
+		}
+	}
+	return string(out)
+}
+
 func TestMergeLiveTokensSameUser(t *testing.T) {
 	t.Setenv("QSWITCH_IN_TEST", "1")
 	slot := "https://auth.x.ai::abc"
@@ -100,7 +139,7 @@ func TestMergeLiveTokensSameUser(t *testing.T) {
 	live, _ := json.Marshal(map[string]any{
 		slot: map[string]any{
 			"principal_id": "pid-1", "user_id": "pid-1", "key": "live-k", "refresh_token": "rt-live",
-			"expires_at": time.Now().Add(5 * time.Hour).UTC().Format(time.RFC3339Nano),
+			"expires_at":  time.Now().Add(5 * time.Hour).UTC().Format(time.RFC3339Nano),
 			"oidc_issuer": "https://auth.x.ai", "oidc_client_id": "abc",
 		},
 	})

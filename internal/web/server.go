@@ -31,12 +31,13 @@ type Server struct {
 }
 
 type loginSess struct {
-	ID       string
-	Start    quota.CodexDeviceStart
-	Status   string
-	Identity adapter.Identity
-	Err      string
-	cancel   context.CancelFunc
+	ID        string
+	Start     quota.CodexDeviceStart
+	GrokStart quota.GrokDeviceStart
+	Status    string
+	Identity  adapter.Identity
+	Err       string
+	cancel    context.CancelFunc
 }
 
 func New(a *app.App, addr string) *Server {
@@ -51,8 +52,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/forget", s.postForget)
 	mux.HandleFunc("POST /api/switch", s.postSwitch)
 	mux.HandleFunc("POST /api/login/codex", s.postLoginCodex)
-	mux.HandleFunc("GET /api/login/codex", s.getLoginCodex)
+	mux.HandleFunc("GET /api/login/codex", s.getLogin)
 	mux.HandleFunc("POST /api/login/codex/cancel", s.postLoginCancel)
+	mux.HandleFunc("POST /api/login/grok", s.postLoginGrok)
+	mux.HandleFunc("GET /api/login/grok", s.getLogin)
+	mux.HandleFunc("POST /api/login/grok/cancel", s.postLoginCancel)
 	mux.HandleFunc("GET /", s.static)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !localRequest(r) {
@@ -326,7 +330,48 @@ func (s *Server) postLoginCodex(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) getLoginCodex(w http.ResponseWriter, r *http.Request) {
+func (s *Server) postLoginGrok(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(context.Background(), 16*time.Minute)
+	st, err := s.App.BeginGrokDeviceLogin(ctx)
+	if err != nil {
+		cancel()
+		writeErr(w, 400, err.Error())
+		return
+	}
+	id := newID()
+	sess := &loginSess{ID: id, GrokStart: st, Status: "pending", cancel: cancel}
+	s.mu.Lock()
+	s.logins[id] = sess
+	s.mu.Unlock()
+	go func() {
+		ident, err := s.App.CompleteGrokDeviceLogin(ctx, st)
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		cur := s.logins[id]
+		if cur == nil {
+			return
+		}
+		if err != nil {
+			cur.Status = "error"
+			cur.Err = err.Error()
+			return
+		}
+		cur.Status = "ok"
+		cur.Identity = ident
+	}()
+	url := st.VerifyURL
+	if url == "" {
+		url = quota.GrokDeviceURL
+	}
+	writeJSON(w, 200, map[string]any{
+		"id":         id,
+		"user_code":  st.UserCode,
+		"url":        url,
+		"expires_at": st.ExpiresAt.UTC().Format(time.RFC3339),
+	})
+}
+
+func (s *Server) getLogin(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("id")
 	s.mu.Lock()
 	sess := s.logins[id]

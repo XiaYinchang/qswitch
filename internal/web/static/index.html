@@ -182,8 +182,8 @@
 </header>
 <main id="root"></main>
 <dialog id="loginDlg">
-  <h3>ChatGPT Device Code 加号</h3>
-  <p>用浏览器打开链接，输入一次性代码。不要在 ChatGPT.app 里换号，也不要 logout。</p>
+  <h3 id="loginTitle">Device Code 加号</h3>
+  <p id="loginHint">用浏览器打开链接，输入一次性代码。不要在当前客户端里换号或 logout。</p>
   <p><a id="loginUrl" target="_blank" rel="noopener"></a></p>
   <div class="code" id="loginCode"></div>
   <p class="msg" id="loginMsg">等你在浏览器里确认…</p>
@@ -232,6 +232,7 @@ function toolActions(tool) {
   let html = `<button data-act="probe-tool" data-tool="${t}">刷新用量</button>`;
   html += `<button data-act="capture" data-tool="${t}">收录</button>`;
   if (tool.tool === "codex") html += `<button class="primary" data-act="login-codex">加号</button>`;
+  if (tool.tool === "grok") html += `<button class="primary" data-act="login-grok">加号</button>`;
   return html;
 }
 function cardActions(ac) {
@@ -328,29 +329,38 @@ async function onClick(e) {
       await api("/api/switch", { method: "POST", body: JSON.stringify({ tool, id, kill_cli: kill }) });
       await load();
       msg("已写入新号。新开的进程才会用它。");
-    } else if (act === "login-codex") {
-      startLogin();
+    } else if (act === "login-codex" || act === "login-grok") {
+      startLogin(act === "login-grok" ? "grok" : "codex");
     }
   } catch (err) {
     b.disabled = false;
     msg(err.message, true);
   }
 }
-let loginTimer = null, loginId = "";
-async function startLogin() {
-  const r = await api("/api/login/codex", { method: "POST", body: "{}" });
+let loginTimer = null, loginId = "", loginTool = "codex";
+async function startLogin(tool) {
+  loginTool = tool;
+  $("loginTitle").textContent = tool === "grok" ? "Grok Device Code 加号" : "ChatGPT Device Code 加号";
+  $("loginHint").textContent = tool === "grok"
+    ? "用浏览器打开链接，输入一次性代码。不要在当前 grok 里换号，也不要 logout。"
+    : "用浏览器打开链接，输入一次性代码。不要在 ChatGPT.app 里换号，也不要 logout。";
+  $("loginUrl").removeAttribute("href");
+  $("loginUrl").textContent = "";
+  $("loginCode").textContent = "";
+  $("loginMsg").textContent = "正在向官方申请一次性代码…";
+  $("loginDlg").showModal();
+  const r = await api("/api/login/" + tool, { method: "POST", body: "{}" });
   loginId = r.id;
   $("loginUrl").href = r.url;
   $("loginUrl").textContent = r.url;
   $("loginCode").textContent = r.user_code;
   $("loginMsg").textContent = "等你在浏览器里确认…";
-  $("loginDlg").showModal();
   loginTimer = setInterval(pollLogin, 2000);
 }
 async function pollLogin() {
   if (!loginId) return;
   try {
-    const r = await api("/api/login/codex?id=" + encodeURIComponent(loginId));
+    const r = await api("/api/login/" + loginTool + "?id=" + encodeURIComponent(loginId));
     if (r.status === "ok") {
       clearInterval(loginTimer);
       $("loginDlg").close();
@@ -364,7 +374,7 @@ async function pollLogin() {
 }
 $("loginCancel").onclick = async () => {
   clearInterval(loginTimer);
-  if (loginId) await api("/api/login/codex/cancel", { method: "POST", body: JSON.stringify({ id: loginId }) }).catch(() => {});
+  if (loginId) await api("/api/login/" + loginTool + "/cancel", { method: "POST", body: JSON.stringify({ id: loginId }) }).catch(() => {});
   $("loginDlg").close();
 };
 $("reload").onclick = load;

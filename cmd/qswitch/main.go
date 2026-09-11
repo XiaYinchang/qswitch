@@ -132,8 +132,8 @@ func run(args []string) int {
 		return setAuto(a, rest, false)
 	case "login":
 		if len(rest) < 1 {
-			fmt.Fprintln(os.Stderr, "usage: qswitch login codex")
-			fmt.Fprintln(os.Stderr, "  走本机官方 `codex login --device-auth`，不登出当前 ChatGPT 会话。")
+			fmt.Fprintln(os.Stderr, "usage: qswitch login codex|grok")
+			fmt.Fprintln(os.Stderr, "  走本机官方 Device Code，不登出当前会话。")
 			return 2
 		}
 		t, err := adapter.ParseTool(rest[0])
@@ -141,18 +141,29 @@ func run(args []string) int {
 			fmt.Fprintln(os.Stderr, err)
 			return 2
 		}
-		if t != adapter.Codex {
-			fmt.Fprintln(os.Stderr, "only `qswitch login codex` is implemented (ChatGPT device code)")
-			return 2
-		}
-		fmt.Fprintln(os.Stderr, "加号使用官方 Codex Device Code。不要在 ChatGPT.app 里换号，不要跑 codex logout。")
 		ctx, cancel := context.WithTimeout(context.Background(), 16*time.Minute)
 		defer cancel()
-		id, err := a.LoginCodex(ctx, func(code, url string) {
-			fmt.Printf("\nFollow these steps to sign in with ChatGPT using device code authorization:\n\n1. Open this link in your browser and sign in to your account\n   %s\n\n2. Enter this one-time code (expires in 15 minutes)\n   %s\n\nContinue only if you started this login in qswitch. If a website or another person gave you this code, cancel.\n", url, code)
-		})
-		if err != nil {
-			return fail(err)
+		var (
+			id   adapter.Identity
+			lerr error
+		)
+		switch t {
+		case adapter.Codex:
+			fmt.Fprintln(os.Stderr, "加号使用官方 Codex Device Code。不要在 ChatGPT.app 里换号，不要跑 codex logout。")
+			id, lerr = a.LoginCodex(ctx, func(code, url string) {
+				fmt.Printf("\nFollow these steps to sign in with ChatGPT using device code authorization:\n\n1. Open this link in your browser and sign in to your account\n   %s\n\n2. Enter this one-time code (expires in 15 minutes)\n   %s\n\nContinue only if you started this login in qswitch. If a website or another person gave you this code, cancel.\n", url, code)
+			})
+		case adapter.Grok:
+			fmt.Fprintln(os.Stderr, "加号使用官方 Grok Device Code。不要在当前 grok 里换号，不要跑 grok logout。")
+			id, lerr = a.LoginGrok(ctx, func(code, url string) {
+				fmt.Printf("\nTo sign in, open this URL in your browser:\n   %s\n\nThen enter this code:\n   %s\n\nContinue only if you started this login in qswitch. If a website or another person gave you this code, cancel.\n", url, code)
+			})
+		default:
+			fmt.Fprintln(os.Stderr, "only `qswitch login codex` and `qswitch login grok` are implemented")
+			return 2
+		}
+		if lerr != nil {
+			return fail(lerr)
 		}
 		fmt.Printf("enrolled %s %s %s (live auth.json untouched)\n", t, id.Email, id.StableID)
 		return 0
@@ -269,6 +280,7 @@ func usage() {
   qswitch init
   qswitch capture [--tool codex|grok|cursor]
   qswitch login codex          # Device Code 加号，不登出当前 ChatGPT 会话
+  qswitch login grok           # Device Code 加号，不登出当前 Grok 会话
   qswitch list [--tool ...]
   qswitch status
   qswitch probe [--tool codex|grok|cursor]

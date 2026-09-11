@@ -77,6 +77,7 @@ type GrokTokens struct {
 	AccessToken  string
 	RefreshToken string
 	ExpiresIn    int
+	Email        string
 	Permanent    bool
 }
 

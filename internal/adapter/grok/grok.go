@@ -2,6 +2,7 @@ package grok
 
 import (
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"os"
@@ -505,6 +506,115 @@ func marshalAuthJSON(v any) []byte {
 func mustJSONMap(m map[string]any) []byte {
 	b, _ := json.Marshal(m)
 	return b
+}
+
+func BlobFromAuthJSON(raw []byte, now time.Time) (adapter.Blob, error) {
+	id, err := identityFromRaw(raw)
+	if err != nil {
+		return adapter.Blob{}, err
+	}
+	payload, err := json.Marshal(map[string]any{
+		"kind":      "grok.auth.json.v1",
+		"identity":  id,
+		"auth_json": json.RawMessage(raw),
+	})
+	if err != nil {
+		return adapter.Blob{}, err
+	}
+	return adapter.Blob{Tool: adapter.Grok, Identity: id, CapturedAt: now, Payload: payload}, nil
+}
+
+func BlobFromTokens(tok quota.GrokTokens, now time.Time) (adapter.Blob, error) {
+	if tok.AccessToken == "" || tok.RefreshToken == "" {
+		return adapter.Blob{}, errors.New("grok: incomplete oauth tokens")
+	}
+	cl := grokAccessClaims(tok.AccessToken)
+	if cl.principalID == "" {
+		return adapter.Blob{}, errors.New("grok: no principal_id")
+	}
+	clientID := cl.clientID
+	if clientID == "" {
+		clientID = quota.GrokOAuthClientID
+	}
+	exp := now.Add(6 * time.Hour)
+	if tok.ExpiresIn > 0 {
+		exp = now.Add(time.Duration(tok.ExpiresIn) * time.Second)
+	} else if cl.exp > 0 {
+		exp = time.Unix(cl.exp, 0).UTC()
+	}
+	email := tok.Email
+	if email == "" {
+		email = cl.email
+	}
+	ptype := cl.principalType
+	if ptype == "" {
+		ptype = "User"
+	}
+	slot := grokIssuer + "::" + clientID
+	entry := map[string]any{
+		"auth_mode":      "oidc",
+		"key":            tok.AccessToken,
+		"refresh_token":  tok.RefreshToken,
+		"expires_at":     exp.UTC().Format(time.RFC3339Nano),
+		"create_time":    now.UTC().Format(time.RFC3339Nano),
+		"principal_id":   cl.principalID,
+		"user_id":        cl.principalID,
+		"principal_type": ptype,
+		"oidc_issuer":    grokIssuer,
+		"oidc_client_id": clientID,
+		"email":          email,
+	}
+	if cl.teamID != "" {
+		entry["team_id"] = cl.teamID
+	}
+	auth := map[string]any{slot: entry}
+	raw, err := json.Marshal(auth)
+	if err != nil {
+		return adapter.Blob{}, err
+	}
+	return BlobFromAuthJSON(raw, now)
+}
+
+type grokClaims struct {
+	principalID, principalType, teamID, clientID, email string
+	exp                                                 int64
+}
+
+func grokAccessClaims(access string) grokClaims {
+	var c grokClaims
+	parts := strings.Split(access, ".")
+	if len(parts) < 2 {
+		return c
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		b, err2 := base64.StdEncoding.DecodeString(parts[1])
+		if err2 != nil {
+			return c
+		}
+		raw = b
+	}
+	var m map[string]any
+	if json.Unmarshal(raw, &m) != nil {
+		return c
+	}
+	c.email, _ = m["email"].(string)
+	c.principalType, _ = m["principal_type"].(string)
+	c.teamID, _ = m["team_id"].(string)
+	c.clientID, _ = m["client_id"].(string)
+	if c.clientID == "" {
+		if aud, ok := m["aud"].(string); ok {
+			c.clientID = aud
+		}
+	}
+	c.principalID, _ = m["principal_id"].(string)
+	if c.principalID == "" {
+		c.principalID, _ = m["sub"].(string)
+	}
+	if n, ok := m["exp"].(float64); ok {
+		c.exp = int64(n)
+	}
+	return c
 }
 
 func MergeLiveTokens(blob adapter.Blob, liveAuth []byte) adapter.Blob {
