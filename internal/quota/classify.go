@@ -409,13 +409,10 @@ func grokQuotaExhausted(status int, s string) bool {
 	if containsAny(low, "usage balance exhausted", "run out of credits", "personal-team-blocked:spending-limit") {
 		return true
 	}
-	if status == 402 && containsAny(low, "payment required", "spending-limit") {
+	if status == 402 && containsAny(low, "usage balance", "run out of credits", "spending-limit") {
 		return true
 	}
-	if status == 402 {
-		return true
-	}
-	return strings.Contains(low, "status 402 payment required")
+	return false
 }
 
 func looksLikeX402(low string) bool {

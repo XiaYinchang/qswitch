@@ -50,7 +50,7 @@ func TestClassifyByKind(t *testing.T) {
 		{"codex jsonl-like 200", KindCodex, 200, `{"rate_limits":{"primary":{"used_percent":16}}}`, OK, 16},
 		{"codex reached type", KindCodex, 200, `{"rate_limits":{"primary":{"used_percent":40},"rate_limit_reached_type":"rate_limit_reached"}}`, Exhausted, 40},
 		{"grok 402 exhausted", KindGrok, 402, `{"message":"API error (status 402 Payment Required): Grok Build usage balance exhausted"}`, Exhausted, 100},
-		{"grok 402 empty", KindGrok, 402, ``, Exhausted, 100},
+		{"grok 402 empty", KindGrok, 402, ``, Unknown, 0},
 		{"grok x402 not quota", KindGrok, 402, `{"x402Version":1,"accepts":[{"scheme":"exact"}]}`, Unknown, 0},
 		{"grok 429 not quota", KindGrok, 429, `{"error":"too many requests"}`, Unknown, 0},
 		{"grok credits 2%", KindGrok, 200, `{"config":{"creditUsagePercent":2.0,"currentPeriod":{"end":"2026-08-30T14:04:34.632695+00:00"}}}`, OK, 2},

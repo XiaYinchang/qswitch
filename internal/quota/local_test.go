@@ -84,6 +84,16 @@ func TestTailGrok(t *testing.T) {
 			t.Fatal("bare 402 in uuid should be ignored")
 		}
 	})
+	t.Run("session dump mentioning 402 is not quota", func(t *testing.T) {
+		p := writeJSONL(t,
+			`{"msg":"billing: fetched credits config","ctx":{"config":{"creditUsagePercent":7.0,"currentPeriod":{"end":"2026-09-13T14:04:34Z"}}}}`,
+			`{"method":"session/update","params":{"update":{"content":[{"text":"func grokQuotaExhausted status 402 payment required usage balance exhausted"}]}}}`,
+		)
+		r, ok := Tail(KindGrok, p)
+		if !ok || r.Class != OK || r.UsedPct != 7 {
+			t.Fatalf("got ok=%v class=%s pct=%v", ok, r.Class, r.UsedPct)
+		}
+	})
 }
 
 func TestTailCursor(t *testing.T) {

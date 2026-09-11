@@ -110,14 +110,24 @@ func classifyCodexLine(line string) (Result, bool) {
 }
 
 func classifyGrokLine(line string) (Result, bool) {
-	if grokQuotaExhausted(0, line) {
-		return Result{Class: Exhausted, UsedPct: 100, Source: "jsonl_402"}, true
-	}
-	if !strings.Contains(line, "creditUsagePercent") && !strings.Contains(line, "fetched credits") && !strings.Contains(line, "billing") {
-		return Result{}, false
-	}
 	var obj map[string]any
 	if json.Unmarshal([]byte(line), &obj) != nil {
+		return Result{}, false
+	}
+	msg, _ := obj["msg"].(string)
+	if msg == "" {
+		return Result{}, false
+	}
+	ctxMsg := ""
+	if ctx, ok := obj["ctx"].(map[string]any); ok {
+		if m, ok := ctx["message"].(string); ok {
+			ctxMsg = m
+		}
+	}
+	if grokQuotaExhausted(0, msg+" "+ctxMsg) {
+		return Result{Class: Exhausted, UsedPct: 100, Source: "jsonl_402"}, true
+	}
+	if !strings.Contains(msg, "fetched credits") && !strings.Contains(msg, "billing") && !strings.Contains(line, "creditUsagePercent") {
 		return Result{}, false
 	}
 	cfg := lookup(obj, "config")
