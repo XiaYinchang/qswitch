@@ -197,11 +197,13 @@ func (a *App) saveBlob(b adapter.Blob) error {
 	if err := a.Vault.Put(string(b.Tool), id.StableID, b.Payload); err != nil {
 		return err
 	}
+	old, _ := a.State.GetAccount(string(b.Tool), id.StableID)
+	plan := quota.MergePlan(old.PlanHint, quota.DisplayPlan(string(b.Tool), id.PlanHint))
 	return a.State.UpsertAccount(state.Account{
 		Tool:           string(b.Tool),
 		StableID:       id.StableID,
 		Email:          id.Email,
-		PlanHint:       id.PlanHint,
+		PlanHint:       plan,
 		Incomplete:     b.Incomplete,
 		StaleCLI:       b.StaleCLI,
 		LastCapturedAt: a.now().Unix(),
@@ -273,7 +275,7 @@ func (a *App) resolveAccount(tool, ref string) (string, error) {
 }
 
 func accountRefMatch(ac state.Account, ref string) bool {
-	if ac.Email == ref || ac.PlanHint == ref {
+	if ac.Email == ref || strings.EqualFold(ac.PlanHint, ref) {
 		return true
 	}
 	label := ac.Email
@@ -442,7 +444,7 @@ func (a *App) Status() string {
 		if class == "" {
 			class = "unknown"
 		}
-		plan := acc.PlanHint
+		plan := quota.DisplayPlan(acc.Tool, acc.PlanHint)
 		if plan == "" {
 			plan = "-"
 		}
@@ -476,7 +478,7 @@ func (a *App) List(tool string) string {
 		if ac.LastResetsAt > 0 {
 			reset = time.Unix(ac.LastResetsAt, 0).UTC().Format(time.RFC3339)
 		}
-		plan := ac.PlanHint
+		plan := quota.DisplayPlan(ac.Tool, ac.PlanHint)
 		if plan == "" {
 			plan = "-"
 		}
@@ -686,6 +688,10 @@ func (a *App) ProbeLocal(tool adapter.Tool) {
 		}
 	}
 	_ = a.State.UpdateQuotaSnapshot(string(tool), p.StableID, string(r.Class), r.UsedPct, r.ResetsAt, a.now().Unix())
+	if r.Plan != "" {
+		acc, _ := a.State.GetAccount(string(tool), p.StableID)
+		_ = a.State.SetPlanHint(string(tool), p.StableID, quota.MergePlan(acc.PlanHint, r.Plan))
+	}
 	_ = a.State.LogQuota(string(tool), p.StableID, string(r.Class), r.Source, r.UsedPct, a.now())
 	if r.Class == quota.Exhausted {
 		a.setCooling(string(tool), p.StableID, r.ResetsAt)
@@ -1078,6 +1084,9 @@ func (a *App) probeAccount(ctx context.Context, tool adapter.Tool, id string, ga
 	_ = a.State.UpdateQuota(string(tool), id, string(res.Class), res.UsedPct, res.ResetsAt, now.Unix(), now.Unix(), backoff)
 	if len(res.Buckets) > 0 {
 		_ = a.State.SetQuotaDetail(string(tool), id, quota.EncodeBuckets(res.Buckets))
+	}
+	if res.Plan != "" {
+		_ = a.State.SetPlanHint(string(tool), id, quota.MergePlan(acc.PlanHint, res.Plan))
 	}
 	_ = a.State.LogQuota(string(tool), id, string(res.Class), res.Source, res.UsedPct, now)
 	switch res.Class {

@@ -27,7 +27,7 @@ func TestClassifyCursorBuckets(t *testing.T) {
 
 func TestParseCursorBot(t *testing.T) {
 	b, ok := ParseCursorBot([]byte(`{"usagePercent":12,"nextResetTimestampUtc":"2026-09-13T14:28:12.602Z","grokPlanLabel":"Grok Bot Plan"}`))
-	if !ok || b.ID != "bot" || b.UsedPct != 12 || b.ResetsAt == 0 {
+	if !ok || b.ID != "bot" || b.UsedPct != 12 || b.ResetsAt == 0 || b.Plan != "Grok Bot Plan" {
 		t.Fatalf("%+v ok=%v", b, ok)
 	}
 }
@@ -41,6 +41,9 @@ func TestCursorHTTPMergesBot(t *testing.T) {
 		case strings.Contains(req.URL.Path, "GetSandUsageStatus"):
 			body := `{"usagePercent":3,"nextResetTimestampUtc":"2026-09-13T14:28:12Z","grokPlanLabel":"Grok Bot Plan"}`
 			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header), Request: req}, nil
+		case strings.Contains(req.URL.Path, "GetPlanInfo"):
+			body := `{"planInfo":{"planName":"Ultra","price":"$200/mo"}}`
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header), Request: req}, nil
 		default:
 			t.Fatalf("unexpected %s", req.URL)
 			return nil, nil
@@ -50,7 +53,30 @@ func TestCursorHTTPMergesBot(t *testing.T) {
 	if err != nil || res.Class != OK || res.UsedPct != 20 {
 		t.Fatalf("%+v %v", res, err)
 	}
-	if len(res.Buckets) != 3 || res.Buckets[2].ID != "bot" || res.Buckets[2].UsedPct != 3 {
+	if len(res.Buckets) != 3 || res.Buckets[2].ID != "bot" || res.Buckets[2].UsedPct != 3 || res.Buckets[2].Plan != "Grok Bot Plan" {
 		t.Fatalf("buckets %+v", res.Buckets)
+	}
+	if res.Plan != "Ultra" {
+		t.Fatalf("plan %q", res.Plan)
+	}
+}
+
+func TestGrokHTTPPlanFromSettings(t *testing.T) {
+	h := HTTP{Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch {
+		case strings.Contains(req.URL.Path, "/v1/billing"):
+			body := `{"config":{"creditUsagePercent":7.0,"currentPeriod":{"end":"2026-09-13T14:04:34Z"}}}`
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header), Request: req}, nil
+		case strings.Contains(req.URL.Path, "/v1/settings"):
+			body := `{"subscription_tier_display":"SuperGrok Heavy"}`
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header), Request: req}, nil
+		default:
+			t.Fatalf("unexpected %s", req.URL)
+			return nil, nil
+		}
+	})}}
+	res, err := h.Grok(context.Background(), "tok")
+	if err != nil || res.Class != OK || res.UsedPct != 7 || res.Plan != "SuperGrok Heavy" {
+		t.Fatalf("%+v %v", res, err)
 	}
 }

@@ -61,8 +61,8 @@ func TestTailGrok(t *testing.T) {
 	t.Run("billing percent", func(t *testing.T) {
 		p := writeJSONL(t, `{"msg":"billing: fetched credits config","ctx":{"config":{"creditUsagePercent":2.0,"prepaidBalance":{"val":0},"currentPeriod":{"end":"2026-08-30T14:04:34Z"}},"subscriptionTier":"SuperGrok Heavy"}}`)
 		r, ok := Tail(KindGrok, p)
-		if !ok || r.Class != OK || r.UsedPct != 2 {
-			t.Fatalf("got ok=%v class=%s pct=%v", ok, r.Class, r.UsedPct)
+		if !ok || r.Class != OK || r.UsedPct != 2 || r.Plan != "SuperGrok Heavy" {
+			t.Fatalf("got ok=%v class=%s pct=%v plan=%q", ok, r.Class, r.UsedPct, r.Plan)
 		}
 		if r.ResetsAt == 0 {
 			t.Fatal("expected period end")

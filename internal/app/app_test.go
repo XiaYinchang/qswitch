@@ -345,7 +345,7 @@ func TestOverviewSplitsGrokBot(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.State.SetQuotaDetail("cursor", "u1", `[{"id":"auto","used_pct":50},{"id":"api","used_pct":97.9},{"id":"bot","used_pct":12,"resets_at":1789309692}]`); err != nil {
+	if err := a.State.SetQuotaDetail("cursor", "u1", `[{"id":"auto","used_pct":50},{"id":"api","used_pct":97.9},{"id":"bot","used_pct":12,"resets_at":1789309692,"plan":"Grok Bot Plan"}]`); err != nil {
 		t.Fatal(err)
 	}
 	ov := a.Overview()
@@ -370,8 +370,11 @@ func TestOverviewSplitsGrokBot(t *testing.T) {
 		t.Fatalf("bot %+v", bot)
 	}
 	ac := bot.Accounts[0]
-	if !ac.Derived || ac.UsedPct != 12 || ac.Class != "ok" || ac.Plan != "Grok Bot" || ac.ResetsAt != 1789309692 {
+	if !ac.Derived || ac.UsedPct != 12 || ac.Class != "ok" || ac.Plan != "Grok Bot Plan" || ac.ResetsAt != 1789309692 {
 		t.Fatalf("bot account %+v", ac)
+	}
+	if cursor.Accounts[0].Plan != "Ultra" {
+		t.Fatalf("cursor plan %q", cursor.Accounts[0].Plan)
 	}
 	if ac.Tool != "cursor" || ac.StableID != "u1" {
 		t.Fatalf("probe target %+v", ac)
@@ -554,7 +557,7 @@ func TestProbeLocalGrokIgnoresTUISessionDump(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(a.UserHome, ".grok", "logs"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	billing := `{"msg":"billing: fetched credits config","ctx":{"config":{"creditUsagePercent":7.0,"currentPeriod":{"end":"2026-09-13T14:04:34Z"}}}}` + "\n"
+	billing := `{"msg":"billing: fetched credits config","ctx":{"config":{"creditUsagePercent":7.0,"currentPeriod":{"end":"2026-09-13T14:04:34Z"}},"subscriptionTier":"SuperGrok Heavy"}}` + "\n"
 	if err := os.WriteFile(filepath.Join(a.UserHome, ".grok", "logs", "unified.jsonl"), []byte(billing), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -570,6 +573,9 @@ func TestProbeLocalGrokIgnoresTUISessionDump(t *testing.T) {
 	ac, err := a.State.GetAccount("grok", "pid-g")
 	if err != nil || ac.LastQuotaClass != "ok" || ac.LastUsedPct != 7 {
 		t.Fatalf("class=%s pct=%v err=%v", ac.LastQuotaClass, ac.LastUsedPct, err)
+	}
+	if ac.PlanHint != "SuperGrok Heavy" {
+		t.Fatalf("plan %q", ac.PlanHint)
 	}
 }
 
@@ -606,6 +612,47 @@ func writeGrokLive(t *testing.T, home, id, email string) {
 	auth := []byte(`{"https://auth.x.ai::abc":{"principal_id":"` + id + `","email":"` + email + `","key":"k","refresh_token":"rt"}}`)
 	if err := os.WriteFile(filepath.Join(home, ".grok", "auth.json"), auth, 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCaptureKeepsGrokPlan(t *testing.T) {
+	a, _ := setup(t)
+	writeGrokLive(t, a.UserHome, "pid-g", "g@x.com")
+	if _, _, err := a.Capture(adapter.Grok); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.State.SetPlanHint("grok", "pid-g", "SuperGrok Heavy"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := a.Capture(adapter.Grok); err != nil {
+		t.Fatal(err)
+	}
+	ac, err := a.State.GetAccount("grok", "pid-g")
+	if err != nil || ac.PlanHint != "SuperGrok Heavy" {
+		t.Fatalf("plan %q err=%v", ac.PlanHint, err)
+	}
+}
+
+func TestProbeGrokPersistsPlan(t *testing.T) {
+	a, _ := setup(t)
+	writeGrokLive(t, a.UserHome, "pid-g", "g@x.com")
+	if _, _, err := a.Capture(adapter.Grok); err != nil {
+		t.Fatal(err)
+	}
+	a.HTTP.Client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		body := `{"config":{"creditUsagePercent":7}}`
+		if strings.Contains(req.URL.Path, "/v1/settings") {
+			body = `{"subscription_tier_display":"SuperGrok Heavy"}`
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header), Request: req}, nil
+	})}
+	res := a.ProbeAccount(context.Background(), adapter.Grok, "pid-g")
+	if res.Plan != "SuperGrok Heavy" {
+		t.Fatalf("result plan %q", res.Plan)
+	}
+	ac, err := a.State.GetAccount("grok", "pid-g")
+	if err != nil || ac.PlanHint != "SuperGrok Heavy" {
+		t.Fatalf("stored plan %q err=%v", ac.PlanHint, err)
 	}
 }
 

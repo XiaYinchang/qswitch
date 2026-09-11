@@ -143,7 +143,11 @@ func splitCursorBot(tv ToolView) (ToolView, ToolView) {
 		}
 		bc := ac
 		bc.Tool = "cursor"
-		bc.Plan = "Grok Bot"
+		plan := strings.TrimSpace(botB.Plan)
+		if plan == "" {
+			plan = "-"
+		}
+		bc.Plan = plan
 		bc.Class = class
 		bc.UsedPct = used
 		bc.RemainingPct = remainingPct(class, used)
@@ -168,7 +172,7 @@ func visibleCooling(ac state.Account, now int64) int64 {
 }
 
 func accountView(ac state.Account, liveID string, now int64) AccountView {
-	plan := ac.PlanHint
+	plan := quota.DisplayPlan(ac.Tool, ac.PlanHint)
 	if plan == "" {
 		plan = "-"
 	}

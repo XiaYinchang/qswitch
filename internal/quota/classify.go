@@ -29,6 +29,7 @@ type Bucket struct {
 	ID       string  `json:"id"`
 	UsedPct  float64 `json:"used_pct"`
 	ResetsAt int64   `json:"resets_at,omitempty"`
+	Plan     string  `json:"plan,omitempty"`
 }
 
 type Result struct {
@@ -36,6 +37,7 @@ type Result struct {
 	UsedPct  float64
 	ResetsAt int64 // unix seconds, 0 if unknown
 	Source   string
+	Plan     string
 	Buckets  []Bucket
 }
 
@@ -59,10 +61,11 @@ func Classify(kind Kind, status int, body []byte) Result {
 		if err := json.Unmarshal(body, &v); err == nil {
 			if kind == KindCursor {
 				if r, ok := classifyCursorPeriod(v); ok {
-					return r
+					return withPlan(kind, r, v)
 				}
 			}
 			r := classifyValue(v, "http", kind)
+			r = withPlan(kind, r, v)
 			if r.Class != Unknown {
 				return r
 			}
@@ -216,6 +219,9 @@ func ParseCursorBot(body []byte) (Bucket, bool) {
 		} else if t, err := time.Parse(time.RFC3339, s); err == nil {
 			b.ResetsAt = t.Unix()
 		}
+	}
+	if s, _ := m["grokPlanLabel"].(string); strings.TrimSpace(s) != "" {
+		b.Plan = strings.TrimSpace(s)
 	}
 	return b, true
 }

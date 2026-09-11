@@ -49,11 +49,42 @@ func (h HTTP) Grok(ctx context.Context, bearer string) (Result, error) {
 	if err != nil {
 		return Result{Class: Unknown}, err
 	}
+	setGrokProxyHeaders(req, bearer)
+	res, err := h.do(KindGrok, req)
+	if plan := h.grokSettingsPlan(ctx, bearer); plan != "" {
+		res.Plan = plan
+	}
+	return res, err
+}
+
+func setGrokProxyHeaders(req *http.Request, bearer string) {
 	req.Header.Set("Authorization", "Bearer "+bearer)
 	req.Header.Set("x-xai-token-auth", "xai-grok-cli")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "qswitch/0.1")
-	return h.do(KindGrok, req)
+}
+
+func (h HTTP) grokSettingsPlan(ctx context.Context, bearer string) string {
+	sctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(sctx, http.MethodGet, "https://cli-chat-proxy.grok.com/v1/settings", nil)
+	if err != nil {
+		return ""
+	}
+	setGrokProxyHeaders(req, bearer)
+	if err := checkHost(req.URL); err != nil {
+		return ""
+	}
+	resp, err := h.client().Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return ""
+	}
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	return DisplayPlan("grok", PlanFromJSON(raw))
 }
 
 func (h HTTP) Cursor(ctx context.Context, accessToken string) (Result, error) {
@@ -69,7 +100,37 @@ func (h HTTP) Cursor(ctx context.Context, accessToken string) (Result, error) {
 	if bot, ok := h.cursorBot(ctx, accessToken); ok {
 		res.Buckets = append(res.Buckets, bot)
 	}
+	if plan := h.cursorPlan(ctx, accessToken); plan != "" {
+		res.Plan = plan
+	}
 	return res, err
+}
+
+func (h HTTP) cursorPlan(ctx context.Context, accessToken string) string {
+	sctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(sctx, http.MethodPost, "https://api2.cursor.sh/aiserver.v1.DashboardService/GetPlanInfo", bytes.NewReader([]byte("{}")))
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Connect-Protocol-Version", "1")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "qswitch/0.1")
+	if err := checkHost(req.URL); err != nil {
+		return ""
+	}
+	resp, err := h.client().Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return ""
+	}
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	return ParseCursorPlan(raw)
 }
 
 func (h HTTP) cursorBot(ctx context.Context, accessToken string) (Bucket, bool) {

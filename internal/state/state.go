@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -120,7 +121,9 @@ func (d *DB) UpsertAccount(a Account) error {
 	_, err := d.sql.Exec(`INSERT INTO accounts(tool,stable_id,email,plan_hint,incomplete,stale_cli,cooling_until,last_quota_class,last_used_pct,last_resets_at,last_probed_at,last_http_at,http_backoff_until,last_captured_at,vault_gen)
 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(tool,stable_id) DO UPDATE SET
- email=excluded.email, plan_hint=excluded.plan_hint, incomplete=excluded.incomplete, stale_cli=excluded.stale_cli,
+ email=excluded.email,
+ plan_hint=CASE WHEN excluded.plan_hint='' THEN accounts.plan_hint ELSE excluded.plan_hint END,
+ incomplete=excluded.incomplete, stale_cli=excluded.stale_cli,
  last_captured_at=excluded.last_captured_at, vault_gen=excluded.vault_gen`,
 		a.Tool, a.StableID, a.Email, a.PlanHint, inc, st, a.CoolingUntil, a.LastQuotaClass, a.LastUsedPct, a.LastResetsAt, a.LastProbedAt, a.LastHTTPAt, a.HTTPBackoffUntil, a.LastCapturedAt, a.VaultGen)
 	return err
@@ -175,6 +178,15 @@ func (d *DB) UpdateQuota(tool, id, class string, pct float64, resets, probed, ht
 
 func (d *DB) SetQuotaDetail(tool, id, detail string) error {
 	_, err := d.sql.Exec(`UPDATE accounts SET quota_detail=? WHERE tool=? AND stable_id=?`, detail, tool, id)
+	return err
+}
+
+func (d *DB) SetPlanHint(tool, id, plan string) error {
+	plan = strings.TrimSpace(plan)
+	if plan == "" || plan == "-" {
+		return nil
+	}
+	_, err := d.sql.Exec(`UPDATE accounts SET plan_hint=? WHERE tool=? AND stable_id=?`, plan, tool, id)
 	return err
 }
 

@@ -105,6 +105,9 @@ func classifyGrokTail(text string) (Result, bool) {
 		billing, hasBilling = r, true
 	}
 	if hasFail && (!hasBilling || billing.UsedPct >= 90) {
+		if fail.Plan == "" {
+			fail.Plan = billing.Plan
+		}
 		return fail, true
 	}
 	if hasBilling {
@@ -167,7 +170,7 @@ func classifyGrokLine(line string) (Result, bool) {
 		r = classifyValue(obj, "jsonl_billing", KindGrok)
 	}
 	if r.Class != Unknown {
-		return r, true
+		return withPlan(KindGrok, r, obj), true
 	}
 	return Result{}, false
 }
@@ -252,14 +255,23 @@ func Prefer(a, b Result) Result {
 			return 0
 		}
 	}
-	if rank(a.Class) > rank(b.Class) {
-		return a
+	var out Result
+	switch {
+	case rank(a.Class) > rank(b.Class):
+		out = a
+	case rank(b.Class) > rank(a.Class):
+		out = b
+	case a.UsedPct >= b.UsedPct:
+		out = a
+	default:
+		out = b
 	}
-	if rank(b.Class) > rank(a.Class) {
-		return b
+	if out.Plan == "" {
+		if a.Plan != "" {
+			out.Plan = a.Plan
+		} else {
+			out.Plan = b.Plan
+		}
 	}
-	if a.UsedPct >= b.UsedPct {
-		return a
-	}
-	return b
+	return out
 }
