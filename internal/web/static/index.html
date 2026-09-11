@@ -126,6 +126,12 @@
     font-size: 12px;
     font-variant-numeric: tabular-nums;
   }
+  .stats .rem, .bucket .rem {
+    margin-left: auto;
+    text-align: right;
+    white-space: nowrap;
+    min-width: 4.8em;
+  }
   .buckets { margin-top: 8px; display: grid; gap: 6px; }
   .bucket {
     display: grid;
@@ -242,8 +248,7 @@ function bucketHTML(ac) {
     const used = Number(b.used_pct || 0);
     const rem = Math.max(0, 100 - used);
     const cls = used >= 99.5 ? "exhausted" : used >= 90 ? "soft" : "ok";
-    const when = b.resets_at && b.id === "bot" ? ` · ${fmtTime(b.resets_at)} 重置` : "";
-    return `<div class="bucket"><span class="name">${attr(bucketLabel(b.id))}</span><div class="bar"><i style="width:${rem}%;background:${barColor(cls, rem)}"></i></div><span>还剩 ${rem.toFixed(0)}%${when}</span></div>`;
+    return `<div class="bucket"><span class="name">${attr(bucketLabel(b.id))}</span><div class="bar"><i style="width:${rem}%;background:${barColor(cls, rem)}"></i></div><span class="rem">还剩 ${rem.toFixed(0)}%</span></div>`;
   }).join("")}</div>`;
 }
 function toolTitle(t) {
@@ -293,7 +298,6 @@ function render(ov) {
     (tool.accounts || []).forEach(ac => {
       const rem = ac.remaining_pct;
       const remText = rem == null ? "余量未知" : `还剩 ${rem.toFixed(0)}%`;
-      const used = ac.class === "unknown" ? "" : `已用 ${Number(ac.used_pct || 0).toFixed(0)}%`;
       const width = rem == null ? 0 : rem;
       const card = document.createElement("div");
       const kinds = ["card"];
@@ -316,9 +320,9 @@ function render(ov) {
           ${acts ? `<div class="actions">${acts}</div>` : ""}
         </div>
         ${ac.buckets && ac.buckets.length
-          ? bucketHTML(ac) + (whenText(ac) ? `<div class="stats"><span></span><span>${whenText(ac)}</span></div>` : "")
+          ? bucketHTML(ac) + (whenText(ac) ? `<div class="stats"><span>${whenText(ac)}</span><span></span></div>` : "")
           : `<div class="bar${rem == null ? " empty" : ""}"><i style="width:${width}%;background:${barColor(ac.class, rem)}"></i></div>
-        <div class="stats"><span>${remText}${used ? " · " + used : ""}</span><span>${whenText(ac)}</span></div>`}`;
+        <div class="stats"><span>${whenText(ac)}</span><span class="rem">${remText}</span></div>`}`;
       sec.appendChild(card);
     });
     if (!(tool.accounts || []).length) {
