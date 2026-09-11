@@ -315,7 +315,7 @@ func TestProbeRecoveredAfterCooling(t *testing.T) {
 	}
 }
 
-func TestOverviewHidesGrokDesktopSnapshot(t *testing.T) {
+func TestOverviewHidesDesktopSnapshots(t *testing.T) {
 	a, _ := setup(t)
 	if err := a.State.UpsertAccount(state.Account{
 		Tool: "grok", StableID: "desktop:grokbot", Email: "grok-bot.app", PlanHint: "desktop",
@@ -323,15 +323,12 @@ func TestOverviewHidesGrokDesktopSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := a.State.UpsertAccount(state.Account{
-		Tool: "grok", StableID: "pid-g", Email: "g@x.com",
+		Tool: "codex", StableID: "desktop:chatgpt", Email: "chatgpt.app", PlanHint: "desktop",
 	}); err != nil {
 		t.Fatal(err)
 	}
 	ov := a.Overview()
 	for _, tool := range ov.Tools {
-		if tool.Tool != "grok" {
-			continue
-		}
 		for _, ac := range tool.Accounts {
 			if strings.HasPrefix(ac.StableID, "desktop:") {
 				t.Fatalf("desktop snapshot still listed: %+v", ac)

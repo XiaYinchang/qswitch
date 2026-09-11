@@ -104,11 +104,8 @@ func (a *App) Overview() Overview {
 	return out
 }
 
-func hideOverviewAccount(t adapter.Tool, ac state.Account) bool {
-	if t == adapter.Grok && strings.HasPrefix(ac.StableID, "desktop:") {
-		return true
-	}
-	return false
+func hideOverviewAccount(_ adapter.Tool, ac state.Account) bool {
+	return strings.HasPrefix(ac.StableID, "desktop:")
 }
 
 func splitCursorBot(tv ToolView) (ToolView, ToolView) {
