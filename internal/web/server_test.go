@@ -91,4 +91,20 @@ func TestIndex(t *testing.T) {
 	if w.Code != 200 || !strings.Contains(w.Body.String(), "qswitch") {
 		t.Fatalf("%d %s", w.Code, w.Body.String()[:80])
 	}
+	if w.Header().Get("X-Qswitch") != "1" {
+		t.Fatal("missing X-Qswitch")
+	}
+}
+
+func TestAlreadyServing(t *testing.T) {
+	a := setupApp(t)
+	ts := httptest.NewServer(New(a, "127.0.0.1:7432").Handler())
+	defer ts.Close()
+	host := ts.Listener.Addr().String()
+	if !AlreadyServing(host) {
+		t.Fatalf("want already serving %s", host)
+	}
+	if AlreadyServing("127.0.0.1:1") {
+		t.Fatal("unused port should not look like qswitch")
+	}
 }

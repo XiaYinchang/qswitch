@@ -91,6 +91,31 @@ func (s *Server) Run(ctx context.Context) error {
 	return err
 }
 
+func AlreadyServing(addr string) bool {
+	if CheckLoopback(addr) != nil {
+		return false
+	}
+	c := &http.Client{Timeout: 800 * time.Millisecond}
+	res, err := c.Get("http://" + addr + "/api/overview")
+	if err != nil {
+		return false
+	}
+	defer res.Body.Close()
+	if res.StatusCode != 200 {
+		return false
+	}
+	if res.Header.Get("X-Qswitch") == "1" {
+		return true
+	}
+	var body struct {
+		Tools json.RawMessage `json:"tools"`
+	}
+	if json.NewDecoder(res.Body).Decode(&body) != nil {
+		return false
+	}
+	return len(body.Tools) > 0
+}
+
 func CheckLoopback(addr string) error {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
@@ -128,6 +153,7 @@ func localRequest(r *http.Request) bool {
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Qswitch", "1")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
 }
@@ -349,6 +375,7 @@ func (s *Server) static(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Qswitch", "1")
 	_, _ = w.Write(b)
 }
 

@@ -74,10 +74,19 @@ func run(args []string) int {
 			a.Cfg.Web.Addr = v
 			addr = v
 		}
+		if web.AlreadyServing(addr) {
+			fmt.Printf("页面已经在跑：http://%s\n（一般是 qswitchd 占着这个端口，直接打开即可）\n", addr)
+			return 0
+		}
 		fmt.Printf("qswitch web http://%s\n", addr)
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		return fail(web.New(a, addr).Run(ctx))
+		err := web.New(a, addr).Run(ctx)
+		if err != nil && strings.Contains(err.Error(), "address already in use") {
+			fmt.Printf("端口被占用。若 daemon 已启动，打开 http://%s 即可。\n", addr)
+			return 1
+		}
+		return fail(err)
 	case "probe":
 		tools := adapter.AllTools()
 		if t, ok := flagTool(rest); ok {

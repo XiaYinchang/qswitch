@@ -45,7 +45,7 @@ qswitch doctor
 qswitch serve [--addr 127.0.0.1:7432]
 ```
 
-本机页面默认 `http://127.0.0.1:7432`（只绑 loopback）。`qswitchd` 起来后也能开。用来看余量、收录当前登录、ChatGPT Device Code 加号、删除仓库里的号。页面上不会出现 token。
+本机页面默认 `http://127.0.0.1:7432`（只绑 loopback）。`qswitchd` 起来后也能开；这时再跑 `qswitch serve` 会打印现成地址然后退出，不会跟 daemon 抢端口。用来看余量、收录当前登录、ChatGPT Device Code 加号、删除仓库里的号。页面上不会出现 token。
 
 Cursor 自动切换默认关，直到桌面与 CLI 对齐。
 
