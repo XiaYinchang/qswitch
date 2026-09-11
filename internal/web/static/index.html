@@ -26,29 +26,71 @@
   }
   header {
     display: flex;
-    align-items: baseline;
+    align-items: center;
     justify-content: space-between;
-    padding: 20px 24px 8px;
+    gap: 16px;
+    padding: 16px 24px;
     border-bottom: 1px solid var(--line);
   }
   header h1 { font-size: 18px; font-weight: 600; margin: 0; }
-  header p { color: var(--muted); margin: 0; font-size: 13px; }
-  main { padding: 16px 24px 40px; display: grid; gap: 20px; }
-  section h2 { font-size: 15px; margin: 0 0 10px; display: flex; gap: 10px; align-items: center; }
+  header p { color: var(--muted); margin: 2px 0 0; font-size: 13px; }
+  .header-right {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+  }
+  main { padding: 18px 24px 40px; display: grid; gap: 22px; }
+  .sec-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 10px;
+  }
+  .sec-head h2 {
+    font-size: 15px;
+    margin: 0;
+    display: flex;
+    gap: 10px;
+    align-items: baseline;
+    min-width: 0;
+    flex-wrap: wrap;
+  }
   .meta { color: var(--muted); font-size: 12px; font-weight: 400; }
-  .row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+  .actions {
+    display: flex;
+    gap: 6px;
+    flex-shrink: 0;
+    align-items: center;
+  }
   button {
     background: var(--btn);
     color: var(--text);
     border: 1px solid var(--line);
     border-radius: 8px;
-    padding: 6px 10px;
+    padding: 5px 10px;
     cursor: pointer;
     font: inherit;
+    font-size: 12px;
+    line-height: 1.3;
+    white-space: nowrap;
   }
   button:hover { border-color: #4a5160; }
+  button:disabled { opacity: 0.5; cursor: default; }
   button.danger { color: var(--bad); }
   button.primary { border-color: var(--live); color: var(--live); }
+  button.ghost {
+    background: transparent;
+    border-color: transparent;
+    color: #b4bac2;
+  }
+  button.ghost:hover {
+    color: var(--text);
+    background: var(--btn);
+    border-color: var(--line);
+  }
+  button.ghost.danger:hover { color: var(--bad); border-color: #5c2a30; }
   .card {
     background: var(--card);
     border: 1px solid var(--line);
@@ -57,9 +99,16 @@
     margin-bottom: 8px;
   }
   .card.live { border-color: #3d4c7a; }
-  .who { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
-  .email { font-weight: 600; }
-  .id { color: var(--muted); font-size: 12px; word-break: break-all; }
+  .card.desktop { opacity: 0.78; }
+  .who {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    align-items: center;
+  }
+  .who > div:first-child { min-width: 0; }
+  .email { font-weight: 600; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .id { color: var(--muted); font-size: 12px; word-break: break-all; margin-top: 2px; }
   .bar {
     height: 8px;
     background: #2a2e38;
@@ -69,9 +118,17 @@
   }
   .bar > i { display: block; height: 100%; background: var(--ok); }
   .bar.empty > i { width: 0; }
-  .stats { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; }
+  .stats {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    color: var(--muted);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+  }
   .badge {
     font-size: 11px;
+    font-weight: 500;
     padding: 1px 7px;
     border-radius: 99px;
     border: 1px solid var(--line);
@@ -81,8 +138,14 @@
   .badge.soft { color: var(--soft); border-color: #5c4a20; }
   .badge.exhausted, .badge.expired { color: var(--bad); border-color: #5c2a30; }
   .badge.live { color: var(--live); border-color: #3d4c7a; }
-  .msg { color: var(--muted); font-size: 13px; min-height: 1.2em; }
+  .msg {
+    color: var(--muted);
+    font-size: 13px;
+    min-height: 1.2em;
+    text-align: right;
+  }
   .msg.err { color: var(--bad); }
+  .empty { color: var(--muted); font-size: 13px; margin: 0; }
   dialog {
     border: 1px solid var(--line);
     background: var(--card);
@@ -98,6 +161,12 @@
     margin: 10px 0;
   }
   a { color: var(--live); }
+  @media (max-width: 720px) {
+    header, .sec-head, .stats { flex-wrap: wrap; }
+    .header-right, .msg { width: 100%; text-align: left; }
+    .sec-head .actions { width: 100%; justify-content: flex-start; flex-wrap: wrap; }
+    .who { align-items: flex-start; }
+  }
 </style>
 </head>
 <body>
@@ -106,18 +175,20 @@
     <h1>qswitch</h1>
     <p>本机账号余量。token 不会出现在这个页面上。</p>
   </div>
-  <button id="reload">刷新列表</button>
+  <div class="header-right">
+    <p class="msg" id="msg"></p>
+    <button id="reload">刷新</button>
+  </div>
 </header>
 <main id="root"></main>
-<p class="msg" id="msg" style="padding:0 24px"></p>
 <dialog id="loginDlg">
   <h3>ChatGPT Device Code 加号</h3>
   <p>用浏览器打开链接，输入一次性代码。不要在 ChatGPT.app 里换号，也不要 logout。</p>
   <p><a id="loginUrl" target="_blank" rel="noopener"></a></p>
   <div class="code" id="loginCode"></div>
   <p class="msg" id="loginMsg">等你在浏览器里确认…</p>
-  <div class="row">
-    <button id="loginCancel">取消</button>
+  <div class="actions">
+    <button class="ghost" id="loginCancel">取消</button>
   </div>
 </dialog>
 <script>
@@ -153,6 +224,24 @@ function toolTitle(t) {
   if (t === "cursor") return "Cursor";
   return t;
 }
+function attr(s) {
+  return String(s ?? "").replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+}
+function toolActions(tool) {
+  const t = attr(tool.tool);
+  let html = `<button data-act="probe-tool" data-tool="${t}">刷新用量</button>`;
+  html += `<button data-act="capture" data-tool="${t}">收录</button>`;
+  if (tool.tool === "codex") html += `<button class="primary" data-act="login-codex">加号</button>`;
+  return html;
+}
+function cardActions(ac) {
+  const t = attr(ac.tool), id = attr(ac.stable_id);
+  const bits = [];
+  if (!ac.desktop) bits.push(`<button class="ghost" data-act="probe" data-tool="${t}" data-id="${id}">查询</button>`);
+  if (!ac.live && !ac.desktop) bits.push(`<button data-act="switch" data-tool="${t}" data-id="${id}">切换</button>`);
+  if (!ac.live) bits.push(`<button class="ghost danger" data-act="forget" data-tool="${t}" data-id="${id}">删除</button>`);
+  return bits.join("");
+}
 function render(ov) {
   const root = $("root");
   root.innerHTML = "";
@@ -164,49 +253,43 @@ function render(ov) {
     if (tool.chatgpt_app) flags.push("ChatGPT.app 在跑");
     if (tool.cursor_app) flags.push("Cursor.app 在跑");
     if (tool.desync) flags.push("桌面/CLI 不一致");
-    sec.innerHTML = `<h2>${toolTitle(tool.tool)} <span class="meta">${flags.join(" · ") || "空闲"}</span></h2>`;
-    const row = document.createElement("div");
-    row.className = "row";
-    row.innerHTML = `
-      <button data-act="capture" data-tool="${tool.tool}">收录当前登录</button>
-      <button data-act="probe-tool" data-tool="${tool.tool}">刷新用量</button>
-      ${tool.tool === "codex" ? `<button class="primary" data-act="login-codex">Device Code 加号</button>` : ""}
-    `;
-    sec.appendChild(row);
+    sec.innerHTML = `<div class="sec-head">
+      <h2>${toolTitle(tool.tool)} <span class="meta">${flags.join(" · ") || "空闲"}</span></h2>
+      <div class="actions">${toolActions(tool)}</div>
+    </div>`;
     (tool.accounts || []).forEach(ac => {
       const rem = ac.remaining_pct;
       const remText = rem == null ? "余量未知" : `还剩 ${rem.toFixed(0)}%`;
       const used = ac.class === "unknown" ? "" : `已用 ${Number(ac.used_pct || 0).toFixed(0)}%`;
       const width = rem == null ? 0 : rem;
       const card = document.createElement("div");
-      card.className = "card" + (ac.live ? " live" : "");
+      const kinds = ["card"];
+      if (ac.live) kinds.push("live");
+      if (ac.desktop) kinds.push("desktop");
+      card.className = kinds.join(" ");
       const badges = [];
       if (ac.live) badges.push(`<span class="badge live">当前</span>`);
       badges.push(`<span class="badge ${ac.class}">${clsLabel[ac.class] || ac.class}</span>`);
       if (ac.plan && ac.plan !== "-") badges.push(`<span class="badge">${ac.plan}</span>`);
       if (ac.stale_cli) badges.push(`<span class="badge">CLI 偏旧</span>`);
       if (ac.desktop) badges.push(`<span class="badge">桌面快照</span>`);
-      const when = whenText(ac);
+      const acts = cardActions(ac);
       card.innerHTML = `
         <div class="who">
           <div>
-            <div class="email">${ac.email || "(无邮箱)"} ${badges.join(" ")}</div>
-            <div class="id">${ac.stable_id}</div>
+            <div class="email">${attr(ac.email || "(无邮箱)")} ${badges.join(" ")}</div>
+            <div class="id">${attr(ac.stable_id)}</div>
           </div>
+          ${acts ? `<div class="actions">${acts}</div>` : ""}
         </div>
         <div class="bar${rem == null ? " empty" : ""}"><i style="width:${width}%;background:${barColor(ac.class, rem)}"></i></div>
-        <div class="stats"><span>${remText}${used ? " · " + used : ""}</span><span>${when}</span></div>
-        <div class="row" style="margin:8px 0 0">
-          <button data-act="probe" data-tool="${ac.tool}" data-id="${ac.stable_id}">查用量</button>
-          ${ac.live || ac.desktop ? "" : `<button data-act="switch" data-tool="${ac.tool}" data-id="${ac.stable_id}">切到这个号</button>`}
-          ${ac.live ? "" : `<button class="danger" data-act="forget" data-tool="${ac.tool}" data-id="${ac.stable_id}">删除</button>`}
-        </div>`;
+        <div class="stats"><span>${remText}${used ? " · " + used : ""}</span><span>${whenText(ac)}</span></div>`;
       sec.appendChild(card);
     });
     if (!(tool.accounts || []).length) {
       const p = document.createElement("p");
-      p.className = "msg";
-      p.textContent = "还没有收录账号。先在官方客户端登录，再点「收录当前登录」。";
+      p.className = "empty";
+      p.textContent = "还没有收录账号。先在官方客户端登录，再点「收录」。";
       sec.appendChild(p);
     }
     root.appendChild(sec);
@@ -224,27 +307,34 @@ async function onClick(e) {
   const act = b.dataset.act, tool = b.dataset.tool, id = b.dataset.id;
   try {
     if (act === "capture") {
+      b.disabled = true;
       const r = await api("/api/capture", { method: "POST", body: JSON.stringify({ tool }) });
       msg("已收录 " + (r.captured || []).map(x => x.email || x.stable_id).join(", "));
       await load();
     } else if (act === "probe" || act === "probe-tool") {
+      b.disabled = true;
       msg("正在查用量…");
       await api("/api/probe", { method: "POST", body: JSON.stringify({ tool, id: act === "probe" ? id : "" }) });
       await load();
       msg("用量已更新");
     } else if (act === "forget") {
       if (!confirm("从仓库删掉这个账号？当前登录不会动。")) return;
+      b.disabled = true;
       await api("/api/forget", { method: "POST", body: JSON.stringify({ tool, id }) });
       await load();
     } else if (act === "switch") {
       const kill = confirm("若 CLI 占着登录槽，是否在空闲后结束 CLI 再切？确定=结束 CLI，取消=不杀进程。");
+      b.disabled = true;
       await api("/api/switch", { method: "POST", body: JSON.stringify({ tool, id, kill_cli: kill }) });
       await load();
       msg("已写入新号。新开的进程才会用它。");
     } else if (act === "login-codex") {
       startLogin();
     }
-  } catch (err) { msg(err.message, true); }
+  } catch (err) {
+    b.disabled = false;
+    msg(err.message, true);
+  }
 }
 let loginTimer = null, loginId = "";
 async function startLogin() {
