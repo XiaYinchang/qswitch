@@ -86,6 +86,9 @@ func (a *App) Overview() Overview {
 		}
 		accs, _ := a.State.ListAccounts(string(t))
 		for _, ac := range accs {
+			if hideOverviewAccount(t, ac) {
+				continue
+			}
 			tv.Accounts = append(tv.Accounts, accountView(ac, p.StableID, now))
 		}
 		if t == adapter.Cursor {
@@ -99,6 +102,13 @@ func (a *App) Overview() Overview {
 		out.Tools = append(out.Tools, tv)
 	}
 	return out
+}
+
+func hideOverviewAccount(t adapter.Tool, ac state.Account) bool {
+	if t == adapter.Grok && strings.HasPrefix(ac.StableID, "desktop:") {
+		return true
+	}
+	return false
 }
 
 func splitCursorBot(tv ToolView) (ToolView, ToolView) {
