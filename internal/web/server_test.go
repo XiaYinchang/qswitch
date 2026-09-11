@@ -69,6 +69,26 @@ func TestOverviewAndForgetHTTP(t *testing.T) {
 	}
 }
 
+func TestProbeAllHTTP(t *testing.T) {
+	a := setupApp(t)
+	h := New(a, "127.0.0.1:7432").Handler()
+	req := httptest.NewRequest(http.MethodPost, "/api/probe", strings.NewReader(`{}`))
+	req.Host = "127.0.0.1:7432"
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("probe all %d %s", w.Code, w.Body.Bytes())
+	}
+	var ov app.Overview
+	if err := json.Unmarshal(w.Body.Bytes(), &ov); err != nil {
+		t.Fatal(err)
+	}
+	if len(ov.Tools) == 0 {
+		t.Fatal("empty overview")
+	}
+}
+
 func TestForbiddenNonLocalHost(t *testing.T) {
 	a := setupApp(t)
 	h := New(a, "127.0.0.1:7432").Handler()

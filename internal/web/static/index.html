@@ -188,7 +188,7 @@
   </div>
   <div class="header-right">
     <p class="msg" id="msg"></p>
-    <button id="reload">刷新</button>
+    <button id="reload" data-act="reload-all">刷新</button>
   </div>
 </header>
 <main id="root"></main>
@@ -205,7 +205,7 @@
 <script>
 const $ = (id) => document.getElementById(id);
 const msg = (t, err) => { const el = $("msg"); el.textContent = t || ""; el.className = "msg" + (err ? " err" : ""); };
-const api = (path, opt) => fetch(path, Object.assign({ headers: { "Content-Type": "application/json" } }, opt)).then(async r => {
+const api = (path, opt) => fetch(path, Object.assign({ cache: "no-store", headers: { "Content-Type": "application/json" } }, opt)).then(async r => {
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j.error || r.statusText);
   return j;
@@ -346,12 +346,15 @@ async function onClick(e) {
       const r = await api("/api/capture", { method: "POST", body: JSON.stringify({ tool }) });
       msg("已收录 " + (r.captured || []).map(x => x.email || x.stable_id).join(", "));
       await load();
-    } else if (act === "probe" || act === "probe-tool") {
+    } else if (act === "reload-all" || act === "probe" || act === "probe-tool") {
       b.disabled = true;
       msg("正在查用量…");
-      await api("/api/probe", { method: "POST", body: JSON.stringify({ tool, id: act === "probe" ? id : "" }) });
-      await load();
+      const body = act === "reload-all" ? {} : { tool, id: act === "probe" ? id : "" };
+      const ov = await api("/api/probe", { method: "POST", body: JSON.stringify(body) });
+      if (ov && ov.tools) render(ov);
+      else await load();
       msg("用量已更新");
+      b.disabled = false;
     } else if (act === "forget") {
       if (!confirm("从仓库删掉这个账号？当前登录不会动。")) return;
       b.disabled = true;
@@ -411,7 +414,6 @@ $("loginCancel").onclick = async () => {
   if (loginId) await api("/api/login/" + loginTool + "/cancel", { method: "POST", body: JSON.stringify({ id: loginId }) }).catch(() => {});
   $("loginDlg").close();
 };
-$("reload").onclick = load;
 document.addEventListener("click", onClick);
 load();
 </script>

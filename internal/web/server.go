@@ -223,19 +223,32 @@ func (s *Server) postProbe(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
+	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+	defer cancel()
+	if req.ID == "" {
+		var tools []adapter.Tool
+		if strings.TrimSpace(req.Tool) == "" {
+			tools = adapter.AllTools()
+		} else {
+			t, err := adapter.ParseTool(req.Tool)
+			if err != nil {
+				writeErr(w, 400, err.Error())
+				return
+			}
+			tools = []adapter.Tool{t}
+		}
+		for _, t := range tools {
+			s.App.KeepAlive(ctx, t)
+			s.App.ProbeLocal(t)
+			s.App.ProbeHTTP(ctx, t, true)
+			s.App.ProbeRecovered(ctx, t, true)
+		}
+		writeJSON(w, 200, s.App.Overview())
+		return
+	}
 	t, err := adapter.ParseTool(req.Tool)
 	if err != nil {
 		writeErr(w, 400, err.Error())
-		return
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
-	defer cancel()
-	if req.ID == "" {
-		s.App.KeepAlive(ctx, t)
-		s.App.ProbeLocal(t)
-		s.App.ProbeHTTP(ctx, t, true)
-		s.App.ProbeRecovered(ctx, t, true)
-		writeJSON(w, 200, s.App.Overview())
 		return
 	}
 	res := s.App.ProbeAccount(ctx, t, req.ID)
