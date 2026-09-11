@@ -370,7 +370,7 @@ func TestOverviewSplitsGrokBot(t *testing.T) {
 		t.Fatalf("bot %+v", bot)
 	}
 	ac := bot.Accounts[0]
-	if !ac.Derived || ac.UsedPct != 12 || ac.Class != "ok" || ac.Plan != "Grok Bot Plan" || ac.ResetsAt != 1789309692 {
+	if !ac.Derived || ac.UsedPct != 12 || ac.Class != "ok" || ac.Plan != "-" || ac.ResetsAt != 1789309692 {
 		t.Fatalf("bot account %+v", ac)
 	}
 	if cursor.Accounts[0].Plan != "Ultra" {
@@ -378,6 +378,18 @@ func TestOverviewSplitsGrokBot(t *testing.T) {
 	}
 	if ac.Tool != "cursor" || ac.StableID != "u1" {
 		t.Fatalf("probe target %+v", ac)
+	}
+}
+
+func TestBotCardPlanOmitsProductName(t *testing.T) {
+	if got := botCardPlan("Grok Bot"); got != "-" {
+		t.Fatalf("got %q", got)
+	}
+	if got := botCardPlan("Grok Bot Plan"); got != "-" {
+		t.Fatalf("plan label %q", got)
+	}
+	if got := botCardPlan("SuperGrok Heavy"); got != "SuperGrok Heavy" {
+		t.Fatalf("kept %q", got)
 	}
 }
 

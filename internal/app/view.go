@@ -143,11 +143,7 @@ func splitCursorBot(tv ToolView) (ToolView, ToolView) {
 		}
 		bc := ac
 		bc.Tool = "cursor"
-		plan := strings.TrimSpace(botB.Plan)
-		if plan == "" {
-			plan = "-"
-		}
-		bc.Plan = plan
+		bc.Plan = botCardPlan(botB.Plan)
 		bc.Class = class
 		bc.UsedPct = used
 		bc.RemainingPct = remainingPct(class, used)
@@ -159,6 +155,20 @@ func splitCursorBot(tv ToolView) (ToolView, ToolView) {
 		bot.Accounts = append(bot.Accounts, bc)
 	}
 	return cursor, bot
+}
+
+func botCardPlan(label string) string {
+	s := strings.TrimSpace(label)
+	if s == "" {
+		return "-"
+	}
+	folded := strings.ToLower(strings.Join(strings.Fields(s), " "))
+	folded = strings.ReplaceAll(folded, "-", " ")
+	switch folded {
+	case "grok bot", "grokbot", "grok bot plan", "grokbot plan":
+		return "-"
+	}
+	return s
 }
 
 func visibleCooling(ac state.Account, now int64) int64 {
