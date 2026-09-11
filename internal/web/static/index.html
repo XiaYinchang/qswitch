@@ -138,7 +138,14 @@ function fmtTime(sec) {
   if (!sec) return "";
   const d = new Date(sec * 1000);
   if (Number.isNaN(d.getTime())) return "";
-  return d.toLocaleString();
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+function whenText(ac) {
+  const ts = Number(ac.resets_at) || (ac.class === "exhausted" ? Number(ac.cooling_until) : 0) || 0;
+  if (!ts) return "";
+  const label = ac.class === "exhausted" ? "冷却到" : "重置于";
+  return `${label} ${fmtTime(ts)}`;
 }
 function toolTitle(t) {
   if (t === "codex") return "ChatGPT / Codex";
@@ -179,8 +186,7 @@ function render(ov) {
       if (ac.plan && ac.plan !== "-") badges.push(`<span class="badge">${ac.plan}</span>`);
       if (ac.stale_cli) badges.push(`<span class="badge">CLI 偏旧</span>`);
       if (ac.desktop) badges.push(`<span class="badge">桌面快照</span>`);
-      const cool = (ac.class === "exhausted" && ac.cooling_until && ac.cooling_until * 1000 > Date.now())
-        ? `冷却到 ${fmtTime(ac.cooling_until)}` : "";
+      const when = whenText(ac);
       card.innerHTML = `
         <div class="who">
           <div>
@@ -189,7 +195,7 @@ function render(ov) {
           </div>
         </div>
         <div class="bar${rem == null ? " empty" : ""}"><i style="width:${width}%;background:${barColor(ac.class, rem)}"></i></div>
-        <div class="stats"><span>${remText}${used ? " · " + used : ""}</span><span>${cool}</span></div>
+        <div class="stats"><span>${remText}${used ? " · " + used : ""}</span><span>${when}</span></div>
         <div class="row" style="margin:8px 0 0">
           <button data-act="probe" data-tool="${ac.tool}" data-id="${ac.stable_id}">查用量</button>
           ${ac.live || ac.desktop ? "" : `<button data-act="switch" data-tool="${ac.tool}" data-id="${ac.stable_id}">切到这个号</button>`}

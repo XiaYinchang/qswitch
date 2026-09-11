@@ -472,11 +472,15 @@ func (a *App) List(tool string) string {
 		if until := visibleCooling(ac, a.now().Unix()); until > 0 {
 			cool = time.Unix(until, 0).UTC().Format(time.RFC3339)
 		}
+		reset := "-"
+		if ac.LastResetsAt > 0 {
+			reset = time.Unix(ac.LastResetsAt, 0).UTC().Format(time.RFC3339)
+		}
 		plan := ac.PlanHint
 		if plan == "" {
 			plan = "-"
 		}
-		fmt.Fprintf(&b, "%s %s  %s  plan=%s  %s  class=%s used=%.1f%% cool=%s incomplete=%v stale_cli=%v\n", mark, ac.Tool, ac.Email, plan, ac.StableID, ac.LastQuotaClass, ac.LastUsedPct, cool, ac.Incomplete, ac.StaleCLI)
+		fmt.Fprintf(&b, "%s %s  %s  plan=%s  %s  class=%s used=%.1f%% reset=%s cool=%s incomplete=%v stale_cli=%v\n", mark, ac.Tool, ac.Email, plan, ac.StableID, ac.LastQuotaClass, ac.LastUsedPct, reset, cool, ac.Incomplete, ac.StaleCLI)
 	}
 	return b.String()
 }

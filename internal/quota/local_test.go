@@ -31,6 +31,9 @@ func TestTailCodex(t *testing.T) {
 		if !ok || r.Class != OK || r.UsedPct != 16 {
 			t.Fatalf("got ok=%v class=%s pct=%v", ok, r.Class, r.UsedPct)
 		}
+		if r.ResetsAt != 1788702939 {
+			t.Fatalf("resets %d", r.ResetsAt)
+		}
 	})
 	t.Run("usage_limit", func(t *testing.T) {
 		p := writeJSONL(t, `{"error":{"code":"usage_limit_reached"}}`)

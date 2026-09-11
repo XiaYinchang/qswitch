@@ -82,3 +82,37 @@ func TestGrokResetISO(t *testing.T) {
 		t.Fatal("expected ISO period end as resets_at")
 	}
 }
+
+func TestClassifyCodexPairsPlanWindow(t *testing.T) {
+	body := `{
+		"rate_limit": {
+			"limit_reached": false,
+			"primary_window": {"used_percent": 52, "reset_after_seconds": 326844, "reset_at": 1789435634},
+			"secondary_window": null
+		},
+		"additional_rate_limits": [{
+			"rate_limit": {
+				"primary_window": {"used_percent": 0, "reset_at": 1789126790},
+				"secondary_window": {"used_percent": 90, "reset_at": 1789713590}
+			}
+		}]
+	}`
+	got := Classify(KindCodex, 200, []byte(body))
+	if got.Class != OK || got.UsedPct != 52 {
+		t.Fatalf("class=%s pct=%v", got.Class, got.UsedPct)
+	}
+	if got.ResetsAt != 1789435634 {
+		t.Fatalf("resets %d, mixed additional window", got.ResetsAt)
+	}
+}
+
+func TestClassifyCodexHotterPlanWindow(t *testing.T) {
+	body := `{"rate_limits":{"primary":{"used_percent":20,"resets_at":1000000001},"secondary":{"used_percent":80,"resets_at":1000000002}}}`
+	got := Classify(KindCodex, 200, []byte(body))
+	if got.Class != OK || got.UsedPct != 80 {
+		t.Fatalf("class=%s pct=%v", got.Class, got.UsedPct)
+	}
+	if got.ResetsAt != 1000000002 {
+		t.Fatalf("resets %d want secondary", got.ResetsAt)
+	}
+}

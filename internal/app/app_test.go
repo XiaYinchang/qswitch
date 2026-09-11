@@ -353,8 +353,13 @@ func TestOverviewHidesStaleCooling(t *testing.T) {
 	if err := a.State.SetCooling("codex", "acc-a", past); err != nil {
 		t.Fatal(err)
 	}
-	if got := coolingOf(a.Overview(), "acc-a"); got != 0 {
+	ov := a.Overview()
+	if got := coolingOf(ov, "acc-a"); got != 0 {
 		t.Fatalf("ok account still showing cooling %d", got)
+	}
+	wantReset := now.Add(24 * time.Hour).Unix()
+	if got := resetOf(ov, "acc-a"); got != wantReset {
+		t.Fatalf("want resets %d got %d", wantReset, got)
 	}
 	until := now.Add(3 * time.Hour).Unix()
 	if err := a.State.UpdateQuotaSnapshot("codex", "acc-a", "exhausted", 100, until, now.Unix()); err != nil {
@@ -373,6 +378,17 @@ func coolingOf(ov Overview, id string) int64 {
 		for _, ac := range tool.Accounts {
 			if ac.StableID == id {
 				return ac.CoolingUntil
+			}
+		}
+	}
+	return -1
+}
+
+func resetOf(ov Overview, id string) int64 {
+	for _, tool := range ov.Tools {
+		for _, ac := range tool.Accounts {
+			if ac.StableID == id {
+				return ac.ResetsAt
 			}
 		}
 	}

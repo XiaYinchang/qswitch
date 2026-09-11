@@ -76,11 +76,21 @@ func ClassifyLocalMap(v any, source string) Result {
 }
 
 func classifyValue(v any, source string, kind Kind) Result {
-	limitReached := findBool(v, "limit_reached")
+	orig := v
+	if kind == KindCodex {
+		v = codexPlanNode(v)
+	}
+	limitReached := findBool(v, "limit_reached") || findBool(orig, "limit_reached")
+	if t, ok := findString(orig, []string{"rate_limit_reached_type"}); ok && planReachedType(t) {
+		limitReached = true
+	}
 	if t, ok := findString(v, []string{"rate_limit_reached_type"}); ok && planReachedType(t) {
 		limitReached = true
 	}
-	pct, pctOK := findMaxFloat(v, []string{"used_percent", "usedPercent", "totalPercentUsed", "creditUsagePercent"})
+	pct, pctOK, winReset := planUsage(v)
+	if !pctOK {
+		pct, pctOK = findMaxFloat(v, []string{"used_percent", "usedPercent", "totalPercentUsed", "creditUsagePercent"})
+	}
 	remaining, remOK := findFloat(v, []string{"remaining"})
 	limit, limOK := findFloat(v, []string{"limit", "onDemandCap"})
 	if used, uok := findFloat(v, []string{"onDemandUsed"}); uok {
@@ -92,7 +102,10 @@ func classifyValue(v any, source string, kind Kind) Result {
 	if !pctOK && !limitReached && !(remOK && limOK) {
 		return Result{Class: Unknown, Source: source}
 	}
-	resets := findReset(v)
+	resets := winReset
+	if resets == 0 {
+		resets = findReset(v)
+	}
 	includedGone := limitReached || (pctOK && pct >= 99.5) || (remOK && limOK && limit > 0 && remaining <= 0)
 	if includedGone {
 		if !pctOK {
@@ -116,6 +129,79 @@ func classifyValue(v any, source string, kind Kind) Result {
 		return Result{Class: OK, UsedPct: pct, Source: source, ResetsAt: resets}
 	}
 	return Result{Class: OK, UsedPct: 0, Source: source, ResetsAt: resets}
+}
+
+func asMap(v any) map[string]any {
+	m, _ := v.(map[string]any)
+	return m
+}
+
+func codexPlanNode(v any) any {
+	m := asMap(v)
+	if m == nil {
+		return v
+	}
+	if x := asMap(m["rate_limit"]); x != nil {
+		return x
+	}
+	if x := asMap(m["rate_limits"]); x != nil {
+		return x
+	}
+	return v
+}
+
+func planUsage(v any) (float64, bool, int64) {
+	m := asMap(v)
+	if m == nil {
+		return 0, false, 0
+	}
+	var bestPct float64
+	var bestReset int64
+	found := false
+	for _, key := range []string{"primary_window", "secondary_window", "primary", "secondary"} {
+		w := asMap(m[key])
+		if w == nil {
+			continue
+		}
+		p, ok := windowUsed(w)
+		if !ok {
+			continue
+		}
+		r := windowReset(w)
+		if !found || p > bestPct {
+			found, bestPct, bestReset = true, p, r
+		}
+	}
+	if !found {
+		return 0, false, 0
+	}
+	return bestPct, true, bestReset
+}
+
+func windowUsed(w map[string]any) (float64, bool) {
+	if n, ok := asFloat(w["used_percent"]); ok {
+		return n, true
+	}
+	if n, ok := asFloat(w["usedPercent"]); ok {
+		return n, true
+	}
+	return 0, false
+}
+
+func windowReset(w map[string]any) int64 {
+	for _, k := range []string{"reset_at", "resets_at"} {
+		n, ok := asFloat(w[k])
+		if !ok {
+			continue
+		}
+		if n > 1e12 {
+			return int64(n / 1000)
+		}
+		if n > 1e9 {
+			return int64(n)
+		}
+	}
+	return 0
 }
 
 func resetFromBody(body []byte) int64 {
