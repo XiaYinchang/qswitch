@@ -627,6 +627,56 @@ func writeGrokLive(t *testing.T, home, id, email string) {
 	}
 }
 
+func TestProbeUnknownKeepsLastQuota(t *testing.T) {
+	a, _ := setup(t)
+	if _, _, err := a.Capture(adapter.Codex); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	a.Clock = clock.Fixed{T: now}
+	if err := a.State.UpdateQuotaSnapshot("codex", "acc-a", "ok", 41, now.Add(time.Hour).Unix(), now.Unix()); err != nil {
+		t.Fatal(err)
+	}
+	a.HTTP.Client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 500, Body: io.NopCloser(strings.NewReader(`{"error":"nope"}`)), Header: make(http.Header), Request: req}, nil
+	})}
+	res := a.ProbeAccount(context.Background(), adapter.Codex, "acc-a")
+	if res.Class != "unknown" {
+		t.Fatalf("probe class %s", res.Class)
+	}
+	ac, err := a.State.GetAccount("codex", "acc-a")
+	if err != nil || ac.LastQuotaClass != "ok" || ac.LastUsedPct != 41 {
+		t.Fatalf("stored %+v err=%v", ac, err)
+	}
+	if ac.HTTPBackoffUntil <= now.Unix() {
+		t.Fatal("expected backoff")
+	}
+}
+
+func TestProbeForceSkipsBackoff(t *testing.T) {
+	a, _ := setup(t)
+	if _, _, err := a.Capture(adapter.Codex); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	a.Clock = clock.Fixed{T: now}
+	if err := a.State.UpdateQuota("codex", "acc-a", "ok", 40, now.Add(time.Hour).Unix(), now.Unix(), now.Unix(), now.Add(2*time.Hour).Unix()); err != nil {
+		t.Fatal(err)
+	}
+	a.HTTP.Client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		body := `{"rate_limit":{"primary_window":{"used_percent":18}}}`
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header), Request: req}, nil
+	})}
+	res := a.ProbeAccount(context.Background(), adapter.Codex, "acc-a")
+	if res.Class != "ok" || res.UsedPct != 18 {
+		t.Fatalf("%+v", res)
+	}
+	ac, err := a.State.GetAccount("codex", "acc-a")
+	if err != nil || ac.LastUsedPct != 18 {
+		t.Fatalf("stored pct %v err=%v", ac.LastUsedPct, err)
+	}
+}
+
 func TestCaptureKeepsGrokPlan(t *testing.T) {
 	a, _ := setup(t)
 	writeGrokLive(t, a.UserHome, "pid-g", "g@x.com")

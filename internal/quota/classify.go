@@ -226,6 +226,34 @@ func ParseCursorBot(body []byte) (Bucket, bool) {
 	return b, true
 }
 
+func MergeBuckets(old, new []Bucket) []Bucket {
+	if len(new) == 0 {
+		return old
+	}
+	if len(old) == 0 {
+		return new
+	}
+	by := make(map[string]Bucket, len(old)+len(new))
+	order := make([]string, 0, len(old)+len(new))
+	for _, b := range old {
+		if _, ok := by[b.ID]; !ok {
+			order = append(order, b.ID)
+		}
+		by[b.ID] = b
+	}
+	for _, b := range new {
+		if _, ok := by[b.ID]; !ok {
+			order = append(order, b.ID)
+		}
+		by[b.ID] = b
+	}
+	out := make([]Bucket, 0, len(order))
+	for _, id := range order {
+		out = append(out, by[id])
+	}
+	return out
+}
+
 func EncodeBuckets(b []Bucket) string {
 	if len(b) == 0 {
 		return ""

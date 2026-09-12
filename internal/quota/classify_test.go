@@ -78,6 +78,18 @@ func TestClassifyByKind(t *testing.T) {
 	}
 }
 
+func TestMergeBucketsKeepsMissing(t *testing.T) {
+	old := []Bucket{{ID: "auto", UsedPct: 50}, {ID: "api", UsedPct: 98}, {ID: "bot", UsedPct: 1}}
+	got := MergeBuckets(old, []Bucket{{ID: "bot", UsedPct: 0, Plan: "Grok Bot Plan"}})
+	if len(got) != 3 || got[0].ID != "auto" || got[0].UsedPct != 50 || got[2].UsedPct != 0 || got[2].Plan != "Grok Bot Plan" {
+		t.Fatalf("%+v", got)
+	}
+	got = MergeBuckets(old, []Bucket{{ID: "auto", UsedPct: 51}, {ID: "api", UsedPct: 10}})
+	if got[0].UsedPct != 51 || got[1].UsedPct != 10 || got[2].UsedPct != 1 {
+		t.Fatalf("%+v", got)
+	}
+}
+
 func TestGrokResetISO(t *testing.T) {
 	got := Classify(KindGrok, 200, []byte(`{"config":{"creditUsagePercent":2.0,"currentPeriod":{"end":"2026-08-30T14:04:34Z"}}}`))
 	if got.ResetsAt == 0 {

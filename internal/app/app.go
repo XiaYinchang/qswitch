@@ -1022,7 +1022,7 @@ func (a *App) probeAccount(ctx context.Context, tool adapter.Tool, id string, ga
 		return quota.Result{Class: quota.Unknown}
 	}
 	now := a.now()
-	if acc.HTTPBackoffUntil > now.Unix() {
+	if gateInterval && acc.HTTPBackoffUntil > now.Unix() {
 		return quota.Result{Class: quota.Class(acc.LastQuotaClass), UsedPct: acc.LastUsedPct, ResetsAt: acc.LastResetsAt, Source: "backoff"}
 	}
 	if gateInterval {
@@ -1080,10 +1080,26 @@ func (a *App) probeAccount(ctx context.Context, tool adapter.Tool, id string, ga
 	backoff := acc.HTTPBackoffUntil
 	if res.Class == quota.Unknown {
 		backoff = now.Add(a.Cfg.Backoff()).Unix()
+		class := acc.LastQuotaClass
+		pct := acc.LastUsedPct
+		resets := acc.LastResetsAt
+		if class == "" {
+			class = string(quota.Unknown)
+		}
+		_ = a.State.UpdateQuota(string(tool), id, class, pct, resets, now.Unix(), now.Unix(), backoff)
+		if len(res.Buckets) > 0 {
+			merged := quota.MergeBuckets(quota.DecodeBuckets(acc.QuotaDetail), res.Buckets)
+			_ = a.State.SetQuotaDetail(string(tool), id, quota.EncodeBuckets(merged))
+		}
+		if res.Plan != "" {
+			_ = a.State.SetPlanHint(string(tool), id, quota.MergePlan(acc.PlanHint, res.Plan))
+		}
+		_ = a.State.LogQuota(string(tool), id, string(res.Class), res.Source, res.UsedPct, now)
+		return res
 	}
 	_ = a.State.UpdateQuota(string(tool), id, string(res.Class), res.UsedPct, res.ResetsAt, now.Unix(), now.Unix(), backoff)
 	if len(res.Buckets) > 0 {
-		_ = a.State.SetQuotaDetail(string(tool), id, quota.EncodeBuckets(res.Buckets))
+		_ = a.State.SetQuotaDetail(string(tool), id, quota.EncodeBuckets(quota.MergeBuckets(quota.DecodeBuckets(acc.QuotaDetail), res.Buckets)))
 	}
 	if res.Plan != "" {
 		_ = a.State.SetPlanHint(string(tool), id, quota.MergePlan(acc.PlanHint, res.Plan))

@@ -222,7 +222,7 @@ const api = (path, opt) => fetch(path, Object.assign({ cache: "no-store", header
   if (!r.ok) throw new Error(j.error || r.statusText);
   return j;
 });
-const clsLabel = { ok: "正常", soft: "接近用尽", exhausted: "已用尽", expired: "票失效", unknown: "未知" };
+const clsLabel = { ok: "正常", soft: "接近用尽", exhausted: "已用尽", expired: "票失效", unknown: "未查到" };
 function clampPct(n) {
   const x = Number(n);
   if (!Number.isFinite(x)) return null;
