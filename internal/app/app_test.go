@@ -92,6 +92,127 @@ func TestCaptureSwitch(t *testing.T) {
 	}
 }
 
+func TestSwitchRestartsChatGPT(t *testing.T) {
+	t.Setenv("QSWITCH_IN_TEST", "1")
+	home := t.TempDir()
+	data := filepath.Join(home, ".qswitch")
+	chatgpt := true
+	var launched string
+	list := func() ([]adapter.Proc, error) {
+		if chatgpt {
+			return []adapter.Proc{{PID: 42, Command: "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"}}, nil
+		}
+		return nil, nil
+	}
+	n := &notify.Log{}
+	a, err := Open(home, data, &secutil.Memory{}, nil, n, list)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { a.Close() })
+	os.MkdirAll(filepath.Join(home, ".codex"), 0o700)
+	writeCodex(t, home, "acc-b", "b@x.com")
+	if _, _, err := a.Capture(adapter.Codex); err != nil {
+		t.Fatal(err)
+	}
+	writeCodex(t, home, "acc-a", "a@x.com")
+	if _, _, err := a.Capture(adapter.Codex); err != nil {
+		t.Fatal(err)
+	}
+	writeCodex(t, home, "acc-b", "b@x.com")
+	a.Host.QuitFn = func(app string) error {
+		if app != "ChatGPT" {
+			t.Fatalf("quit %q", app)
+		}
+		chatgpt = false
+		return nil
+	}
+	a.Host.LaunchFn = func(app string) error {
+		launched = app
+		chatgpt = true
+		return nil
+	}
+	a.Host.Sleep = func(time.Duration) {}
+	a.Host.Timeout = time.Second
+	if err := a.Switch(adapter.Codex, "acc-a", adapter.RestoreOpts{}, false); err != nil {
+		t.Fatal(err)
+	}
+	if launched != "ChatGPT" {
+		t.Fatalf("launch %q", launched)
+	}
+	raw, _ := os.ReadFile(filepath.Join(home, ".codex", "auth.json"))
+	if !jsonContains(raw, "acc-a") {
+		t.Fatalf("live not acc-a: %s", raw)
+	}
+	joined := strings.Join(n.Msgs, "\n")
+	if !strings.Contains(joined, "已重启 ChatGPT.app") {
+		t.Fatalf("notify %v", n.Msgs)
+	}
+}
+
+func TestTryApplySwitchesWhileChatGPTRunning(t *testing.T) {
+	t.Setenv("QSWITCH_IN_TEST", "1")
+	home := t.TempDir()
+	data := filepath.Join(home, ".qswitch")
+	chatgpt := true
+	list := func() ([]adapter.Proc, error) {
+		if chatgpt {
+			return []adapter.Proc{{PID: 42, Command: "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"}}, nil
+		}
+		return nil, nil
+	}
+	n := &notify.Log{}
+	a, err := Open(home, data, &secutil.Memory{}, nil, n, list)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { a.Close() })
+	os.MkdirAll(filepath.Join(home, ".codex"), 0o700)
+	writeCodex(t, home, "acc-a", "a@x.com")
+	if _, _, err := a.Capture(adapter.Codex); err != nil {
+		t.Fatal(err)
+	}
+	writeCodex(t, home, "acc-b", "b@x.com")
+	if _, _, err := a.Capture(adapter.Codex); err != nil {
+		t.Fatal(err)
+	}
+	a.Host.QuitFn = func(string) error { chatgpt = false; return nil }
+	a.Host.LaunchFn = func(string) error { chatgpt = true; return nil }
+	a.Host.Sleep = func(time.Duration) {}
+	a.Host.Timeout = time.Second
+	if err := a.State.SetPending(state.Pending{Tool: "codex", FromID: "acc-b", ToID: "acc-a", QueuedAt: time.Now().Unix()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.TryApply(adapter.Codex, false); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(filepath.Join(home, ".codex", "auth.json"))
+	if !jsonContains(raw, "acc-a") {
+		t.Fatalf("live not acc-a: %s", raw)
+	}
+}
+
+func TestSwitchCLIOnlySkipsChatGPT(t *testing.T) {
+	a, n := setup(t)
+	if _, _, err := a.Capture(adapter.Codex); err != nil {
+		t.Fatal(err)
+	}
+	writeCodex(t, a.UserHome, "acc-b", "b@x.com")
+	if _, _, err := a.Capture(adapter.Codex); err != nil {
+		t.Fatal(err)
+	}
+	var quit bool
+	a.Host.QuitFn = func(string) error { quit = true; return nil }
+	a.Host.LaunchFn = func(string) error { t.Fatal("should not launch"); return nil }
+	if err := a.Switch(adapter.Codex, "acc-a", adapter.RestoreOpts{CLIOnly: true}, false); err != nil {
+		t.Fatal(err)
+	}
+	if quit {
+		t.Fatal("cli-only should not quit ChatGPT.app")
+	}
+	_ = n
+}
+
 func TestBusySwitchNoWrite(t *testing.T) {
 	a, _ := setup(t)
 	a.Capture(adapter.Codex)

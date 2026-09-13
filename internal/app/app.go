@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"qswitch/internal/adapter"
@@ -18,6 +19,7 @@ import (
 	"qswitch/internal/busy"
 	"qswitch/internal/clock"
 	"qswitch/internal/config"
+	"qswitch/internal/hostapp"
 	"qswitch/internal/livefile"
 	"qswitch/internal/notify"
 	"qswitch/internal/paths"
@@ -39,6 +41,7 @@ type App struct {
 	Clock     clock.Clock
 	Bins      []string
 	ListProcs func() ([]adapter.Proc, error)
+	Host      hostapp.Controller
 
 	lastFP     map[adapter.Tool][32]byte
 	deskFP     [32]byte
@@ -98,6 +101,7 @@ func Open(userHome, dataDir string, keys secutil.KeyProvider, bins []string, n n
 		Clock:     clock.Real{},
 		Bins:      bins,
 		ListProcs: list,
+		Host:      hostapp.Default(),
 		lastFP:    map[adapter.Tool][32]byte{},
 	}
 	a.Adapters = map[adapter.Tool]adapter.Adapter{
@@ -329,6 +333,15 @@ func (a *App) Switch(tool adapter.Tool, ref string, opts adapter.RestoreOpts, ki
 		h.Manual = ag
 		h.CursorApp = false
 	}
+	relaunchChatGPT := false
+	if tool == adapter.Codex && !opts.CLIOnly {
+		var err error
+		relaunchChatGPT, err = a.quitChatGPT()
+		if err != nil {
+			return err
+		}
+	}
+
 	if h.ManualBusy() {
 		if killCLI {
 			if !opts.CLIOnly && !ad.Idle(a.UserHome, a.Cfg.IdleGrace()) {
@@ -400,16 +413,45 @@ func (a *App) Switch(tool adapter.Tool, ref string, opts adapter.RestoreOpts, ki
 		return err
 	}
 	_ = a.State.ClearPending(string(tool))
-	auto, _ := ad.AutoBlockers(a.UserHome)
-	msg := fmt.Sprintf("switched %s -> %s (%s). 新进程才会用新号。", tool, blob.Identity.Email, blob.Identity.StableID)
-	if auto.ChatGPTApp {
-		msg += " WarnChatGPTAppRunning"
+	if relaunchChatGPT {
+		time.Sleep(200 * time.Millisecond)
+		if err := a.Host.Launch("ChatGPT"); err != nil {
+			a.Notify.Send("qswitch", fmt.Sprintf("switched %s -> %s, but failed to relaunch ChatGPT.app: %v", tool, blob.Identity.Email, err))
+			return fmt.Errorf("credentials written, ChatGPT.app relaunch failed: %w", err)
+		}
+		a.Notify.Send("qswitch", fmt.Sprintf("switched %s -> %s (%s). 已重启 ChatGPT.app。", tool, blob.Identity.Email, blob.Identity.StableID))
+		return nil
 	}
-	a.Notify.Send("qswitch", msg)
-	if auto.ChatGPTApp {
-		fmt.Fprintln(os.Stderr, "WarnChatGPTAppRunning: ChatGPT.app 可能写回旧 token")
-	}
+	a.Notify.Send("qswitch", fmt.Sprintf("switched %s -> %s (%s). 新进程才会用新号。", tool, blob.Identity.Email, blob.Identity.StableID))
 	return nil
+}
+
+func (a *App) quitChatGPT() (bool, error) {
+	list, err := a.ListProcs()
+	if err != nil {
+		return false, err
+	}
+	if len(busy.ChatGPTApp(list)) == 0 {
+		return false, nil
+	}
+	_ = a.Host.Quit("ChatGPT")
+	gone := func() bool {
+		cur, err := a.ListProcs()
+		return err == nil && len(busy.ChatGPTApp(cur)) == 0
+	}
+	if err := a.Host.WaitUntil(gone); err != nil {
+		if !secutil.InTest() {
+			cur, _ := a.ListProcs()
+			for _, p := range busy.ChatGPTApp(cur) {
+				_ = syscall.Kill(p.PID, syscall.SIGTERM)
+			}
+		}
+		if err := a.Host.WaitUntil(gone); err != nil {
+			return false, fmt.Errorf("ChatGPT.app 未能退出，取消切换以免桌面写回旧号")
+		}
+	}
+	time.Sleep(300 * time.Millisecond)
+	return true, nil
 }
 
 func (a *App) Forget(tool adapter.Tool, ref string) error {
@@ -1205,15 +1247,11 @@ func (a *App) TryApply(tool adapter.Tool, killCLI bool) error {
 	}
 	ad := a.Adapters[tool]
 	auto, _ := ad.AutoBlockers(a.UserHome)
-	if auto.AutoBusy() && !killCLI {
-		if auto.ManualBusy() && ad.Idle(a.UserHome, a.Cfg.IdleGrace()) {
-			return a.Switch(tool, pend.ToID, adapter.RestoreOpts{}, true)
+	if auto.ManualBusy() {
+		if !ad.Idle(a.UserHome, a.Cfg.IdleGrace()) {
+			return nil
 		}
-		return nil
-	}
-	if auto.ChatGPTApp && !auto.ManualBusy() {
-		// auto-blocker only: do not write
-		return nil
+		killCLI = true
 	}
 	return a.Switch(tool, pend.ToID, adapter.RestoreOpts{}, killCLI)
 }

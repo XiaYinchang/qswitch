@@ -393,11 +393,16 @@ async function onClick(e) {
       await api("/api/forget", { method: "POST", body: JSON.stringify({ tool, id }) });
       await load();
     } else if (act === "switch") {
-      const kill = confirm("若 CLI 占着登录槽，是否在空闲后结束 CLI 再切？确定=结束 CLI，取消=不杀进程。");
+      const prompt = tool === "codex"
+        ? "切换到这个账号？会关掉并重启 ChatGPT.app；空闲的 Codex CLI 也会结束。"
+        : "若 CLI 占着登录槽，是否在空闲后结束 CLI 再切？确定=结束 CLI，取消=不杀进程。";
+      const ok = confirm(prompt);
+      if (tool === "codex" && !ok) return;
+      const kill = tool === "codex" ? true : ok;
       b.disabled = true;
       await api("/api/switch", { method: "POST", body: JSON.stringify({ tool, id, kill_cli: kill }) });
       await load();
-      msg("已写入新号。新开的进程才会用它。");
+      msg(tool === "codex" ? "已切换。ChatGPT.app 会用新号打开。" : "已写入新号。新开的进程才会用它。");
     } else if (act === "login-codex" || act === "login-grok") {
       startLogin(act === "login-grok" ? "grok" : "codex");
     }
