@@ -22,6 +22,7 @@ type ToolView struct {
 	Busy        bool          `json:"busy"`
 	ChatGPTApp  bool          `json:"chatgpt_app"`
 	CursorApp   bool          `json:"cursor_app"`
+	GrokBotApp  bool          `json:"grok_bot_app"`
 	BlockedPIDs []int         `json:"blocked_by_pid"`
 	PendingTo   string        `json:"pending_to,omitempty"`
 	Accounts    []AccountView `json:"accounts"`
@@ -81,6 +82,7 @@ func (a *App) Overview() Overview {
 			Busy:        man.ManualBusy(),
 			ChatGPTApp:  aut.ChatGPTApp,
 			CursorApp:   aut.CursorApp || man.CursorApp,
+			GrokBotApp:  aut.GrokBotApp,
 			BlockedPIDs: man.ManualPIDs(),
 			PendingTo:   pend.ToID,
 		}

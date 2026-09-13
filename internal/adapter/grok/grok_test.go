@@ -53,6 +53,37 @@ func TestPIDFileNotFlockAndBusy(t *testing.T) {
 	}
 }
 
+func TestCaptureAttachesGrokBotDesktop(t *testing.T) {
+	t.Setenv("QSWITCH_IN_TEST", "1")
+	home := t.TempDir()
+	os.MkdirAll(filepath.Join(home, ".grok"), 0o700)
+	auth := map[string]any{"https://auth.x.ai::abc": map[string]any{"principal_id": "pid-1", "email": "g@x.com", "key": "k"}}
+	b, _ := json.Marshal(auth)
+	os.WriteFile(filepath.Join(home, ".grok", "auth.json"), b, 0o600)
+	root := filepath.Join(home, "Library", "Application Support", "Grok Bot")
+	os.MkdirAll(root, 0o755)
+	os.WriteFile(filepath.Join(root, "Cookies"), []byte("ck-1"), 0o600)
+	ad := Adapter{List: func() ([]adapter.Proc, error) { return nil, nil }}
+	blobs, _, err := ad.Capture(home)
+	if err != nil || len(blobs) == 0 {
+		t.Fatalf("%v %#v", err, blobs)
+	}
+	var env struct {
+		DesktopZip []byte `json:"desktop_zip"`
+	}
+	if json.Unmarshal(blobs[0].Payload, &env) != nil || len(env.DesktopZip) == 0 {
+		t.Fatal("expected desktop_zip on grok cli blob")
+	}
+	os.WriteFile(filepath.Join(root, "Cookies"), []byte("other"), 0o600)
+	if err := ad.Restore(home, blobs[0], adapter.RestoreOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(filepath.Join(root, "Cookies"))
+	if string(got) != "ck-1" {
+		t.Fatalf("cookies %q", got)
+	}
+}
+
 func TestNeedsRefreshAndApply(t *testing.T) {
 	t.Setenv("QSWITCH_IN_TEST", "1")
 	slot := "https://auth.x.ai::abc"

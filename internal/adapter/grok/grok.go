@@ -83,7 +83,21 @@ func (a Adapter) ManualBlockers(home string) (adapter.Holders, error) {
 }
 
 func (a Adapter) AutoBlockers(home string) (adapter.Holders, error) {
-	return a.ManualBlockers(home)
+	h, err := a.ManualBlockers(home)
+	if err != nil {
+		return h, err
+	}
+	list, err := a.procs()
+	if err != nil {
+		return h, err
+	}
+	apps := busy.GrokBotApp(list)
+	if len(apps) > 0 {
+		h.AutoExtra = apps
+		h.GrokBotApp = true
+		h.Why = append(h.Why, "grok bot.app running")
+	}
+	return h, nil
 }
 
 func parsePIDFile(path string) (int, bool) {
@@ -140,6 +154,10 @@ func (a Adapter) Capture(home string) ([]adapter.Blob, []adapter.Warning, error)
 		warn = append(warn, adapter.WarnGrokDualBinary)
 	}
 	env := map[string]any{"kind": "grok.auth.json.v1", "identity": id, "auth_json": json.RawMessage(raw)}
+	if z, zerr := snapshot.Pack(filepath.Join(home, snapshot.GrokBotRelRoot), snapshot.GrokBotRels); zerr == nil {
+		env["desktop_zip"] = z
+		env["desktop_rel_root"] = snapshot.GrokBotRelRoot
+	}
 	payload, err := json.Marshal(env)
 	if err != nil {
 		return nil, warn, err
@@ -263,7 +281,31 @@ func (a Adapter) Restore(home string, blob adapter.Blob, _ adapter.RestoreOpts) 
 	if len(env.AuthJSON) == 0 {
 		return errors.New("grok: empty auth_json")
 	}
-	return livefile.AtomicWrite(authPath(home), env.AuthJSON, 0o600)
+	if err := livefile.AtomicWrite(authPath(home), env.AuthJSON, 0o600); err != nil {
+		return err
+	}
+	return restoreAttachedDesktop(home, blob, a)
+}
+
+func restoreAttachedDesktop(home string, blob adapter.Blob, a Adapter) error {
+	var env struct {
+		DesktopZip []byte `json:"desktop_zip"`
+		RelRoot    string `json:"desktop_rel_root"`
+	}
+	if json.Unmarshal(blob.Payload, &env) != nil || len(env.DesktopZip) == 0 {
+		return nil
+	}
+	list, err := a.procs()
+	if err != nil {
+		return nil
+	}
+	if len(busy.GrokBotApp(list)) > 0 {
+		return nil
+	}
+	if env.RelRoot == "" {
+		env.RelRoot = snapshot.GrokBotRelRoot
+	}
+	return snapshot.Unpack(filepath.Join(home, env.RelRoot), env.DesktopZip)
 }
 
 func (a Adapter) Idle(home string, grace time.Duration) bool {

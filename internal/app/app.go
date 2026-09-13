@@ -310,6 +310,9 @@ func (a *App) Switch(tool adapter.Tool, ref string, opts adapter.RestoreOpts, ki
 	if err != nil {
 		return err
 	}
+	if tool == adapter.Cursor && !opts.CLIOnly {
+		opts.ForceAlign = true
+	}
 	if tool == adapter.Cursor && blob.Incomplete && !opts.ForceAlign {
 		return errors.New("cursor blob incomplete; quit Cursor.app then: qswitch switch cursor <desktop-id> --force-align")
 	}
@@ -319,27 +322,20 @@ func (a *App) Switch(tool adapter.Tool, ref string, opts adapter.RestoreOpts, ki
 	}
 	defer lock.Close()
 
+	relaunch := ""
+	if !opts.CLIOnly {
+		relaunch, err = a.quitDesktop(tool)
+		if err != nil {
+			return err
+		}
+	}
+
 	h, err := ad.ManualBlockers(a.UserHome)
 	if err != nil {
 		return err
 	}
 	if opts.CLIOnly && tool == adapter.Cursor {
-		var ag []adapter.Proc
-		for _, p := range h.Manual {
-			if !strings.Contains(p.Command, "Cursor.app/Contents/MacOS/Cursor") {
-				ag = append(ag, p)
-			}
-		}
-		h.Manual = ag
-		h.CursorApp = false
-	}
-	relaunchChatGPT := false
-	if tool == adapter.Codex && !opts.CLIOnly {
-		var err error
-		relaunchChatGPT, err = a.quitChatGPT()
-		if err != nil {
-			return err
-		}
+		h = stripCursorApp(h)
 	}
 
 	if h.ManualBusy() {
@@ -350,17 +346,12 @@ func (a *App) Switch(tool adapter.Tool, ref string, opts adapter.RestoreOpts, ki
 			if err := ad.KillCLI(a.UserHome); err != nil {
 				return err
 			}
-			time.Sleep(300 * time.Millisecond)
+			if err := a.waitManualClear(ad, tool, opts.CLIOnly); err != nil {
+				return err
+			}
 			h, _ = ad.ManualBlockers(a.UserHome)
 			if opts.CLIOnly && tool == adapter.Cursor {
-				var ag []adapter.Proc
-				for _, p := range h.Manual {
-					if !strings.Contains(p.Command, "Cursor.app/Contents/MacOS/Cursor") {
-						ag = append(ag, p)
-					}
-				}
-				h.Manual = ag
-				h.CursorApp = false
+				h = stripCursorApp(h)
 			}
 		}
 		if h.ManualBusy() {
@@ -413,45 +404,97 @@ func (a *App) Switch(tool adapter.Tool, ref string, opts adapter.RestoreOpts, ki
 		return err
 	}
 	_ = a.State.ClearPending(string(tool))
-	if relaunchChatGPT {
+	if relaunch != "" {
 		time.Sleep(200 * time.Millisecond)
-		if err := a.Host.Launch("ChatGPT"); err != nil {
-			a.Notify.Send("qswitch", fmt.Sprintf("switched %s -> %s, but failed to relaunch ChatGPT.app: %v", tool, blob.Identity.Email, err))
-			return fmt.Errorf("credentials written, ChatGPT.app relaunch failed: %w", err)
+		if err := a.Host.Launch(relaunch); err != nil {
+			a.Notify.Send("qswitch", fmt.Sprintf("switched %s -> %s, but failed to relaunch %s: %v", tool, blob.Identity.Email, appLabel(relaunch), err))
+			return fmt.Errorf("credentials written, %s relaunch failed: %w", appLabel(relaunch), err)
 		}
-		a.Notify.Send("qswitch", fmt.Sprintf("switched %s -> %s (%s). 已重启 ChatGPT.app。", tool, blob.Identity.Email, blob.Identity.StableID))
+		a.Notify.Send("qswitch", fmt.Sprintf("switched %s -> %s (%s). 已重启 %s。", tool, blob.Identity.Email, blob.Identity.StableID, appLabel(relaunch)))
 		return nil
 	}
 	a.Notify.Send("qswitch", fmt.Sprintf("switched %s -> %s (%s). 新进程才会用新号。", tool, blob.Identity.Email, blob.Identity.StableID))
 	return nil
 }
 
-func (a *App) quitChatGPT() (bool, error) {
+func appLabel(name string) string {
+	if name == "" || strings.HasSuffix(name, ".app") {
+		return name
+	}
+	return name + ".app"
+}
+
+func desktopApp(tool adapter.Tool) (string, func([]adapter.Proc) []adapter.Proc) {
+	switch tool {
+	case adapter.Codex:
+		return "ChatGPT", busy.ChatGPTApp
+	case adapter.Cursor:
+		return "Cursor", busy.CursorApp
+	case adapter.Grok:
+		return "Grok Bot", busy.GrokBotApp
+	default:
+		return "", nil
+	}
+}
+
+func stripCursorApp(h adapter.Holders) adapter.Holders {
+	var ag []adapter.Proc
+	for _, p := range h.Manual {
+		if !strings.Contains(p.Command, "Cursor.app/Contents/MacOS/Cursor") {
+			ag = append(ag, p)
+		}
+	}
+	h.Manual = ag
+	h.CursorApp = false
+	return h
+}
+
+func (a *App) quitDesktop(tool adapter.Tool) (string, error) {
+	name, pick := desktopApp(tool)
+	if name == "" || pick == nil {
+		return "", nil
+	}
 	list, err := a.ListProcs()
 	if err != nil {
-		return false, err
+		return "", err
 	}
-	if len(busy.ChatGPTApp(list)) == 0 {
-		return false, nil
+	if len(pick(list)) == 0 {
+		return "", nil
 	}
-	_ = a.Host.Quit("ChatGPT")
+	_ = a.Host.Quit(name)
 	gone := func() bool {
 		cur, err := a.ListProcs()
-		return err == nil && len(busy.ChatGPTApp(cur)) == 0
+		return err == nil && len(pick(cur)) == 0
 	}
 	if err := a.Host.WaitUntil(gone); err != nil {
 		if !secutil.InTest() {
 			cur, _ := a.ListProcs()
-			for _, p := range busy.ChatGPTApp(cur) {
+			for _, p := range pick(cur) {
 				_ = syscall.Kill(p.PID, syscall.SIGTERM)
 			}
 		}
 		if err := a.Host.WaitUntil(gone); err != nil {
-			return false, fmt.Errorf("ChatGPT.app 未能退出，取消切换以免桌面写回旧号")
+			return "", fmt.Errorf("%s 未能退出，取消切换以免写回旧号", name)
 		}
 	}
 	time.Sleep(300 * time.Millisecond)
-	return true, nil
+	return name, nil
+}
+
+func (a *App) waitManualClear(ad adapter.Adapter, tool adapter.Tool, cliOnly bool) error {
+	if err := a.Host.WaitUntil(func() bool {
+		h, err := ad.ManualBlockers(a.UserHome)
+		if err != nil {
+			return false
+		}
+		if cliOnly && tool == adapter.Cursor {
+			h = stripCursorApp(h)
+		}
+		return !h.ManualBusy()
+	}); err != nil {
+		return fmt.Errorf("CLI 未能退出，取消切换")
+	}
+	return nil
 }
 
 func (a *App) Forget(tool adapter.Tool, ref string) error {
@@ -1169,10 +1212,6 @@ func (a *App) considerSwitch(tool adapter.Tool) {
 		return
 	}
 	p, _ := a.State.GetPointer(string(tool))
-	if p.Desync && tool == adapter.Cursor {
-		a.Notify.Send("qswitch", "cursor DESYNC; auto switch skipped")
-		return
-	}
 	next := a.pickNext(tool, p.StableID)
 	if next == "" {
 		a.Notify.Send("qswitch", fmt.Sprintf("%s all accounts exhausted", tool))

@@ -105,7 +105,8 @@ func run(args []string) int {
 	case "switch":
 		if len(rest) < 2 {
 			fmt.Fprintln(os.Stderr, "usage: qswitch switch <tool> <account-id|email> [--force-align] [--allow-stale-cli] [--kill-cli] [--cli-only]")
-			fmt.Fprintln(os.Stderr, "  Codex 会关掉并重启 ChatGPT.app；--cli-only 只写 ~/.codex/auth.json")
+			fmt.Fprintln(os.Stderr, "  会关掉并重启 ChatGPT.app / Cursor.app / Grok Bot.app；空闲 CLI 一并结束")
+			fmt.Fprintln(os.Stderr, "  --cli-only 只写 CLI 登录文件，不动桌面 App")
 			fmt.Fprintln(os.Stderr, "  same email with personal+team workspaces: pass chatgpt_account_id")
 			return 2
 		}

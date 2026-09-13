@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -17,6 +18,8 @@ import (
 	"qswitch/internal/notify"
 	"qswitch/internal/secutil"
 	"qswitch/internal/state"
+
+	_ "modernc.org/sqlite"
 )
 
 func setup(t *testing.T) (*App, *notify.Log) {
@@ -146,6 +149,168 @@ func TestSwitchRestartsChatGPT(t *testing.T) {
 	}
 	joined := strings.Join(n.Msgs, "\n")
 	if !strings.Contains(joined, "已重启 ChatGPT.app") {
+		t.Fatalf("notify %v", n.Msgs)
+	}
+}
+
+func writeCursor(t *testing.T, home, id, email, tok string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(home, ".cursor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	auth, _ := json.Marshal(map[string]string{"accessToken": tok, "refreshToken": "r-" + id})
+	if err := os.WriteFile(filepath.Join(home, ".cursor", "auth.json"), auth, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _ := json.Marshal(map[string]any{"authInfo": map[string]any{"email": email, "authId": id}})
+	if err := os.WriteFile(filepath.Join(home, ".cursor", "cli-config.json"), cfg, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	vpath := filepath.Join(home, "Library", "Application Support", "Cursor", "User", "globalStorage", "state.vscdb")
+	if err := os.MkdirAll(filepath.Dir(vpath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", vpath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS ItemTable (key TEXT PRIMARY KEY, value BLOB)`); err != nil {
+		t.Fatal(err)
+	}
+	kv := map[string]string{
+		"cursorAuth/accessToken":            tok,
+		"cursorAuth/refreshToken":           "r-" + id,
+		"cursorAuth/cachedEmail":            email,
+		"cursorAuth/stripeMembershipAuthId": id,
+		"cursorAuth/stripeMembershipType":   "ultra",
+	}
+	for k, v := range kv {
+		if _, err := db.Exec(`INSERT INTO ItemTable(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, k, []byte(v)); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestSwitchRestartsCursor(t *testing.T) {
+	t.Setenv("QSWITCH_IN_TEST", "1")
+	home := t.TempDir()
+	data := filepath.Join(home, ".qswitch")
+	appOn := true
+	var launched string
+	list := func() ([]adapter.Proc, error) {
+		if appOn {
+			return []adapter.Proc{{PID: 9, Command: "/Applications/Cursor.app/Contents/MacOS/Cursor"}}, nil
+		}
+		return nil, nil
+	}
+	n := &notify.Log{}
+	a, err := Open(home, data, &secutil.Memory{}, nil, n, list)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { a.Close() })
+	writeCursor(t, home, "auth0|b", "b@x.com", "tok-b")
+	if _, _, err := a.Capture(adapter.Cursor); err != nil {
+		t.Fatal(err)
+	}
+	writeCursor(t, home, "auth0|a", "a@x.com", "tok-a")
+	if _, _, err := a.Capture(adapter.Cursor); err != nil {
+		t.Fatal(err)
+	}
+	writeCursor(t, home, "auth0|b", "b@x.com", "tok-b")
+	a.Host.QuitFn = func(app string) error {
+		if app != "Cursor" {
+			t.Fatalf("quit %q", app)
+		}
+		appOn = false
+		return nil
+	}
+	a.Host.LaunchFn = func(app string) error {
+		launched = app
+		appOn = true
+		return nil
+	}
+	a.Host.Sleep = func(time.Duration) {}
+	a.Host.Timeout = time.Second
+	if err := a.Switch(adapter.Cursor, "auth0|a", adapter.RestoreOpts{}, true); err != nil {
+		t.Fatal(err)
+	}
+	if launched != "Cursor" {
+		t.Fatalf("launch %q", launched)
+	}
+	raw, _ := os.ReadFile(filepath.Join(home, ".cursor", "auth.json"))
+	if !jsonContains(raw, "tok-a") {
+		t.Fatalf("cli not tok-a: %s", raw)
+	}
+	if !strings.Contains(strings.Join(n.Msgs, "\n"), "已重启 Cursor.app") {
+		t.Fatalf("notify %v", n.Msgs)
+	}
+}
+
+func TestSwitchRestartsGrokBot(t *testing.T) {
+	t.Setenv("QSWITCH_IN_TEST", "1")
+	home := t.TempDir()
+	data := filepath.Join(home, ".qswitch")
+	appOn := true
+	var launched string
+	list := func() ([]adapter.Proc, error) {
+		if appOn {
+			return []adapter.Proc{{PID: 11, Command: "/Applications/Grok Bot.app/Contents/MacOS/Grok Bot"}}, nil
+		}
+		return nil, nil
+	}
+	n := &notify.Log{}
+	a, err := Open(home, data, &secutil.Memory{}, nil, n, list)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { a.Close() })
+	root := filepath.Join(home, "Library", "Application Support", "Grok Bot")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeGrokLive(t, home, "pid-b", "b@x.com")
+	os.WriteFile(filepath.Join(root, "Cookies"), []byte("ck-b"), 0o600)
+	if _, _, err := a.Capture(adapter.Grok); err != nil {
+		t.Fatal(err)
+	}
+	writeGrokLive(t, home, "pid-a", "a@x.com")
+	os.WriteFile(filepath.Join(root, "Cookies"), []byte("ck-a"), 0o600)
+	if _, _, err := a.Capture(adapter.Grok); err != nil {
+		t.Fatal(err)
+	}
+	writeGrokLive(t, home, "pid-b", "b@x.com")
+	os.WriteFile(filepath.Join(root, "Cookies"), []byte("ck-b"), 0o600)
+	a.Host.QuitFn = func(app string) error {
+		if app != "Grok Bot" {
+			t.Fatalf("quit %q", app)
+		}
+		appOn = false
+		return nil
+	}
+	a.Host.LaunchFn = func(app string) error {
+		launched = app
+		appOn = true
+		return nil
+	}
+	a.Host.Sleep = func(time.Duration) {}
+	a.Host.Timeout = time.Second
+	if err := a.Switch(adapter.Grok, "pid-a", adapter.RestoreOpts{}, true); err != nil {
+		t.Fatal(err)
+	}
+	if launched != "Grok Bot" {
+		t.Fatalf("launch %q", launched)
+	}
+	raw, _ := os.ReadFile(filepath.Join(home, ".grok", "auth.json"))
+	if !jsonContains(raw, "pid-a") {
+		t.Fatalf("live not pid-a: %s", raw)
+	}
+	ck, _ := os.ReadFile(filepath.Join(root, "Cookies"))
+	if string(ck) != "ck-a" {
+		t.Fatalf("cookies %q", ck)
+	}
+	if !strings.Contains(strings.Join(n.Msgs, "\n"), "已重启 Grok Bot.app") {
 		t.Fatalf("notify %v", n.Msgs)
 	}
 }

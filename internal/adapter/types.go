@@ -67,9 +67,10 @@ type Proc struct {
 
 type Holders struct {
 	Manual     []Proc
-	AutoExtra  []Proc // ChatGPT.app for Codex
+	AutoExtra  []Proc // ChatGPT.app / Grok Bot.app
 	ChatGPTApp bool
 	CursorApp  bool
+	GrokBotApp bool
 	Why        []string
 }
 

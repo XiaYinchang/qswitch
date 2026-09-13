@@ -4,7 +4,7 @@
 
 硬约束：
 
-- 正在生成不杀；生成停住后只重启 CLI，本机会话可 resume。Codex 一切号（页面「切换」或额度用尽自动切）会先退出 ChatGPT.app，写入 `~/.codex/auth.json` 和桌面会话，再重新打开 ChatGPT.app。Cursor.app / Grok Bot.app 仍不会自动退出。
+- 正在生成不杀。切号时：空闲后结束对应 CLI；关掉并重启 ChatGPT.app / Cursor.app / Grok Bot.app；写入官方登录文件。Cursor 只改 `cursorAuth/*`，不碰聊天和 13GB 状态库。不会擅自再拉起一条新的 CLI 会话（没有工作目录），新开的 CLI 才会用新号。
 - 查配额按工具适配，不把裸 429 当作用尽。Codex 看会话 JSONL 的 `rate_limits` / `usage_limit_reached`；Grok 看本地 `billing: fetched credits config` 和 HTTP 402 `usage balance exhausted`；Cursor 看 `GetCurrentPeriodUsage` 的 Auto（自家模型）与高级模型；Grok Bot 周额度走 `GetSandUsageStatus`，页面上和 Codex/Grok/Cursor 并列。忽略 `resource_exhausted`（那是容量）。平时只探当前号。ChatGPT 用尽号不按显示的重置时间死等（窗口可能提前恢复），大约每 30 分钟点探一次；Grok/Cursor 仍等到显示的重置时间再查。不把空闲号当心跳扫。HTTP 间隔按消耗速度估「还能用多久」。探测失败退避 2 小时。
 - Cursor 桌面和 cursor-agent 共用同一套 token：`switch cursor` 会把选中账号同时写进 IDE 和 CLI。
 - 官方客户端登录第二个号时，`qswitchd` 会自己收进仓库，不必再跑 `qswitch capture`。
@@ -42,14 +42,14 @@ qswitch list
 qswitch status
 qswitch probe [--tool codex|grok|cursor]
 qswitch switch codex <id-or-email>
-qswitch switch cursor <desktop-id> --force-align   # 须先退出 Cursor.app
+qswitch switch cursor <id-or-email>                # 会关掉并重启 Cursor.app
 qswitch doctor
 qswitch serve [--addr 127.0.0.1:7432]
 ```
 
 本机页面默认 `http://127.0.0.1:7432`（只绑 loopback）。`qswitchd` 起来后也能开；这时再跑 `qswitch serve` 会打印现成地址然后退出，不会跟 daemon 抢端口。用来看余量、收录当前登录、ChatGPT / Grok Device Code 加号、删除仓库里的号。页面上不会出现 token。
 
-Cursor 自动切换默认关，直到桌面与 CLI 对齐。
+Cursor 切号会同时写入 IDE 和 CLI 的登录字段。
 
 ```
 cp ~/.qswitch/com.qswitch.plist ~/Library/LaunchAgents/com.qswitch.plist

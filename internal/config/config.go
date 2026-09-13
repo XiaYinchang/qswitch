@@ -81,7 +81,7 @@ func Default() Config {
 		Notify: Notify{Enabled: true},
 		Codex:  Tool{Enabled: true},
 		Grok:   Tool{Enabled: true},
-		Cursor: Tool{Enabled: false},
+		Cursor: Tool{Enabled: true},
 		Web:    Web{Enabled: true, Addr: DefaultWebAddr},
 	}
 }
