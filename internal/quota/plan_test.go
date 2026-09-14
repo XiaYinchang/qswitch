@@ -39,6 +39,22 @@ func TestFormatGrokPlan(t *testing.T) {
 	}
 }
 
+func TestFormatDevinPlan(t *testing.T) {
+	cases := map[string]string{
+		"Pro":                 "Pro",
+		"Max":                 "Max",
+		"TEAMS_TIER_DEVIN_PRO": "Pro",
+		"free":                "Free",
+		"Teams":               "Teams",
+		"Enterprise":          "Enterprise",
+	}
+	for in, want := range cases {
+		if got := formatDevinPlan(in); got != want {
+			t.Fatalf("%q: got %q want %q", in, got, want)
+		}
+	}
+}
+
 func TestFormatCursorPlan(t *testing.T) {
 	cases := map[string]string{
 		"ultra":    "Ultra",

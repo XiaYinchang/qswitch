@@ -56,7 +56,7 @@ func TestOverviewAndForgetHTTP(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &ov); err != nil {
 		t.Fatal(err)
 	}
-	if len(ov.Tools) != 3 {
+	if len(ov.Tools) != 4 {
 		t.Fatalf("tools %d", len(ov.Tools))
 	}
 	req2 := httptest.NewRequest(http.MethodPost, "/api/forget", strings.NewReader(`{"tool":"codex","id":"acc-a"}`))

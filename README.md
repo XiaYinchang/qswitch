@@ -1,6 +1,6 @@
 # qswitch
 
-本机多账号配额轮换器：把 Codex / Grok / Cursor 的官方登录收进加密仓库，当前号用尽后自动切到下一个有余量的号。
+本机多账号配额轮换器：把 Codex / Grok / Cursor / Devin 的官方登录收进加密仓库，当前号用尽后自动切到下一个有余量的号。 Devin 展示套餐（Free / Pro / Max / Teams）以及日额度和周额度。
 
 硬约束：
 
@@ -40,7 +40,7 @@ qswitch login codex
 qswitch login grok
 qswitch list
 qswitch status
-qswitch probe [--tool codex|grok|cursor]
+qswitch probe [--tool codex|grok|cursor|devin]
 qswitch switch codex <id-or-email>
 qswitch switch cursor <id-or-email>                # 会关掉并重启 Cursor.app
 qswitch doctor

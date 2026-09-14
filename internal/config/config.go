@@ -30,6 +30,7 @@ type Config struct {
 	Codex   Tool    `toml:"codex"`
 	Grok    Tool    `toml:"grok"`
 	Cursor  Tool    `toml:"cursor"`
+	Devin   Tool    `toml:"devin"`
 	Web     Web     `toml:"web"`
 }
 
@@ -82,6 +83,7 @@ func Default() Config {
 		Codex:  Tool{Enabled: true},
 		Grok:   Tool{Enabled: true},
 		Cursor: Tool{Enabled: true},
+		Devin:  Tool{Enabled: true},
 		Web:    Web{Enabled: true, Addr: DefaultWebAddr},
 	}
 }
@@ -167,6 +169,8 @@ func (c Config) ToolEnabled(name string) bool {
 		return c.Grok.Enabled
 	case "cursor":
 		return c.Cursor.Enabled
+	case "devin":
+		return c.Devin.Enabled
 	default:
 		return false
 	}
@@ -180,10 +184,13 @@ func (c *Config) SetToolEnabled(name string, on bool) error {
 		c.Grok.Enabled = on
 	case "cursor":
 		c.Cursor.Enabled = on
+	case "devin":
+		c.Devin.Enabled = on
 	case "", "all":
 		c.Codex.Enabled = on
 		c.Grok.Enabled = on
 		c.Cursor.Enabled = on
+		c.Devin.Enabled = on
 	default:
 		return fmt.Errorf("unknown tool %q", name)
 	}

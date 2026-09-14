@@ -270,6 +270,8 @@ function bucketLabel(id) {
   if (id === "auto") return "Auto";
   if (id === "api") return "高级模型";
   if (id === "bot") return "Bot";
+  if (id === "daily") return "日额度";
+  if (id === "weekly") return "周额度";
   return id;
 }
 function bucketHTML(ac) {
@@ -286,6 +288,7 @@ function toolTitle(t) {
   if (t === "grok") return "Grok";
   if (t === "cursor") return "Cursor";
   if (t === "grokbot") return "Grok Bot";
+  if (t === "devin") return "Devin";
   return t;
 }
 function attr(s) {
@@ -320,6 +323,7 @@ function render(ov) {
     if (tool.chatgpt_app) flags.push("ChatGPT.app 在跑");
     if (tool.cursor_app) flags.push("Cursor.app 在跑");
     if (tool.grok_bot_app) flags.push("Grok Bot.app 在跑");
+    if (tool.devin_app) flags.push("Devin.app 在跑");
     if (tool.desync) flags.push("桌面/CLI 不一致");
     if (tool.tool === "grokbot") flags.push("随 Cursor 账号");
     sec.innerHTML = `<div class="sec-head">
@@ -398,6 +402,7 @@ async function onClick(e) {
         codex: "切换到这个账号？会关掉并重启 ChatGPT.app；空闲的 Codex CLI 也会结束。",
         grok: "切换到这个账号？会关掉并重启 Grok Bot.app；空闲的 grok CLI 也会结束。",
         cursor: "切换到这个账号？会关掉并重启 Cursor.app；空闲的 cursor-agent 也会结束。只改登录字段，不碰聊天记录。",
+        devin: "切换到这个账号？会关掉并重启 Devin.app；空闲的 devin CLI 也会结束。",
       }[tool] || "切换到这个账号？空闲的 CLI 会先结束。";
       if (!confirm(prompt)) return;
       b.disabled = true;

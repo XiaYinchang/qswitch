@@ -15,6 +15,7 @@ import (
 	"qswitch/internal/adapter"
 	"qswitch/internal/adapter/codex"
 	"qswitch/internal/adapter/cursoradp"
+	"qswitch/internal/adapter/devin"
 	"qswitch/internal/adapter/grok"
 	"qswitch/internal/busy"
 	"qswitch/internal/clock"
@@ -108,6 +109,7 @@ func Open(userHome, dataDir string, keys secutil.KeyProvider, bins []string, n n
 		adapter.Codex:  codex.Adapter{List: list},
 		adapter.Grok:   grok.Adapter{List: list},
 		adapter.Cursor: cursoradp.Adapter{List: list},
+		adapter.Devin:  devin.Adapter{List: list},
 	}
 	return a, nil
 }
@@ -152,13 +154,12 @@ func (a *App) Init() error {
 }
 
 func (a *App) Capture(tool adapter.Tool) ([]adapter.Blob, []adapter.Warning, error) {
-	ad := a.Adapters[tool]
 	lock, err := livefile.Acquire(filepath.Join(a.DataDir, "locks", string(tool)+".lock"))
 	if err != nil {
 		return nil, nil, err
 	}
 	defer lock.Close()
-	blobs, warn, err := ad.Capture(a.UserHome)
+	blobs, warn, err := a.captureBlobs(tool)
 	if err != nil {
 		return nil, warn, err
 	}
@@ -181,6 +182,38 @@ func (a *App) Capture(tool adapter.Tool) ([]adapter.Blob, []adapter.Warning, err
 		return blobs, warn, err
 	}
 	return blobs, warn, nil
+}
+
+func (a *App) captureBlobs(tool adapter.Tool) ([]adapter.Blob, []adapter.Warning, error) {
+	blobs, warn, err := a.Adapters[tool].Capture(a.UserHome)
+	if err != nil {
+		return blobs, warn, err
+	}
+	if tool == adapter.Devin {
+		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+		defer cancel()
+		for i := range blobs {
+			blobs[i] = a.enrichDevin(ctx, blobs[i])
+		}
+	}
+	return blobs, warn, nil
+}
+
+func (a *App) enrichDevin(ctx context.Context, b adapter.Blob) adapter.Blob {
+	c, err := devin.CredsFromBlob(b)
+	if err != nil {
+		return b
+	}
+	raw, status, err := a.HTTP.DevinBody(ctx, c.APIKey, c.Server)
+	if err != nil || status != 200 {
+		return b
+	}
+	id := devin.EnrichIdentity(b.Identity, raw)
+	out, err := devin.WriteIdentity(b, id)
+	if err != nil {
+		return b
+	}
+	return out
 }
 
 func liveCLIIdentity(blobs []adapter.Blob) string {
@@ -359,12 +392,9 @@ func (a *App) Switch(tool adapter.Tool, ref string, opts adapter.RestoreOpts, ki
 		}
 	}
 
-	if _, cur, err := ad.Capture(a.UserHome); err == nil {
-		_ = cur
-		if blobs, _, err := ad.Capture(a.UserHome); err == nil {
-			for _, b := range blobs {
-				_ = a.saveBlob(b)
-			}
+	if blobs, _, err := a.captureBlobs(tool); err == nil {
+		for _, b := range blobs {
+			_ = a.saveBlob(b)
 		}
 	}
 
@@ -432,6 +462,8 @@ func desktopApp(tool adapter.Tool) (string, func([]adapter.Proc) []adapter.Proc)
 		return "Cursor", busy.CursorApp
 	case adapter.Grok:
 		return "Grok Bot", busy.GrokBotApp
+	case adapter.Devin:
+		return "Devin", busy.DevinApp
 	default:
 		return "", nil
 	}
@@ -633,7 +665,7 @@ func (a *App) Ingest(tool adapter.Tool) error {
 		return err
 	}
 	defer lock.Close()
-	blobs, _, err := ad.Capture(a.UserHome)
+	blobs, _, err := a.captureBlobs(tool)
 	if err != nil {
 		return err
 	}
@@ -1159,6 +1191,12 @@ func (a *App) probeAccount(ctx context.Context, tool adapter.Tool, id string, ga
 			return quota.Result{Class: quota.Unknown}
 		}
 		res, _ = a.HTTP.Cursor(ctx, tok)
+	case adapter.Devin:
+		c, err := devin.CredsFromBlob(blob)
+		if err != nil {
+			return quota.Result{Class: quota.Unknown}
+		}
+		res, _ = a.HTTP.Devin(ctx, c.APIKey, c.Server)
 	default:
 		return quota.Result{Class: quota.Unknown}
 	}

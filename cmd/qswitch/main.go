@@ -285,7 +285,7 @@ func usage() {
   qswitch login grok           # Device Code 加号，不登出当前 Grok 会话
   qswitch list [--tool ...]
   qswitch status
-  qswitch probe [--tool codex|grok|cursor]
+  qswitch probe [--tool codex|grok|cursor|devin]
   qswitch switch <tool> <id|email> [--force-align] [--allow-stale-cli] [--kill-cli]
   qswitch apply [--tool ...] [--kill-cli]
   qswitch enable-auto [--tool ...]

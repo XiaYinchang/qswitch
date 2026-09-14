@@ -120,6 +120,31 @@ func CursorAgent(list []adapter.Proc) []adapter.Proc {
 	return out
 }
 
+func DevinCLI(list []adapter.Proc) []adapter.Proc {
+	var out []adapter.Proc
+	for _, p := range list {
+		c := p.Command
+		if strings.Contains(c, "Devin.app/") {
+			continue
+		}
+		name := filepath.Base(firstArg(c))
+		if name == "devin" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func DevinApp(list []adapter.Proc) []adapter.Proc {
+	var out []adapter.Proc
+	for _, p := range list {
+		if strings.Contains(p.Command, "Devin.app/Contents/MacOS/Devin") && !strings.Contains(p.Command, "Helper") {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 func firstArg(command string) string {
 	command = strings.TrimSpace(command)
 	if i := strings.IndexByte(command, ' '); i >= 0 {

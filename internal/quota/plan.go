@@ -83,6 +83,8 @@ func DisplayPlan(tool, raw string) string {
 		return formatGrokPlan(raw)
 	case "cursor":
 		return formatCursorPlan(raw)
+	case "devin":
+		return formatDevinPlan(raw)
 	default:
 		return raw
 	}
@@ -159,6 +161,30 @@ func formatGrokPlan(raw string) string {
 		return s
 	}
 	return s
+}
+
+func formatDevinPlan(raw string) string {
+	s := foldPlan(raw)
+	s = strings.ReplaceAll(s, "teams_tier_", "")
+	s = strings.ReplaceAll(s, "teams tier ", "")
+	s = strings.TrimPrefix(s, "devin ")
+	switch {
+	case s == "max" || strings.Contains(s, "devin_max") || strings.HasSuffix(s, " max"):
+		return "Max"
+	case s == "pro" || strings.Contains(s, "devin_pro") || strings.HasSuffix(s, " pro"):
+		return "Pro"
+	case strings.Contains(s, "enterprise"):
+		return "Enterprise"
+	case strings.Contains(s, "team"):
+		return "Teams"
+	case s == "free":
+		return "Free"
+	default:
+		if hasUpper(raw) && !strings.Contains(raw, "_") {
+			return strings.TrimSpace(raw)
+		}
+		return strings.TrimSpace(raw)
+	}
 }
 
 func formatCursorPlan(raw string) string {

@@ -23,6 +23,7 @@ const (
 	KindCodex  Kind = "codex"
 	KindGrok   Kind = "grok"
 	KindCursor Kind = "cursor"
+	KindDevin  Kind = "devin"
 )
 
 type Bucket struct {
@@ -62,6 +63,11 @@ func Classify(kind Kind, status int, body []byte) Result {
 			if kind == KindCursor {
 				if r, ok := classifyCursorPeriod(v); ok {
 					return withPlan(kind, r, v)
+				}
+			}
+			if kind == KindDevin {
+				if r, ok := ParseDevinStatus(body); ok {
+					return r
 				}
 			}
 			r := classifyValue(v, "http", kind)
@@ -201,6 +207,110 @@ func classifyCursorPeriod(v any) (Result, bool) {
 		class = Soft
 	}
 	return Result{Class: class, UsedPct: used, ResetsAt: resets, Source: "http", Buckets: buckets}, true
+}
+
+func ParseDevinStatus(body []byte) (Result, bool) {
+	var root map[string]any
+	if json.Unmarshal(body, &root) != nil {
+		return Result{}, false
+	}
+	us := asMap(root["userStatus"])
+	if us == nil {
+		us = root
+	}
+	ps := asMap(us["planStatus"])
+	if ps == nil {
+		return Result{}, false
+	}
+	pi := asMap(ps["planInfo"])
+	hideDaily := asBool(pi["hideDailyQuota"])
+	hideWeekly := asBool(pi["hideWeeklyQuota"])
+	dailyRem, dailyOK := asFloat(ps["dailyQuotaRemainingPercent"])
+	weeklyRem, weeklyOK := asFloat(ps["weeklyQuotaRemainingPercent"])
+	if !hideDaily && !dailyOK {
+		dailyRem, dailyOK = 0, true
+	}
+	if !hideWeekly && !weeklyOK {
+		weeklyRem, weeklyOK = 0, true
+	}
+	var buckets []Bucket
+	if !hideDaily && dailyOK {
+		used := clampUsed(100 - dailyRem)
+		buckets = append(buckets, Bucket{ID: "daily", UsedPct: used, ResetsAt: asUnix(ps["dailyQuotaResetAtUnix"])})
+	}
+	if !hideWeekly && weeklyOK {
+		used := clampUsed(100 - weeklyRem)
+		buckets = append(buckets, Bucket{ID: "weekly", UsedPct: used, ResetsAt: asUnix(ps["weeklyQuotaResetAtUnix"])})
+	}
+	if len(buckets) == 0 {
+		return Result{}, false
+	}
+	used := buckets[0].UsedPct
+	resets := buckets[0].ResetsAt
+	for _, b := range buckets[1:] {
+		if b.UsedPct > used {
+			used = b.UsedPct
+		}
+		if b.ResetsAt > 0 && (resets == 0 || b.ResetsAt < resets) {
+			resets = b.ResetsAt
+		}
+	}
+	class := OK
+	switch {
+	case used >= 99.5:
+		class = Exhausted
+	case used >= 90:
+		class = Soft
+	}
+	plan := ""
+	if s, _ := pi["planName"].(string); strings.TrimSpace(s) != "" {
+		plan = formatDevinPlan(s)
+	} else if s, _ := us["teamsTier"].(string); s != "" {
+		plan = formatDevinPlan(s)
+	}
+	return Result{Class: class, UsedPct: used, ResetsAt: resets, Source: "http", Plan: plan, Buckets: buckets}, true
+}
+
+func DevinIdentity(body []byte) (userID, email, plan string) {
+	var root map[string]any
+	if json.Unmarshal(body, &root) != nil {
+		return "", "", ""
+	}
+	us := asMap(root["userStatus"])
+	if us == nil {
+		return "", "", ""
+	}
+	userID, _ = us["userId"].(string)
+	email, _ = us["email"].(string)
+	ps := asMap(us["planStatus"])
+	pi := asMap(ps["planInfo"])
+	if s, _ := pi["planName"].(string); s != "" {
+		plan = formatDevinPlan(s)
+	}
+	return strings.TrimSpace(userID), strings.TrimSpace(email), plan
+}
+
+func asBool(v any) bool {
+	b, ok := v.(bool)
+	return ok && b
+}
+
+func asUnix(v any) int64 {
+	f, ok := asFloat(v)
+	if !ok || f <= 0 {
+		return 0
+	}
+	return int64(f)
+}
+
+func clampUsed(n float64) float64 {
+	if n < 0 {
+		return 0
+	}
+	if n > 100 {
+		return 100
+	}
+	return n
 }
 
 func ParseCursorBot(body []byte) (Bucket, bool) {
