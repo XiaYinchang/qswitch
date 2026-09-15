@@ -129,4 +129,34 @@ func TestClassifyCodexHotterPlanWindow(t *testing.T) {
 	if got.ResetsAt != 1000000002 {
 		t.Fatalf("resets %d want secondary", got.ResetsAt)
 	}
+	if len(got.Buckets) != 2 || got.Buckets[0].ID != "5h" || got.Buckets[1].ID != "weekly" {
+		t.Fatalf("buckets %+v", got.Buckets)
+	}
+}
+
+func TestClassifyCodexPlusFiveHourAndWeekly(t *testing.T) {
+	body := `{
+		"plan_type": "plus",
+		"rate_limit": {
+			"limit_reached": false,
+			"primary_window": {"used_percent":14,"limit_window_seconds":18000,"reset_at":1789200000},
+			"secondary_window": {"used_percent":64,"limit_window_seconds":604800,"reset_at":1789710000}
+		},
+		"additional_rate_limits": [{
+			"rate_limit": {
+				"primary_window": {"used_percent": 99, "reset_at": 1},
+				"secondary_window": {"used_percent": 99, "reset_at": 2}
+			}
+		}]
+	}`
+	got := Classify(KindCodex, 200, []byte(body))
+	if got.Class != OK || got.UsedPct != 64 || got.Plan != "plus" {
+		t.Fatalf("%+v", got)
+	}
+	if len(got.Buckets) != 2 || got.Buckets[0].ID != "5h" || got.Buckets[0].UsedPct != 14 {
+		t.Fatalf("5h %+v", got.Buckets)
+	}
+	if got.Buckets[1].ID != "weekly" || got.Buckets[1].UsedPct != 64 || got.Buckets[1].ResetsAt != 1789710000 {
+		t.Fatalf("weekly %+v", got.Buckets)
+	}
 }

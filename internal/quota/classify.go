@@ -70,6 +70,11 @@ func Classify(kind Kind, status int, body []byte) Result {
 					return r
 				}
 			}
+			if kind == KindCodex {
+				if r, ok := classifyCodexWindows(v, "http"); ok {
+					return withPlan(kind, r, v)
+				}
+			}
 			r := classifyValue(v, "http", kind)
 			r = withPlan(kind, r, v)
 			if r.Class != Unknown {
@@ -399,6 +404,67 @@ func codexPlanNode(v any) any {
 		return x
 	}
 	return v
+}
+
+func classifyCodexWindows(v any, source string) (Result, bool) {
+	m := asMap(codexPlanNode(v))
+	if m == nil {
+		return Result{}, false
+	}
+	var primary, secondary map[string]any
+	if w := asMap(m["primary_window"]); w != nil {
+		primary = w
+		secondary = asMap(m["secondary_window"])
+	} else if w := asMap(m["primary"]); w != nil {
+		primary = w
+		secondary = asMap(m["secondary"])
+	}
+	if primary == nil || secondary == nil {
+		return Result{}, false
+	}
+	pUsed, pOK := windowUsed(primary)
+	sUsed, sOK := windowUsed(secondary)
+	if !pOK || !sOK {
+		return Result{}, false
+	}
+	buckets := []Bucket{
+		{ID: windowBucketID(primary, "5h"), UsedPct: pUsed, ResetsAt: windowReset(primary)},
+		{ID: windowBucketID(secondary, "weekly"), UsedPct: sUsed, ResetsAt: windowReset(secondary)},
+	}
+	used := pUsed
+	if sUsed > used {
+		used = sUsed
+	}
+	resets := buckets[0].ResetsAt
+	if buckets[1].UsedPct >= buckets[0].UsedPct && buckets[1].ResetsAt > 0 {
+		resets = buckets[1].ResetsAt
+	} else if resets == 0 {
+		resets = buckets[1].ResetsAt
+	}
+	class := OK
+	limitReached := findBool(m, "limit_reached")
+	switch {
+	case limitReached || used >= 99.5:
+		class = Exhausted
+	case used >= 90:
+		class = Soft
+	}
+	return Result{Class: class, UsedPct: used, ResetsAt: resets, Source: source, Buckets: buckets}, true
+}
+
+func windowBucketID(w map[string]any, fallback string) string {
+	sec, ok := asFloat(w["limit_window_seconds"])
+	if !ok {
+		return fallback
+	}
+	switch {
+	case sec <= 8*3600:
+		return "5h"
+	case sec <= 36*3600:
+		return "1d"
+	default:
+		return "weekly"
+	}
 }
 
 func planUsage(v any) (float64, bool, int64) {

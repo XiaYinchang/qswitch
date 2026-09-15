@@ -138,10 +138,17 @@
     white-space: nowrap;
     min-width: 5.6em;
   }
+  .bucket .when {
+    color: var(--muted);
+    font-size: 12px;
+    white-space: nowrap;
+    min-width: 9em;
+    text-align: right;
+  }
   .buckets { margin-top: 8px; display: grid; gap: 6px; }
   .bucket {
     display: grid;
-    grid-template-columns: 72px 1fr auto;
+    grid-template-columns: 72px 1fr auto auto;
     gap: 8px;
     align-items: center;
     font-size: 12px;
@@ -272,6 +279,8 @@ function bucketLabel(id) {
   if (id === "bot") return "Bot";
   if (id === "daily") return "日额度";
   if (id === "weekly") return "周额度";
+  if (id === "5h") return "5小时";
+  if (id === "1d") return "日额度";
   return id;
 }
 function bucketHTML(ac) {
@@ -280,7 +289,8 @@ function bucketHTML(ac) {
   return `<div class="buckets">${rows.map(b => {
     const used = clampPct(b.used_pct) ?? 0;
     const cls = used >= 99.5 ? "exhausted" : used >= 90 ? "soft" : "ok";
-    return `<div class="bucket"><span class="name">${attr(bucketLabel(b.id))}</span><div class="bar"><i style="${barStyle(used, cls)}"></i></div><span class="rem">${usedText(used)}</span></div>`;
+    const when = b.resets_at ? fmtTime(b.resets_at) : "";
+    return `<div class="bucket"><span class="name">${attr(bucketLabel(b.id))}</span><div class="bar"><i style="${barStyle(used, cls)}"></i></div><span class="rem">${usedText(used)}</span>${when ? `<span class="when">${when}</span>` : `<span class="when"></span>`}</div>`;
   }).join("")}</div>`;
 }
 function toolTitle(t) {
@@ -353,7 +363,7 @@ function render(ov) {
           ${acts ? `<div class="actions">${acts}</div>` : ""}
         </div>
         ${ac.buckets && ac.buckets.length
-          ? bucketHTML(ac) + (whenText(ac) ? `<div class="stats"><span>${whenText(ac)}</span><span></span></div>` : "")
+          ? bucketHTML(ac) + (!(ac.buckets || []).some(b => b.resets_at) && whenText(ac) ? `<div class="stats"><span>${whenText(ac)}</span><span></span></div>` : "")
           : `<div class="bar${used == null ? " empty" : ""}"><i style="${barStyle(used, ac.class)}"></i></div>
         <div class="stats"><span>${whenText(ac)}</span><span class="rem">${usedText(used)}</span></div>`}`;
       sec.appendChild(card);

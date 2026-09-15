@@ -125,6 +125,9 @@ func classifyCodexLine(line string) (Result, bool) {
 				rl = lookup(obj, "rate_limit")
 			}
 			if rl != nil {
+				if r, ok := classifyCodexWindows(rl, "jsonl"); ok {
+					return r, true
+				}
 				r := classifyValue(rl, "jsonl", KindCodex)
 				if r.Class != Unknown {
 					return r, true
