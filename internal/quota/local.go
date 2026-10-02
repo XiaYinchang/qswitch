@@ -55,7 +55,13 @@ func Tail(kind Kind, path string) (Result, bool) {
 	if err != nil || len(b) == 0 {
 		return Result{Class: Unknown, Source: "jsonl"}, false
 	}
-	return classifyTail(kind, string(b))
+	r, ok := classifyTail(kind, string(b))
+	if ok && r.ObservedAt.IsZero() {
+		if st, err := os.Stat(path); err == nil {
+			r.ObservedAt = st.ModTime()
+		}
+	}
+	return r, ok
 }
 
 func classifyTail(kind Kind, text string) (Result, bool) {
@@ -116,7 +122,12 @@ func classifyGrokTail(text string) (Result, bool) {
 	return Result{}, false
 }
 
-func classifyCodexLine(line string) (Result, bool) {
+func classifyCodexLine(line string) (result Result, ok bool) {
+	defer func() {
+		if ok {
+			result.ObservedAt, result.Timestamped = localEventTime(line)
+		}
+	}()
 	if strings.Contains(line, "rate_limit") {
 		var obj map[string]any
 		if json.Unmarshal([]byte(line), &obj) == nil {
@@ -141,7 +152,12 @@ func classifyCodexLine(line string) (Result, bool) {
 	return Result{}, false
 }
 
-func classifyGrokLine(line string) (Result, bool) {
+func classifyGrokLine(line string) (result Result, ok bool) {
+	defer func() {
+		if ok {
+			result.ObservedAt, result.Timestamped = localEventTime(line)
+		}
+	}()
 	var obj map[string]any
 	if json.Unmarshal([]byte(line), &obj) != nil {
 		return Result{}, false
@@ -178,7 +194,12 @@ func classifyGrokLine(line string) (Result, bool) {
 	return Result{}, false
 }
 
-func classifyCursorLine(line string) (Result, bool) {
+func classifyCursorLine(line string) (result Result, ok bool) {
+	defer func() {
+		if ok {
+			result.ObservedAt, result.Timestamped = localEventTime(line)
+		}
+	}()
 	if cursorCapacityText(line) {
 		return Result{}, false
 	}
@@ -186,6 +207,22 @@ func classifyCursorLine(line string) (Result, bool) {
 		return Result{Class: Exhausted, UsedPct: 100, Source: "jsonl_usage_limit"}, true
 	}
 	return Result{}, false
+}
+
+func localEventTime(line string) (time.Time, bool) {
+	var obj map[string]json.RawMessage
+	if json.Unmarshal([]byte(line), &obj) != nil {
+		return time.Time{}, false
+	}
+	for _, key := range []string{"timestamp", "time", "ts"} {
+		var value string
+		if json.Unmarshal(obj[key], &value) == nil {
+			if parsed, err := time.Parse(time.RFC3339Nano, value); err == nil {
+				return parsed, true
+			}
+		}
+	}
+	return time.Time{}, false
 }
 
 func lookup(m map[string]any, key string) any {

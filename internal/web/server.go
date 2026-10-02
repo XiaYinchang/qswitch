@@ -18,6 +18,7 @@ import (
 
 	"qswitch/internal/adapter"
 	"qswitch/internal/app"
+	"qswitch/internal/buildinfo"
 	"qswitch/internal/quota"
 )
 
@@ -28,6 +29,7 @@ type Server struct {
 	mu      sync.Mutex
 	logins  map[string]*loginSess
 	httpSrv *http.Server
+	ctx     context.Context
 }
 
 type loginSess struct {
@@ -41,11 +43,14 @@ type loginSess struct {
 }
 
 func New(a *app.App, addr string) *Server {
-	return &Server{App: a, Addr: addr, logins: map[string]*loginSess{}}
+	return &Server{App: a, Addr: addr, logins: map[string]*loginSess{}, ctx: context.Background()}
 }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": buildinfo.Version})
+	})
 	mux.HandleFunc("GET /api/overview", s.getOverview)
 	mux.HandleFunc("POST /api/capture", s.postCapture)
 	mux.HandleFunc("POST /api/probe", s.postProbe)
@@ -71,6 +76,11 @@ func (s *Server) Run(ctx context.Context) error {
 	if err := CheckLoopback(s.Addr); err != nil {
 		return err
 	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	s.mu.Lock()
+	s.ctx = ctx
+	s.mu.Unlock()
 	hs := &http.Server{
 		Addr:              s.Addr,
 		Handler:           s.Handler(),
@@ -145,11 +155,14 @@ func localRequest(r *http.Request) bool {
 	}
 	if o := r.Header.Get("Origin"); o != "" {
 		u, err := url.Parse(o)
-		if err != nil {
+		if err != nil || u.User != nil || u.Path != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
 			return false
 		}
-		oh := u.Hostname()
-		return oh == "127.0.0.1" || oh == "localhost" || oh == "::1"
+		scheme := "http"
+		if r.TLS != nil {
+			scheme = "https"
+		}
+		return u.Scheme == scheme && strings.EqualFold(u.Host, r.Host)
 	}
 	return true
 }
@@ -166,16 +179,26 @@ func writeErr(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
-func readJSON(r *http.Request, dst any) error {
-	defer r.Body.Close()
-	b, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+func readJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
+	body := http.MaxBytesReader(w, r.Body, 1<<20)
+	defer body.Close()
+	b, err := io.ReadAll(body)
 	if err != nil {
-		return err
+		status := http.StatusBadRequest
+		var limitErr *http.MaxBytesError
+		if errors.As(err, &limitErr) {
+			status = http.StatusRequestEntityTooLarge
+		}
+		writeErr(w, status, err.Error())
+		return false
 	}
-	if len(b) == 0 {
-		return nil
+	if len(b) > 0 {
+		if err := json.Unmarshal(b, dst); err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return false
+		}
 	}
-	return json.Unmarshal(b, dst)
+	return true
 }
 
 func (s *Server) getOverview(w http.ResponseWriter, r *http.Request) {
@@ -186,8 +209,7 @@ func (s *Server) postCapture(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Tool string `json:"tool"`
 	}
-	if err := readJSON(r, &req); err != nil {
-		writeErr(w, 400, err.Error())
+	if !readJSON(w, r, &req) {
 		return
 	}
 	t, err := adapter.ParseTool(req.Tool)
@@ -219,8 +241,7 @@ func (s *Server) postProbe(w http.ResponseWriter, r *http.Request) {
 		Tool string `json:"tool"`
 		ID   string `json:"id"`
 	}
-	if err := readJSON(r, &req); err != nil {
-		writeErr(w, 400, err.Error())
+	if !readJSON(w, r, &req) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
@@ -263,8 +284,7 @@ func (s *Server) postForget(w http.ResponseWriter, r *http.Request) {
 		Tool string `json:"tool"`
 		ID   string `json:"id"`
 	}
-	if err := readJSON(r, &req); err != nil {
-		writeErr(w, 400, err.Error())
+	if !readJSON(w, r, &req) {
 		return
 	}
 	t, err := adapter.ParseTool(req.Tool)
@@ -290,8 +310,7 @@ func (s *Server) postSwitch(w http.ResponseWriter, r *http.Request) {
 		KillCLI bool   `json:"kill_cli"`
 		CLIOnly bool   `json:"cli_only"`
 	}
-	if err := readJSON(r, &req); err != nil {
-		writeErr(w, 400, err.Error())
+	if !readJSON(w, r, &req) {
 		return
 	}
 	t, err := adapter.ParseTool(req.Tool)
@@ -308,7 +327,11 @@ func (s *Server) postSwitch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) postLoginCodex(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(context.Background(), 16*time.Minute)
+	var req struct{}
+	if !readJSON(w, r, &req) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(s.loginContext(), 16*time.Minute)
 	st, err := s.App.BeginCodexDeviceLogin(ctx)
 	if err != nil {
 		cancel()
@@ -321,20 +344,9 @@ func (s *Server) postLoginCodex(w http.ResponseWriter, r *http.Request) {
 	s.logins[id] = sess
 	s.mu.Unlock()
 	go func() {
+		defer cancel()
 		ident, err := s.App.CompleteCodexDeviceLogin(ctx, st)
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		cur := s.logins[id]
-		if cur == nil {
-			return
-		}
-		if err != nil {
-			cur.Status = "error"
-			cur.Err = err.Error()
-			return
-		}
-		cur.Status = "ok"
-		cur.Identity = ident
+		s.finishLogin(id, ident, err)
 	}()
 	writeJSON(w, 200, map[string]any{
 		"id":         id,
@@ -345,7 +357,11 @@ func (s *Server) postLoginCodex(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) postLoginGrok(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(context.Background(), 16*time.Minute)
+	var req struct{}
+	if !readJSON(w, r, &req) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(s.loginContext(), 16*time.Minute)
 	st, err := s.App.BeginGrokDeviceLogin(ctx)
 	if err != nil {
 		cancel()
@@ -358,20 +374,9 @@ func (s *Server) postLoginGrok(w http.ResponseWriter, r *http.Request) {
 	s.logins[id] = sess
 	s.mu.Unlock()
 	go func() {
+		defer cancel()
 		ident, err := s.App.CompleteGrokDeviceLogin(ctx, st)
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		cur := s.logins[id]
-		if cur == nil {
-			return
-		}
-		if err != nil {
-			cur.Status = "error"
-			cur.Err = err.Error()
-			return
-		}
-		cur.Status = "ok"
-		cur.Identity = ident
+		s.finishLogin(id, ident, err)
 	}()
 	url := st.VerifyURL
 	if url == "" {
@@ -385,15 +390,40 @@ func (s *Server) postLoginGrok(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) loginContext() context.Context {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ctx
+}
+
+func (s *Server) finishLogin(id string, ident adapter.Identity, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cur := s.logins[id]
+	if cur == nil || cur.Status != "pending" {
+		return
+	}
+	if err != nil {
+		cur.Status = "error"
+		cur.Err = err.Error()
+		return
+	}
+	cur.Status = "ok"
+	cur.Identity = ident
+}
+
 func (s *Server) getLogin(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("id")
 	s.mu.Lock()
 	sess := s.logins[id]
-	s.mu.Unlock()
 	if sess == nil {
+		s.mu.Unlock()
 		writeErr(w, 404, "login session not found")
 		return
 	}
+	snapshot := *sess
+	s.mu.Unlock()
+	sess = &snapshot
 	out := map[string]any{"id": sess.ID, "status": sess.Status}
 	if sess.Status == "ok" {
 		out["email"] = sess.Identity.Email
@@ -410,10 +440,12 @@ func (s *Server) postLoginCancel(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ID string `json:"id"`
 	}
-	_ = readJSON(r, &req)
+	if !readJSON(w, r, &req) {
+		return
+	}
 	s.mu.Lock()
 	sess := s.logins[req.ID]
-	if sess != nil && sess.cancel != nil {
+	if sess != nil && sess.Status == "pending" && sess.cancel != nil {
 		sess.cancel()
 		sess.Status = "error"
 		sess.Err = "cancelled"

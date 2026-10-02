@@ -58,7 +58,7 @@ func setupDesktopSwitch(t *testing.T) (*App, *switchFailureAdapter, *bool, *int,
 	}
 	a.Host.QuitFn = func(string) error { quits++; running = false; return nil }
 	a.Host.LaunchFn = func(string) error { launches++; running = true; return nil }
-	s := &switchFailureAdapter{Adapter: a.Adapters[adapter.Codex]}
+	s := &switchFailureAdapter{Adapter: a.Adapters[adapter.Codex], idle: true}
 	a.Adapters[adapter.Codex] = s
 	return a, s, &running, &quits, &launches
 }
@@ -77,6 +77,7 @@ func TestSwitchRejectsBusyBeforeQuittingDesktop(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a, s, running, quits, launches := setupDesktopSwitch(t)
+			s.idle = false
 			s.holders = adapter.Holders{Manual: []adapter.Proc{{PID: 7, Command: "/opt/homebrew/bin/codex"}}}
 			s.listErr = tc.listErr
 			path := filepath.Join(a.UserHome, ".codex", "auth.json")
@@ -98,6 +99,17 @@ func TestSwitchRejectsBusyBeforeQuittingDesktop(t *testing.T) {
 				t.Error("blocked switch changed credentials")
 			}
 		})
+	}
+}
+
+func TestSwitchActiveDesktopDoesNotQuit(t *testing.T) {
+	a, s, running, quits, launches := setupDesktopSwitch(t)
+	s.idle = false
+	if err := a.Switch(adapter.Codex, "acc-a", adapter.RestoreOpts{}, true); err == nil {
+		t.Fatal("active desktop switch should wait for idle")
+	}
+	if !*running || *quits != 0 || *launches != 0 {
+		t.Fatal("active desktop was interrupted")
 	}
 }
 

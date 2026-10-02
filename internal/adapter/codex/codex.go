@@ -230,8 +230,11 @@ func (a Adapter) IdentityOf(blob adapter.Blob) (adapter.Identity, error) {
 	return id, err
 }
 
-func (a Adapter) Restore(home string, blob adapter.Blob, _ adapter.RestoreOpts) error {
+func (a Adapter) Restore(home string, blob adapter.Blob, opts adapter.RestoreOpts) error {
 	if isDesktop(blob) {
+		if opts.CLIOnly {
+			return errors.New("codex: cannot restore a desktop-only snapshot with --cli-only")
+		}
 		list, err := a.procs()
 		if err != nil {
 			return err
@@ -252,31 +255,40 @@ func (a Adapter) Restore(home string, blob adapter.Blob, _ adapter.RestoreOpts) 
 	if err != nil {
 		return err
 	}
-	if err := livefile.AtomicWrite(authPath(home), raw, 0o600); err != nil {
-		return err
+	writeAuth := func() error {
+		return livefile.AtomicWrite(authPath(home), raw, 0o600)
 	}
-	return restoreAttachedDesktop(home, blob, a)
+	if opts.CLIOnly {
+		return writeAuth()
+	}
+	return restoreAttachedDesktop(home, blob, a, writeAuth)
 }
 
-func restoreAttachedDesktop(home string, blob adapter.Blob, a Adapter) error {
+func restoreAttachedDesktop(home string, blob adapter.Blob, a Adapter, writeAuth func() error) error {
 	var env struct {
 		DesktopZip []byte `json:"desktop_zip"`
 		RelRoot    string `json:"desktop_rel_root"`
 	}
-	if json.Unmarshal(blob.Payload, &env) != nil || len(env.DesktopZip) == 0 {
-		return nil
+	if err := json.Unmarshal(blob.Payload, &env); err != nil {
+		return err
+	}
+	if len(env.DesktopZip) == 0 {
+		return writeAuth()
 	}
 	list, err := a.procs()
 	if err != nil {
-		return nil
+		return err
 	}
-	if len(busy.ChatGPTApp(list)) > 0 {
-		return nil
+	if apps := busy.ChatGPTApp(list); len(apps) > 0 {
+		return &adapter.BusyError{Holders: adapter.Holders{Manual: apps, ChatGPTApp: true, Why: []string{"quit ChatGPT.app to restore desktop session"}}}
 	}
 	if env.RelRoot == "" {
 		env.RelRoot = snapshot.ChatGPTRelRoot
 	}
-	return snapshot.Unpack(filepath.Join(home, env.RelRoot), env.DesktopZip)
+	if env.RelRoot != snapshot.ChatGPTRelRoot {
+		return errors.New("codex: invalid desktop snapshot root")
+	}
+	return snapshot.Restore(filepath.Join(home, env.RelRoot), env.DesktopZip, writeAuth)
 }
 
 func isDesktop(blob adapter.Blob) bool {
@@ -297,6 +309,9 @@ func restoreDesktop(home string, blob adapter.Blob) error {
 	}
 	if env.RelRoot == "" || len(env.Zip) == 0 {
 		return errors.New("codex: empty desktop snapshot")
+	}
+	if env.RelRoot != snapshot.ChatGPTRelRoot {
+		return errors.New("codex: invalid desktop snapshot root")
 	}
 	return snapshot.Unpack(filepath.Join(home, env.RelRoot), env.Zip)
 }

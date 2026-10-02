@@ -10,6 +10,7 @@ import (
 
 	"qswitch/internal/adapter"
 	"qswitch/internal/app"
+	"qswitch/internal/buildinfo"
 	"qswitch/internal/web"
 )
 
@@ -18,6 +19,10 @@ func main() {
 }
 
 func run(args []string) int {
+	if len(args) == 1 && (args[0] == "version" || args[0] == "--version") {
+		fmt.Println(buildinfo.Version)
+		return 0
+	}
 	if len(args) == 0 {
 		usage()
 		return 2

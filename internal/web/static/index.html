@@ -420,15 +420,18 @@ async function onClick(e) {
       await load();
       msg("已切换。对应的 App 会用新号打开。");
     } else if (act === "login-codex" || act === "login-grok") {
-      startLogin(act === "login-grok" ? "grok" : "codex");
+      await startLogin(act === "login-grok" ? "grok" : "codex");
     }
   } catch (err) {
     b.disabled = false;
     msg(err.message, true);
   }
 }
-let loginTimer = null, loginId = "", loginTool = "codex";
+let loginTimer = null, loginId = "", loginTool = "codex", loginGeneration = 0;
 async function startLogin(tool) {
+  const generation = ++loginGeneration;
+  clearInterval(loginTimer);
+  loginId = "";
   loginTool = tool;
   $("loginTitle").textContent = tool === "grok" ? "Grok Device Code 加号" : "ChatGPT Device Code 加号";
   $("loginHint").textContent = tool === "grok"
@@ -439,7 +442,17 @@ async function startLogin(tool) {
   $("loginCode").textContent = "";
   $("loginMsg").textContent = "正在向官方申请一次性代码…";
   $("loginDlg").showModal();
-  const r = await api("/api/login/" + tool, { method: "POST", body: "{}" });
+  let r;
+  try {
+    r = await api("/api/login/" + tool, { method: "POST", body: "{}" });
+  } catch (e) {
+    if (generation === loginGeneration) $("loginMsg").textContent = e.message;
+    return;
+  }
+  if (generation !== loginGeneration) {
+    await api("/api/login/" + tool + "/cancel", { method: "POST", body: JSON.stringify({ id: r.id }) }).catch(() => {});
+    return;
+  }
   loginId = r.id;
   $("loginUrl").href = r.url;
   $("loginUrl").textContent = r.url;
@@ -449,8 +462,10 @@ async function startLogin(tool) {
 }
 async function pollLogin() {
   if (!loginId) return;
+  const generation = loginGeneration;
   try {
     const r = await api("/api/login/" + loginTool + "?id=" + encodeURIComponent(loginId));
+    if (generation !== loginGeneration) return;
     if (r.status === "ok") {
       clearInterval(loginTimer);
       $("loginDlg").close();
@@ -460,13 +475,18 @@ async function pollLogin() {
       clearInterval(loginTimer);
       $("loginMsg").textContent = r.error || "失败";
     }
-  } catch (e) { $("loginMsg").textContent = e.message; }
+  } catch (e) { if (generation === loginGeneration) $("loginMsg").textContent = e.message; }
 }
-$("loginCancel").onclick = async () => {
+async function cancelLogin() {
+  ++loginGeneration;
   clearInterval(loginTimer);
-  if (loginId) await api("/api/login/" + loginTool + "/cancel", { method: "POST", body: JSON.stringify({ id: loginId }) }).catch(() => {});
+  const id = loginId, tool = loginTool;
+  loginId = "";
   $("loginDlg").close();
-};
+  if (id) await api("/api/login/" + tool + "/cancel", { method: "POST", body: JSON.stringify({ id }) }).catch(() => {});
+}
+$("loginCancel").onclick = cancelLogin;
+$("loginDlg").addEventListener("cancel", e => { e.preventDefault(); cancelLogin(); });
 document.addEventListener("click", onClick);
 load();
 </script>

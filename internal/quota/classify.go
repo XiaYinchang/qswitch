@@ -34,12 +34,14 @@ type Bucket struct {
 }
 
 type Result struct {
-	Class    Class
-	UsedPct  float64
-	ResetsAt int64 // unix seconds, 0 if unknown
-	Source   string
-	Plan     string
-	Buckets  []Bucket
+	Class       Class
+	UsedPct     float64
+	ResetsAt    int64 // unix seconds, 0 if unknown
+	Source      string
+	Plan        string
+	Buckets     []Bucket
+	ObservedAt  time.Time // Local evidence time, not the time the file was polled.
+	Timestamped bool      // False when only the containing file's mtime is available.
 }
 
 func ClassifyHTTP(status int, body []byte) Result {

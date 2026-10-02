@@ -6,6 +6,8 @@ import (
 	"strings"
 	"time"
 
+	"qswitch/internal/livefile"
+
 	toml "github.com/pelletier/go-toml/v2"
 )
 
@@ -158,7 +160,7 @@ func (c Config) Save(path string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, b, 0o600)
+	return livefile.AtomicWrite(path, b, 0o600)
 }
 
 func (c Config) ToolEnabled(name string) bool {

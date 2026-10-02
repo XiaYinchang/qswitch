@@ -12,6 +12,7 @@ import (
 
 	"qswitch/internal/adapter"
 	"qswitch/internal/adapter/codex"
+	"qswitch/internal/livefile"
 	"qswitch/internal/quota"
 	"qswitch/internal/secutil"
 )
@@ -154,8 +155,17 @@ func (a *App) enrollCodexAuthJSON(ctx context.Context, raw []byte) (adapter.Iden
 }
 
 func (a *App) enrollCodexBlob(ctx context.Context, blob adapter.Blob) (adapter.Identity, error) {
-	if err := a.saveBlob(blob); err != nil {
+	lock, err := livefile.Acquire(filepath.Join(a.DataDir, "locks", "codex.lock"))
+	if err != nil {
 		return adapter.Identity{}, err
+	}
+	err = a.saveBlob(blob)
+	closeErr := lock.Close()
+	if err != nil {
+		return adapter.Identity{}, err
+	}
+	if closeErr != nil {
+		return adapter.Identity{}, closeErr
 	}
 	_ = a.probeAccount(ctx, adapter.Codex, blob.Identity.StableID, false)
 	label := blob.Identity.DisplayName

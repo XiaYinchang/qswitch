@@ -67,6 +67,7 @@ func remainingPct(class string, used float64) *float64 {
 
 func (a *App) Overview() Overview {
 	var out Overview
+	cfg := a.cfgSnapshot()
 	now := a.now().Unix()
 	for _, t := range adapter.AllTools() {
 		p, _ := a.State.GetPointer(string(t))
@@ -77,8 +78,8 @@ func (a *App) Overview() Overview {
 		tv := ToolView{
 			Tool:        string(t),
 			LiveID:      p.StableID,
-			Enabled:     a.Cfg.ToolEnabled(string(t)),
-			Auto:        a.Cfg.General.AutoSwitch && a.Cfg.ToolEnabled(string(t)),
+			Enabled:     cfg.ToolEnabled(string(t)),
+			Auto:        cfg.General.AutoSwitch && cfg.ToolEnabled(string(t)),
 			Desync:      p.Desync,
 			Busy:        man.ManualBusy(),
 			ChatGPTApp:  aut.ChatGPTApp,

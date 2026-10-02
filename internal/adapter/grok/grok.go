@@ -240,12 +240,15 @@ func (a Adapter) IdentityOf(blob adapter.Blob) (adapter.Identity, error) {
 	return identityFromRaw(env.AuthJSON)
 }
 
-func (a Adapter) Restore(home string, blob adapter.Blob, _ adapter.RestoreOpts) error {
+func (a Adapter) Restore(home string, blob adapter.Blob, opts adapter.RestoreOpts) error {
 	var head struct {
 		Kind string `json:"kind"`
 	}
 	_ = json.Unmarshal(blob.Payload, &head)
 	if head.Kind == snapshot.KindDesktop {
+		if opts.CLIOnly {
+			return errors.New("grok: cannot restore a desktop-only snapshot with --cli-only")
+		}
 		list, err := a.procs()
 		if err != nil {
 			return err
@@ -262,6 +265,9 @@ func (a Adapter) Restore(home string, blob adapter.Blob, _ adapter.RestoreOpts) 
 		}
 		if env.RelRoot == "" || len(env.Zip) == 0 {
 			return errors.New("grok: empty desktop snapshot")
+		}
+		if env.RelRoot != snapshot.GrokBotRelRoot {
+			return errors.New("grok: invalid desktop snapshot root")
 		}
 		return snapshot.Unpack(filepath.Join(home, env.RelRoot), env.Zip)
 	}
@@ -281,31 +287,40 @@ func (a Adapter) Restore(home string, blob adapter.Blob, _ adapter.RestoreOpts) 
 	if len(env.AuthJSON) == 0 {
 		return errors.New("grok: empty auth_json")
 	}
-	if err := livefile.AtomicWrite(authPath(home), env.AuthJSON, 0o600); err != nil {
-		return err
+	writeAuth := func() error {
+		return livefile.AtomicWrite(authPath(home), env.AuthJSON, 0o600)
 	}
-	return restoreAttachedDesktop(home, blob, a)
+	if opts.CLIOnly {
+		return writeAuth()
+	}
+	return restoreAttachedDesktop(home, blob, a, writeAuth)
 }
 
-func restoreAttachedDesktop(home string, blob adapter.Blob, a Adapter) error {
+func restoreAttachedDesktop(home string, blob adapter.Blob, a Adapter, writeAuth func() error) error {
 	var env struct {
 		DesktopZip []byte `json:"desktop_zip"`
 		RelRoot    string `json:"desktop_rel_root"`
 	}
-	if json.Unmarshal(blob.Payload, &env) != nil || len(env.DesktopZip) == 0 {
-		return nil
+	if err := json.Unmarshal(blob.Payload, &env); err != nil {
+		return err
+	}
+	if len(env.DesktopZip) == 0 {
+		return writeAuth()
 	}
 	list, err := a.procs()
 	if err != nil {
-		return nil
+		return err
 	}
-	if len(busy.GrokBotApp(list)) > 0 {
-		return nil
+	if apps := busy.GrokBotApp(list); len(apps) > 0 {
+		return &adapter.BusyError{Holders: adapter.Holders{Manual: apps, Why: []string{"quit Grok Bot.app to restore desktop session"}}}
 	}
 	if env.RelRoot == "" {
 		env.RelRoot = snapshot.GrokBotRelRoot
 	}
-	return snapshot.Unpack(filepath.Join(home, env.RelRoot), env.DesktopZip)
+	if env.RelRoot != snapshot.GrokBotRelRoot {
+		return errors.New("grok: invalid desktop snapshot root")
+	}
+	return snapshot.Restore(filepath.Join(home, env.RelRoot), env.DesktopZip, writeAuth)
 }
 
 func (a Adapter) Idle(home string, grace time.Duration) bool {

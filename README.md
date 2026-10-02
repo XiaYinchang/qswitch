@@ -6,6 +6,9 @@
 
 - 正在生成不杀。切号时：空闲后结束对应 CLI；关掉并重启 ChatGPT.app / Cursor.app / Grok Bot.app；写入官方登录文件。Cursor 只改 `cursorAuth/*`，不碰聊天和 13GB 状态库。不会擅自再拉起一条新的 CLI 会话（没有工作目录），新开的 CLI 才会用新号。
 - 关闭桌面前先确认 CLI 可以切换，`--cli-only --kill-cli` 同样必须等待空闲。关闭桌面后若切换失败，会尝试重新打开原应用，并保留切换和重启错误。已排队的耗尽切换若遇到账号恢复、当前账号变化或自动切换关闭，会取消。
+- 保活、探测、切号和删除按工具互斥；等待锁后重新读取凭据，避免重复使用轮换的 refresh token。保活临时失败保留已有配额，永久失效标记需要重新登录，两者均退避。daemon 每 2 秒重载配置，关闭自动切换不必重启服务。
+- 本地日志采用配额事件的时间，旧事件不会覆盖更新的探测结果或刚切换的账号。没有事件时间的旧格式日志只在尚未探测或切号时作为初始线索。
+- Codex/Grok 的 `--cli-only` 不恢复桌面快照。完整恢复先验证快照，桌面写入或最后的 CLI 写入失败时回滚受影响文件；回滚失败会明确报错。这不包含进程或主机突然中断后的自动恢复。
 - 查配额按工具适配，不把裸 429 当作用尽。Codex 看会话 JSONL 的 `rate_limits` / `usage_limit_reached`；Grok 看本地 `billing: fetched credits config` 和 HTTP 402 `usage balance exhausted`；Cursor 看 `GetCurrentPeriodUsage` 的 Auto（自家模型）与高级模型；Grok Bot 周额度走 `GetSandUsageStatus`，页面上和 Codex/Grok/Cursor 并列。忽略 `resource_exhausted`（那是容量）。平时只探当前号。ChatGPT 用尽号不按显示的重置时间死等（窗口可能提前恢复），大约每 30 分钟点探一次；Grok/Cursor 仍等到显示的重置时间再查。不把空闲号当心跳扫。HTTP 间隔按消耗速度估「还能用多久」。探测失败退避 2 小时。
 - Cursor 桌面和 cursor-agent 共用同一套 token：`switch cursor` 会把选中账号同时写进 IDE 和 CLI。
 - 官方客户端登录第二个号时，`qswitchd` 会自己收进仓库，不必再跑 `qswitch capture`。
@@ -38,6 +41,7 @@ CGO_ENABLED=0 go build -o bin/qswitch ./cmd/qswitch
 CGO_ENABLED=0 go build -o bin/qswitchd ./cmd/qswitchd
 
 qswitch init
+qswitch version
 qswitch capture
 qswitch login codex
 qswitch login grok
@@ -51,6 +55,8 @@ qswitch serve [--addr 127.0.0.1:7432]
 ```
 
 本机页面默认 `http://127.0.0.1:7432`（只绑 loopback）。`qswitchd` 起来后也能开；这时再跑 `qswitch serve` 会打印现成地址然后退出，不会跟 daemon 抢端口。用来看余量、收录当前登录、ChatGPT / Grok Device Code 加号、删除仓库里的号。页面上不会出现 token。
+
+`GET /api/health` 返回服务存活状态和构建版本；配额与账号状态以 `/api/overview` 为准。网页写入要求同源请求，命令行无 Origin 的本地请求仍可使用。
 
 Cursor 切号会同时写入 IDE 和 CLI 的登录字段。
 
