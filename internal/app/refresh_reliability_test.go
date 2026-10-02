@@ -325,3 +325,44 @@ func TestKeepAliveRechecksExpiredStateAfterLoadingNewBlob(t *testing.T) {
 		})
 	}
 }
+
+func TestSuccessfulQuotaResponseClearsObsoleteAuthFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name, previous, body, want string
+		status                     int
+	}{
+		{"missing quota", "expired", `{"config":{"currentPeriod":{"type":"monthly"},"onDemandCap":{"val":0}}}`, "unknown", 200},
+		{"known quota preserved", "ok", `{"config":{"currentPeriod":{"type":"monthly"}}}`, "ok", 200},
+		{"server failure", "expired", `{}`, "expired", 503},
+		{"network failure", "expired", ``, "expired", 0},
+		{"authentication failure", "expired", `{}`, "expired", 401},
+		{"invalid response", "expired", `<html>proxy</html>`, "expired", 200},
+		{"error envelope", "expired", `{"error":"unauthorized"}`, "expired", 200},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, _ := setup(t)
+			writeGrokLive(t, a.UserHome, "grok-live", "live@example.test")
+			if _, _, err := a.Capture(adapter.Grok); err != nil {
+				t.Fatal(err)
+			}
+			now := a.now()
+			if err := a.State.UpdateQuotaSnapshot("grok", "grok-live", tc.previous, 21, now.Add(time.Hour).Unix(), now.Unix()); err != nil {
+				t.Fatal(err)
+			}
+			a.HTTP.Client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				if req.URL.Host != "cli-chat-proxy.grok.com" {
+					t.Fatalf("unexpected refresh request: %s", req.URL.Host)
+				}
+				if tc.status == 0 {
+					return nil, fmt.Errorf("fixture connection failure")
+				}
+				return &http.Response{StatusCode: tc.status, Body: io.NopCloser(strings.NewReader(tc.body)), Header: make(http.Header), Request: req}, nil
+			})}
+			a.ProbeAccount(context.Background(), adapter.Grok, "grok-live")
+			ac, err := a.State.GetAccount("grok", "grok-live")
+			if err != nil || ac.LastQuotaClass != tc.want || ac.LastUsedPct != 21 && tc.status != 401 {
+				t.Fatalf("got class=%s used=%v error=%v; want %s", ac.LastQuotaClass, ac.LastUsedPct, err, tc.want)
+			}
+		})
+	}
+}

@@ -1417,6 +1417,10 @@ func (a *App) probeAccount(ctx context.Context, tool adapter.Tool, id string, ga
 		class := acc.LastQuotaClass
 		pct := acc.LastUsedPct
 		resets := acc.LastResetsAt
+		// Missing quota fields do not invalidate a successful authentication.
+		if class == string(quota.Expired) && res.Authenticated {
+			class = string(quota.Unknown)
+		}
 		if class == "" {
 			class = string(quota.Unknown)
 		}

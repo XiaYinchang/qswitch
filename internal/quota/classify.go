@@ -34,21 +34,33 @@ type Bucket struct {
 }
 
 type Result struct {
-	Class       Class
-	UsedPct     float64
-	ResetsAt    int64 // unix seconds, 0 if unknown
-	Source      string
-	Plan        string
-	Buckets     []Bucket
-	ObservedAt  time.Time // Local evidence time, not the time the file was polled.
-	Timestamped bool      // False when only the containing file's mtime is available.
+	Class         Class
+	UsedPct       float64
+	ResetsAt      int64 // unix seconds, 0 if unknown
+	Source        string
+	Plan          string
+	Buckets       []Bucket
+	ObservedAt    time.Time // Local evidence time, not the time the file was polled.
+	Timestamped   bool      // False when only the containing file's mtime is available.
+	Authenticated bool      // A successful JSON object from the protected quota endpoint.
 }
 
 func ClassifyHTTP(status int, body []byte) Result {
 	return Classify(Kind(""), status, body)
 }
 
-func Classify(kind Kind, status int, body []byte) Result {
+func Classify(kind Kind, status int, body []byte) (result Result) {
+	defer func() {
+		if status != 200 {
+			return
+		}
+		var object map[string]json.RawMessage
+		if json.Unmarshal(body, &object) == nil && object != nil {
+			_, hasError := object["error"]
+			_, hasErrors := object["errors"]
+			result.Authenticated = !hasError && !hasErrors
+		}
+	}()
 	if status == 401 || status == 403 {
 		return Result{Class: Expired, Source: "http"}
 	}
