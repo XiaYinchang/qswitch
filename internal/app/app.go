@@ -337,7 +337,7 @@ func ambiguousRef(tool, ref string, hits []state.Account) error {
 	return errors.New(b.String())
 }
 
-func (a *App) Switch(tool adapter.Tool, ref string, opts adapter.RestoreOpts, killCLI bool) error {
+func (a *App) Switch(tool adapter.Tool, ref string, opts adapter.RestoreOpts, killCLI bool) (retErr error) {
 	ad := a.Adapters[tool]
 	blob, err := a.loadBlob(tool, ref)
 	if err != nil {
@@ -355,6 +355,24 @@ func (a *App) Switch(tool adapter.Tool, ref string, opts adapter.RestoreOpts, ki
 	}
 	defer lock.Close()
 
+	// Check CLI blockers before quitting a desktop app. Cursor itself will be
+	// closed below, but its CLI must pass the same idle check as other tools.
+	preflight, err := ad.ManualBlockers(a.UserHome)
+	if err != nil {
+		return err
+	}
+	if tool == adapter.Cursor {
+		preflight = stripCursorApp(preflight)
+	}
+	if preflight.ManualBusy() {
+		if !killCLI {
+			return &adapter.BusyError{Holders: preflight}
+		}
+		if !ad.Idle(a.UserHome, a.Cfg.IdleGrace()) {
+			return fmt.Errorf("not idle (idle_grace=%s); blocked_by_pid=%v", a.Cfg.IdleGrace(), preflight.ManualPIDs())
+		}
+	}
+
 	relaunch := ""
 	if !opts.CLIOnly {
 		relaunch, err = a.quitDesktop(tool)
@@ -362,6 +380,14 @@ func (a *App) Switch(tool adapter.Tool, ref string, opts adapter.RestoreOpts, ki
 			return err
 		}
 	}
+	defer func() {
+		if retErr != nil && relaunch != "" {
+			if err := a.Host.Launch(relaunch); err != nil {
+				retErr = errors.Join(retErr, fmt.Errorf("%s relaunch failed: %w", appLabel(relaunch), err))
+				a.Notify.Send("qswitch", fmt.Sprintf("切换失败，%s 未能重新打开。", appLabel(relaunch)))
+			}
+		}
+	}()
 
 	h, err := ad.ManualBlockers(a.UserHome)
 	if err != nil {
@@ -373,7 +399,7 @@ func (a *App) Switch(tool adapter.Tool, ref string, opts adapter.RestoreOpts, ki
 
 	if h.ManualBusy() {
 		if killCLI {
-			if !opts.CLIOnly && !ad.Idle(a.UserHome, a.Cfg.IdleGrace()) {
+			if !ad.Idle(a.UserHome, a.Cfg.IdleGrace()) {
 				return fmt.Errorf("not idle (idle_grace=%s); blocked_by_pid=%v", a.Cfg.IdleGrace(), h.ManualPIDs())
 			}
 			if err := ad.KillCLI(a.UserHome); err != nil {
@@ -435,12 +461,14 @@ func (a *App) Switch(tool adapter.Tool, ref string, opts adapter.RestoreOpts, ki
 	}
 	_ = a.State.ClearPending(string(tool))
 	if relaunch != "" {
+		name := relaunch
+		relaunch = "" // One launch attempt; a failure is reported to the caller.
 		time.Sleep(200 * time.Millisecond)
-		if err := a.Host.Launch(relaunch); err != nil {
-			a.Notify.Send("qswitch", fmt.Sprintf("switched %s -> %s, but failed to relaunch %s: %v", tool, blob.Identity.Email, appLabel(relaunch), err))
-			return fmt.Errorf("credentials written, %s relaunch failed: %w", appLabel(relaunch), err)
+		if err := a.Host.Launch(name); err != nil {
+			a.Notify.Send("qswitch", fmt.Sprintf("switched %s -> %s, but failed to relaunch %s: %v", tool, blob.Identity.Email, appLabel(name), err))
+			return fmt.Errorf("credentials written, %s relaunch failed: %w", appLabel(name), err)
 		}
-		a.Notify.Send("qswitch", fmt.Sprintf("switched %s -> %s (%s). 已重启 %s。", tool, blob.Identity.Email, blob.Identity.StableID, appLabel(relaunch)))
+		a.Notify.Send("qswitch", fmt.Sprintf("switched %s -> %s (%s). 已重启 %s。", tool, blob.Identity.Email, blob.Identity.StableID, appLabel(name)))
 		return nil
 	}
 	a.Notify.Send("qswitch", fmt.Sprintf("switched %s -> %s (%s). 新进程才会用新号。", tool, blob.Identity.Email, blob.Identity.StableID))
@@ -1143,12 +1171,19 @@ func (a *App) probeAccount(ctx context.Context, tool adapter.Tool, id string, ga
 		return quota.Result{Class: quota.Class(acc.LastQuotaClass), UsedPct: acc.LastUsedPct, ResetsAt: acc.LastResetsAt, Source: "backoff"}
 	}
 	if gateInterval {
-		interval := a.quotaInterval(string(tool), id)
-		if acc.LastHTTPAt > 0 && now.Unix()-acc.LastHTTPAt < int64(interval.Seconds()) {
-			return quota.Result{Class: quota.Class(acc.LastQuotaClass), UsedPct: acc.LastUsedPct, ResetsAt: acc.LastResetsAt, Source: "cached"}
-		}
-		if acc.LastQuotaClass == string(quota.Exhausted) && acc.LastResetsAt > now.Unix() {
-			return quota.Result{Class: quota.Exhausted, UsedPct: acc.LastUsedPct, ResetsAt: acc.LastResetsAt, Source: "cached"}
+		if tool == adapter.Codex && acc.LastQuotaClass == string(quota.Exhausted) {
+			// The current account needs the same early recovery checks as parked accounts.
+			if !a.recoverDue(tool, acc) {
+				return quota.Result{Class: quota.Exhausted, UsedPct: acc.LastUsedPct, ResetsAt: acc.LastResetsAt, Source: "cached"}
+			}
+		} else {
+			interval := a.quotaInterval(string(tool), id)
+			if acc.LastHTTPAt > 0 && now.Unix()-acc.LastHTTPAt < int64(interval.Seconds()) {
+				return quota.Result{Class: quota.Class(acc.LastQuotaClass), UsedPct: acc.LastUsedPct, ResetsAt: acc.LastResetsAt, Source: "cached"}
+			}
+			if acc.LastQuotaClass == string(quota.Exhausted) && acc.LastResetsAt > now.Unix() {
+				return quota.Result{Class: quota.Exhausted, UsedPct: acc.LastUsedPct, ResetsAt: acc.LastResetsAt, Source: "cached"}
+			}
 		}
 	}
 	blob, err := a.loadBlob(tool, id)
@@ -1200,9 +1235,8 @@ func (a *App) probeAccount(ctx context.Context, tool adapter.Tool, id string, ga
 	default:
 		return quota.Result{Class: quota.Unknown}
 	}
-	backoff := acc.HTTPBackoffUntil
 	if res.Class == quota.Unknown {
-		backoff = now.Add(a.Cfg.Backoff()).Unix()
+		backoff := now.Add(a.Cfg.Backoff()).Unix()
 		class := acc.LastQuotaClass
 		pct := acc.LastUsedPct
 		resets := acc.LastResetsAt
@@ -1220,7 +1254,7 @@ func (a *App) probeAccount(ctx context.Context, tool adapter.Tool, id string, ga
 		_ = a.State.LogQuota(string(tool), id, string(res.Class), res.Source, res.UsedPct, now)
 		return res
 	}
-	_ = a.State.UpdateQuota(string(tool), id, string(res.Class), res.UsedPct, res.ResetsAt, now.Unix(), now.Unix(), backoff)
+	_ = a.State.UpdateQuota(string(tool), id, string(res.Class), res.UsedPct, res.ResetsAt, now.Unix(), now.Unix(), 0)
 	if len(res.Buckets) > 0 {
 		_ = a.State.SetQuotaDetail(string(tool), id, quota.EncodeBuckets(quota.MergeBuckets(quota.DecodeBuckets(acc.QuotaDetail), res.Buckets)))
 	}
@@ -1321,6 +1355,25 @@ func (a *App) TryApply(tool adapter.Tool, killCLI bool) error {
 	pend, err := a.State.GetPending(string(tool))
 	if err != nil || pend.ToID == "" {
 		return err
+	}
+	if pend.Reason == "exhausted" {
+		if !a.Cfg.General.AutoSwitch || !a.Cfg.ToolEnabled(string(tool)) {
+			return a.State.ClearPending(string(tool))
+		}
+		p, err := a.State.GetPointer(string(tool))
+		if err != nil {
+			return err
+		}
+		if p.StableID != pend.FromID {
+			return a.State.ClearPending(string(tool))
+		}
+		ac, err := a.State.GetAccount(string(tool), pend.FromID)
+		if err != nil {
+			return err
+		}
+		if quota.Class(ac.LastQuotaClass) != quota.Exhausted {
+			return a.State.ClearPending(string(tool))
+		}
 	}
 	ad := a.Adapters[tool]
 	auto, _ := ad.AutoBlockers(a.UserHome)

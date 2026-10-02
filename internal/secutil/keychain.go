@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -14,6 +15,10 @@ import (
 const (
 	Service = "qswitch.vault"
 	Account = "wrap-key-v1"
+
+	// security returns the low eight bits of the Keychain OSStatus.
+	securityItemNotFound = 44 // errSecItemNotFound (-25300)
+	securityDuplicate    = 45 // errSecDuplicateItem (-25299)
 )
 
 type KeyProvider interface {
@@ -51,56 +56,56 @@ func (d Darwin) bin() string {
 }
 
 func (d Darwin) GetOrCreate(trustedBins []string) ([]byte, error) {
-	if k, err := d.find(); err == nil && len(k) == 32 {
+	k, err := d.find()
+	if err == nil {
 		return k, nil
 	}
-	k := make([]byte, 32)
-	if _, err := rand.Read(k); err != nil {
+	if !securityExit(err, securityItemNotFound) {
 		return nil, err
 	}
-	args := []string{"add-generic-password", "-U", "-s", Service, "-a", Account, "-w", hex.EncodeToString(k)}
+	k = make([]byte, 32)
+	defer Zero(k)
+	if _, err := rand.Read(k); err != nil {
+		return nil, fmt.Errorf("keychain generate: %w", err)
+	}
+	// Never update an existing key: all saved vault entries depend on it.
+	args := []string{"add-generic-password", "-s", Service, "-a", Account, "-w", hex.EncodeToString(k)}
 	for _, t := range trustedBins {
 		if t != "" {
 			args = append(args, "-T", t)
 		}
 	}
 	cmd := exec.Command(d.bin(), args...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return nil, fmt.Errorf("keychain create: %w (%s)", err, redact(string(out)))
+	if err := cmd.Run(); err != nil && !securityExit(err, securityDuplicate) {
+		return nil, fmt.Errorf("keychain create: %w", err)
 	}
-	Zero(k)
-	got, err := d.find()
-	if err != nil {
-		return nil, err
-	}
-	return got, nil
+	// Another process may have created the key after our initial lookup.
+	return d.find()
 }
 
 func (d Darwin) find() ([]byte, error) {
 	cmd := exec.Command(d.bin(), "find-generic-password", "-s", Service, "-a", Account, "-w")
+	cmd.Stderr = io.Discard
 	out, err := cmd.Output()
+	defer Zero(out)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("keychain find: %w", err)
 	}
 	s := strings.TrimSpace(string(out))
-	Zero(out)
 	if s == "" {
 		return nil, errors.New("keychain empty")
 	}
 	b, err := hex.DecodeString(s)
 	if err != nil || len(b) != 32 {
+		Zero(b)
 		return nil, errors.New("keychain wrap key malformed")
 	}
 	return b, nil
 }
 
-func redact(s string) string {
-	s = strings.TrimSpace(s)
-	if len(s) > 200 {
-		s = s[:200]
-	}
-	return s
+func securityExit(err error, code int) bool {
+	var exitErr *exec.ExitError
+	return errors.As(err, &exitErr) && exitErr.ExitCode() == code
 }
 
 func Zero(b []byte) {
