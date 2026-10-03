@@ -1,6 +1,6 @@
 # qswitch
 
-本机多账号配额轮换器：把 Codex / Grok / Cursor / Devin 的官方登录收进加密仓库，当前号用尽后自动切到下一个有余量的号。 Devin 展示套餐（Free / Pro / Max / Teams）以及日额度和周额度。
+本机多账号配额轮换器：把 Codex / Grok / Cursor / Devin CLI / Kimi Code 的官方登录收进加密仓库，当前号用尽后自动切到下一个有余量的号。 Devin 展示套餐及适用的日/周额度；ZCode 桌面 Coding Plan 支持独立的订阅监控。
 
 硬约束：
 
@@ -18,6 +18,14 @@
 - Grok 加号同样走 Device Code：`qswitch login grok` 优先拉起本机官方 `grok login --device-auth`（隔离 `GROK_HOME`，不改当前 `auth.json` / 不 logout）。页面加号走同一套 `auth.x.ai` device code。不要在当前 grok 里换号或 `grok logout`。
 - 同一登录下的多个 workspace 共用当前 live 的 access token 去查用量；不同邮箱的 refresh_token 按官方 OAuth 刷新写回仓库。换号时若仍是同一 Gmail，会把 live token 合并进目标 workspace。
 - Grok 闲置号同样保活：access 大约 6 小时过期，官方 CLI 会在到期前用 `refresh_token` 向 `auth.x.ai` 换票并轮换 refresh。仓库里的闲置号按同一条 OIDC 刷新写回；当前 live 会话不抢 refresh（避免和 CLI 双花）。Cursor 桌面/CLI 存的是约 60 天的 session JWT，access 与 refresh 是同一张票，没有可安全调用的续期接口，过期或登出作废后只能重新登录。
+
+## 新增订阅
+
+- **ZCode**：读取桌面客户端 `~/.zcode/v2/credentials.json` 中当前 BigModel / Z.ai 个人 Coding Plan，支持官方加密格式。使用官方 `/api/monitor/usage/quota/limit`，显示套餐、5 小时/周模型额度及月度 MCP 额度。MCP 用尽不误判模型额度耗尽；切换套餐后删除旧窗口。当前仅监控订阅，账号在 ZCode 中切换；不修改独立的 ZCode CLI 配置。
+- **Kimi Code**：读取 `~/.kimi-code/credentials/kimi-code.json`（支持 `KIMI_CODE_HOME`），用 `/coding/v1/me` 确认账号身份，用 `/coding/v1/usages` 展示 5 小时、7 天、月度总额度及编程分项。编程分项不作为独立耗尽门限。切号只原子替换凭据文件，保留 config/hooks；有 Kimi 会话运行时阻断切换。闲置账号按官方 OAuth 协议续期写入加密仓库，当前登录由官方客户端续期。身份无法确认时不收录、不抢用 refresh token。
+- **Devin CLI**：按官方 `billingStrategy` 识别订阅额度，Max 仅显示周额度；总体重置时间跟随实际限制窗口。CLI 与 Devin.app 使用独立凭据，CLI 切号不关闭或改写 Devin.app。
+
+首次收录 Kimi 需要先在官方客户端登录；未安装或未登录时保持空状态。
 
 ## 数据目录（敏感信息不进 git）
 
@@ -49,7 +57,7 @@ qswitch login codex
 qswitch login grok
 qswitch list
 qswitch status
-qswitch probe [--tool codex|grok|cursor|devin]
+qswitch probe [--tool codex|grok|cursor|devin|zcode|kimi]
 qswitch switch codex <id-or-email>
 qswitch switch cursor <id-or-email>                # 会关掉并重启 Cursor.app
 qswitch doctor

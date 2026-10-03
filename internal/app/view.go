@@ -18,6 +18,7 @@ type ToolView struct {
 	LiveID      string        `json:"live_id"`
 	Enabled     bool          `json:"enabled"`
 	Auto        bool          `json:"auto"`
+	Switchable  bool          `json:"switchable"`
 	Desync      bool          `json:"desync"`
 	Busy        bool          `json:"busy"`
 	ChatGPTApp  bool          `json:"chatgpt_app"`
@@ -79,7 +80,8 @@ func (a *App) Overview() Overview {
 			Tool:        string(t),
 			LiveID:      p.StableID,
 			Enabled:     cfg.ToolEnabled(string(t)),
-			Auto:        cfg.General.AutoSwitch && cfg.ToolEnabled(string(t)),
+			Auto:        cfg.General.AutoSwitch && cfg.ToolEnabled(string(t)) && t != adapter.ZCode,
+			Switchable:  t != adapter.ZCode,
 			Desync:      p.Desync,
 			Busy:        man.ManualBusy(),
 			ChatGPTApp:  aut.ChatGPTApp,

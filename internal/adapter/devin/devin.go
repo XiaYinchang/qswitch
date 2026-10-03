@@ -82,9 +82,9 @@ func (a Adapter) AutoBlockers(home string) (adapter.Holders, error) {
 	}
 	apps := busy.DevinApp(list)
 	if len(apps) > 0 {
-		h.AutoExtra = apps
+		// Desktop has an independent authentication store. This adapter only
+		// restores CLI credentials, so the desktop process is informational.
 		h.DevinApp = true
-		h.Why = append(h.Why, "devin.app running")
 	}
 	return h, nil
 }

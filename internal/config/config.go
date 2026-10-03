@@ -33,6 +33,8 @@ type Config struct {
 	Grok    Tool    `toml:"grok"`
 	Cursor  Tool    `toml:"cursor"`
 	Devin   Tool    `toml:"devin"`
+	ZCode   Tool    `toml:"zcode"`
+	Kimi    Tool    `toml:"kimi"`
 	Web     Web     `toml:"web"`
 }
 
@@ -86,6 +88,8 @@ func Default() Config {
 		Grok:   Tool{Enabled: true},
 		Cursor: Tool{Enabled: true},
 		Devin:  Tool{Enabled: true},
+		ZCode:  Tool{Enabled: true},
+		Kimi:   Tool{Enabled: true},
 		Web:    Web{Enabled: true, Addr: DefaultWebAddr},
 	}
 }
@@ -173,6 +177,10 @@ func (c Config) ToolEnabled(name string) bool {
 		return c.Cursor.Enabled
 	case "devin":
 		return c.Devin.Enabled
+	case "zcode":
+		return c.ZCode.Enabled
+	case "kimi":
+		return c.Kimi.Enabled
 	default:
 		return false
 	}
@@ -188,11 +196,17 @@ func (c *Config) SetToolEnabled(name string, on bool) error {
 		c.Cursor.Enabled = on
 	case "devin":
 		c.Devin.Enabled = on
+	case "zcode":
+		c.ZCode.Enabled = on
+	case "kimi":
+		c.Kimi.Enabled = on
 	case "", "all":
 		c.Codex.Enabled = on
 		c.Grok.Enabled = on
 		c.Cursor.Enabled = on
 		c.Devin.Enabled = on
+		c.ZCode.Enabled = on
+		c.Kimi.Enabled = on
 	default:
 		return fmt.Errorf("unknown tool %q", name)
 	}

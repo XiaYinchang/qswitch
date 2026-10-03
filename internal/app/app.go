@@ -18,6 +18,8 @@ import (
 	"qswitch/internal/adapter/cursoradp"
 	"qswitch/internal/adapter/devin"
 	"qswitch/internal/adapter/grok"
+	"qswitch/internal/adapter/kimi"
+	"qswitch/internal/adapter/zcode"
 	"qswitch/internal/busy"
 	"qswitch/internal/clock"
 	"qswitch/internal/config"
@@ -45,13 +47,14 @@ type App struct {
 	ListProcs func() ([]adapter.Proc, error)
 	Host      hostapp.Controller
 
-	cfgMu      sync.RWMutex
-	fpMu       sync.Mutex
-	deskMu     sync.Mutex
-	lastFP     map[adapter.Tool][32]byte
-	deskFP     [32]byte
-	deskFPOk   bool
-	lastDeskAt time.Time
+	cfgMu          sync.RWMutex
+	fpMu           sync.Mutex
+	deskMu         sync.Mutex
+	lastFP         map[adapter.Tool][32]byte
+	deskFP         [32]byte
+	deskFPOk       bool
+	lastDeskAt     time.Time
+	captureRetryAt map[adapter.Tool]time.Time
 }
 
 func Open(userHome, dataDir string, keys secutil.KeyProvider, bins []string, n notify.Notifier, list func() ([]adapter.Proc, error)) (*App, error) {
@@ -96,24 +99,27 @@ func Open(userHome, dataDir string, keys secutil.KeyProvider, bins []string, n n
 		list = func() ([]adapter.Proc, error) { return (busy.PS{}).List() }
 	}
 	a := &App{
-		UserHome:  userHome,
-		DataDir:   dataDir,
-		Cfg:       cfg,
-		Vault:     &vault.Store{Dir: dataDir, Keys: keys, Bins: bins},
-		State:     st,
-		HTTP:      quota.HTTP{},
-		Notify:    n,
-		Clock:     clock.Real{},
-		Bins:      bins,
-		ListProcs: list,
-		Host:      hostapp.Default(),
-		lastFP:    map[adapter.Tool][32]byte{},
+		UserHome:       userHome,
+		DataDir:        dataDir,
+		Cfg:            cfg,
+		Vault:          &vault.Store{Dir: dataDir, Keys: keys, Bins: bins},
+		State:          st,
+		HTTP:           quota.HTTP{},
+		Notify:         n,
+		Clock:          clock.Real{},
+		Bins:           bins,
+		ListProcs:      list,
+		Host:           hostapp.Default(),
+		lastFP:         map[adapter.Tool][32]byte{},
+		captureRetryAt: map[adapter.Tool]time.Time{},
 	}
 	a.Adapters = map[adapter.Tool]adapter.Adapter{
 		adapter.Codex:  codex.Adapter{List: list},
 		adapter.Grok:   grok.Adapter{List: list},
 		adapter.Cursor: cursoradp.Adapter{List: list},
 		adapter.Devin:  devin.Adapter{List: list},
+		adapter.Kimi:   kimi.Adapter{List: list},
+		adapter.ZCode:  zcode.Adapter{},
 	}
 	return a, nil
 }
@@ -193,31 +199,62 @@ func (a *App) captureBlobs(tool adapter.Tool) ([]adapter.Blob, []adapter.Warning
 	if err != nil {
 		return blobs, warn, err
 	}
+	if tool == adapter.Kimi {
+		return a.enrichKimiCapture(blobs, warn)
+	}
 	if tool == adapter.Devin {
 		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 		defer cancel()
 		for i := range blobs {
-			blobs[i] = a.enrichDevin(ctx, blobs[i])
+			blobs[i], err = a.enrichDevin(ctx, blobs[i])
+			if err != nil {
+				return nil, warn, err
+			}
 		}
 	}
 	return blobs, warn, nil
 }
 
-func (a *App) enrichDevin(ctx context.Context, b adapter.Blob) adapter.Blob {
+func (a *App) enrichDevin(ctx context.Context, b adapter.Blob) (adapter.Blob, error) {
 	c, err := devin.CredsFromBlob(b)
 	if err != nil {
-		return b
+		return b, errors.New("devin: invalid credential snapshot")
 	}
 	raw, status, err := a.HTTP.DevinBody(ctx, c.APIKey, c.Server)
-	if err != nil || status != 200 {
-		return b
+	if err == nil && status == 200 {
+		id := devin.EnrichIdentity(adapter.Identity{Tool: adapter.Devin}, raw)
+		if id.StableID != "" {
+			return devin.WriteIdentity(b, id)
+		}
 	}
-	id := devin.EnrichIdentity(b.Identity, raw)
-	out, err := devin.WriteIdentity(b, id)
+	// Capture's key hash is temporary. Reuse an identity established earlier
+	// only when its encrypted snapshot contains the same key and API server.
+	accounts, err := a.State.ListAccounts(string(adapter.Devin))
 	if err != nil {
-		return b
+		return b, fmt.Errorf("devin: read saved identities: %w", err)
 	}
-	return out
+	var known adapter.Identity
+	for _, ac := range accounts {
+		if ac.StableID == "" || ac.StableID == b.Identity.StableID {
+			continue
+		}
+		saved, err := a.loadBlob(adapter.Devin, ac.StableID)
+		if err != nil || saved.Identity.StableID != ac.StableID {
+			continue
+		}
+		previous, err := devin.CredsFromBlob(saved)
+		if err != nil || previous.APIKey != c.APIKey || strings.TrimRight(previous.Server, "/") != strings.TrimRight(c.Server, "/") {
+			continue
+		}
+		if known.StableID != "" && known.StableID != saved.Identity.StableID {
+			return b, errors.New("devin: saved identities conflict; retry capture when the service is available")
+		}
+		known = saved.Identity
+	}
+	if known.StableID != "" {
+		return devin.WriteIdentity(b, known)
+	}
+	return b, errors.New("devin: cannot verify account identity; retry capture when the service is available")
 }
 
 func liveCLIIdentity(blobs []adapter.Blob) string {
@@ -234,6 +271,9 @@ func (a *App) saveBlob(b adapter.Blob) error {
 	id, err := a.Adapters[b.Tool].IdentityOf(b)
 	if err != nil {
 		return err
+	}
+	if strings.TrimSpace(id.StableID) == "" {
+		return errors.New("account identity must be verified before saving")
 	}
 	if err := a.Vault.Put(string(b.Tool), id.StableID, b.Payload); err != nil {
 		return err
@@ -352,6 +392,9 @@ func (a *App) Switch(tool adapter.Tool, ref string, opts adapter.RestoreOpts, ki
 
 // The caller holds the tool lock through validation and credential restore.
 func (a *App) switchLocked(tool adapter.Tool, ref string, opts adapter.RestoreOpts, killCLI bool) (retErr error) {
+	if tool == adapter.ZCode {
+		return errors.New("zcode: subscription monitoring only; switch accounts in ZCode")
+	}
 	cfg := a.cfgSnapshot()
 	ad := a.Adapters[tool]
 	blob, err := a.loadBlob(tool, ref)
@@ -501,8 +544,6 @@ func desktopApp(tool adapter.Tool) (string, func([]adapter.Proc) []adapter.Proc)
 		return "Cursor", busy.CursorApp
 	case adapter.Grok:
 		return "Grok Bot", busy.GrokBotApp
-	case adapter.Devin:
-		return "Devin", busy.DevinApp
 	default:
 		return "", nil
 	}
@@ -614,7 +655,7 @@ func (a *App) Status() string {
 			plan = "-"
 		}
 		fmt.Fprintf(&b, "%s  active=%s plan=%s id=%s class=%s used=%.1f%% auto=%v desync=%v busy=%v blocked_by_pid=%v queued_since=%s chatgpt_app=%v\n",
-			t, email, plan, p.StableID, class, acc.LastUsedPct, cfg.General.AutoSwitch && cfg.ToolEnabled(string(t)), p.Desync, man.ManualBusy(), man.ManualPIDs(), queued(pend), aut.ChatGPTApp)
+			t, email, plan, p.StableID, class, acc.LastUsedPct, cfg.General.AutoSwitch && cfg.ToolEnabled(string(t)) && t != adapter.ZCode, p.Desync, man.ManualBusy(), man.ManualPIDs(), queued(pend), aut.ChatGPTApp)
 	}
 	return b.String()
 }
@@ -691,6 +732,14 @@ func (a *App) rememberFP(tool adapter.Tool) {
 }
 
 func (a *App) Ingest(tool adapter.Tool) error {
+	if tool == adapter.Kimi || tool == adapter.Devin {
+		a.fpMu.Lock()
+		deferAt := a.captureRetryAt[tool]
+		a.fpMu.Unlock()
+		if a.now().Before(deferAt) {
+			return nil
+		}
+	}
 	cfg := a.cfgSnapshot()
 	ad := a.Adapters[tool]
 	fp, err := a.liveFingerprint(tool)
@@ -714,6 +763,17 @@ func (a *App) Ingest(tool adapter.Tool) error {
 	}
 	defer lock.Close()
 	blobs, _, err := a.captureBlobs(tool)
+	if tool == adapter.Kimi || tool == adapter.Devin {
+		a.fpMu.Lock()
+		if a.captureRetryAt == nil {
+			a.captureRetryAt = make(map[adapter.Tool]time.Time)
+		}
+		a.captureRetryAt[tool] = time.Time{}
+		if err != nil {
+			a.captureRetryAt[tool] = a.now().Add(time.Minute)
+		}
+		a.fpMu.Unlock()
+	}
 	if err != nil {
 		return err
 	}
@@ -1041,6 +1101,8 @@ func (a *App) KeepAlive(ctx context.Context, tool adapter.Tool) {
 		a.keepAliveCodexAccounts(ctx)
 	case adapter.Grok:
 		a.keepAliveGrokAccounts(ctx)
+	case adapter.Kimi:
+		a.keepAliveKimiAccounts(ctx)
 	}
 }
 
@@ -1401,6 +1463,28 @@ func (a *App) probeAccount(ctx context.Context, tool adapter.Tool, id string, ga
 			return quota.Result{Class: quota.Unknown}
 		}
 		res, _ = a.HTTP.Cursor(ctx, tok)
+	case adapter.Kimi:
+		forced := acc.LastQuotaClass == string(quota.Expired)
+		nb, tok, kerr := a.keepAliveKimiLocked(ctx, blob, forced, !gateInterval)
+		if kerr != nil {
+			return a.refreshFailureResult(tool, id)
+		}
+		res, _ = a.HTTP.Kimi(ctx, tok)
+		if res.Class == quota.Expired && !forced {
+			_, next, err := a.keepAliveKimiLocked(ctx, nb, true, !gateInterval)
+			if err != nil {
+				return a.refreshFailureResult(tool, id)
+			}
+			if next != "" && next != tok {
+				res, _ = a.HTTP.Kimi(ctx, next)
+			}
+		}
+	case adapter.ZCode:
+		c, err := zcode.CredsFromBlob(blob)
+		if err != nil {
+			return quota.Result{Class: quota.Unknown}
+		}
+		res, _ = a.HTTP.ZCode(ctx, c.APIKey, c.Provider)
 	case adapter.Devin:
 		c, err := devin.CredsFromBlob(blob)
 		if err != nil {
@@ -1443,9 +1527,8 @@ func (a *App) probeAccount(ctx context.Context, tool adapter.Tool, id string, ga
 		backoff = now.Add(cfg.Backoff()).Unix()
 	}
 	_ = a.State.UpdateQuota(string(tool), id, string(res.Class), res.UsedPct, res.ResetsAt, now.Unix(), now.Unix(), backoff)
-	if tool == adapter.Grok && (res.Class == quota.OK || res.Class == quota.Soft || res.Class == quota.Exhausted) {
-		// Grok returns one complete current-period snapshot; a plan change must
-		// remove obsolete buckets rather than merge them into the new period.
+	if (tool == adapter.Grok || tool == adapter.Devin || tool == adapter.Kimi || tool == adapter.ZCode) && (res.Class == quota.OK || res.Class == quota.Soft || res.Class == quota.Exhausted) {
+		// These providers return complete snapshots; remove obsolete windows after plan changes.
 		_ = a.State.SetQuotaDetail(string(tool), id, quota.EncodeBuckets(res.Buckets))
 	} else if len(res.Buckets) > 0 {
 		_ = a.State.SetQuotaDetail(string(tool), id, quota.EncodeBuckets(quota.MergeBuckets(quota.DecodeBuckets(acc.QuotaDetail), res.Buckets)))
@@ -1472,6 +1555,9 @@ func (a *App) setCooling(tool, id string, resetsAt int64) {
 }
 
 func (a *App) considerSwitch(tool adapter.Tool) {
+	if tool == adapter.ZCode {
+		return
+	}
 	cfg := a.cfgSnapshot()
 	if !cfg.General.AutoSwitch || !cfg.ToolEnabled(string(tool)) {
 		return
@@ -1545,6 +1631,9 @@ func (a *App) candidateRank(ctx context.Context, tool adapter.Tool, ac state.Acc
 }
 
 func (a *App) TryApply(tool adapter.Tool, killCLI bool) error {
+	if tool == adapter.ZCode {
+		return a.State.ClearPending(string(tool))
+	}
 	lock, err := livefile.Acquire(filepath.Join(a.DataDir, "locks", string(tool)+".lock"))
 	if err != nil {
 		return err

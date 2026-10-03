@@ -112,7 +112,7 @@ func TestOverviewConcurrentConfigChanges(t *testing.T) {
 		}
 	}()
 	for i := 0; i < 30; i++ {
-		if len(a.Overview().Tools) != 4 {
+		if len(a.Overview().Tools) != len(adapter.AllTools()) {
 			t.Error("overview lost tools during config changes")
 		}
 	}

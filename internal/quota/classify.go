@@ -242,50 +242,85 @@ func ParseDevinStatus(body []byte) (Result, bool) {
 		return Result{}, false
 	}
 	pi := asMap(ps["planInfo"])
-	hideDaily := asBool(pi["hideDailyQuota"])
+	plan := devinPlan(us, pi)
+	unknown := Result{Class: Unknown, Source: "http", Plan: plan}
+	// The official client interprets these fields only for quota billing. Older
+	// responses omitted billingStrategy, but supplied at least one percentage.
+	if strategy, exists := pi["billingStrategy"]; exists {
+		n, numeric := asFloat(strategy)
+		s, _ := strategy.(string)
+		if !(numeric && n == 2) && s != "BILLING_STRATEGY_QUOTA" && s != "QUOTA" {
+			return unknown, true
+		}
+	} else {
+		_, daily := ps["dailyQuotaRemainingPercent"]
+		_, weekly := ps["weeklyQuotaRemainingPercent"]
+		if !daily && !weekly {
+			return unknown, true
+		}
+	}
+	hideDaily := asBool(pi["hideDailyQuota"]) || plan == "Max"
 	hideWeekly := asBool(pi["hideWeeklyQuota"])
-	dailyRem, dailyOK := asFloat(ps["dailyQuotaRemainingPercent"])
-	weeklyRem, weeklyOK := asFloat(ps["weeklyQuotaRemainingPercent"])
-	if !hideDaily && !dailyOK {
-		dailyRem, dailyOK = 0, true
-	}
-	if !hideWeekly && !weeklyOK {
-		weeklyRem, weeklyOK = 0, true
-	}
 	var buckets []Bucket
-	if !hideDaily && dailyOK {
-		used := clampUsed(100 - dailyRem)
-		buckets = append(buckets, Bucket{ID: "daily", UsedPct: used, ResetsAt: asUnix(ps["dailyQuotaResetAtUnix"])})
-	}
-	if !hideWeekly && weeklyOK {
-		used := clampUsed(100 - weeklyRem)
-		buckets = append(buckets, Bucket{ID: "weekly", UsedPct: used, ResetsAt: asUnix(ps["weeklyQuotaResetAtUnix"])})
+	for _, window := range []struct {
+		id, remaining, reset string
+		hidden               bool
+	}{
+		{"daily", "dailyQuotaRemainingPercent", "dailyQuotaResetAtUnix", hideDaily},
+		{"weekly", "weeklyQuotaRemainingPercent", "weeklyQuotaResetAtUnix", hideWeekly},
+	} {
+		if window.hidden {
+			continue
+		}
+		// Remaining percentages are proto3 int32 scalars: an omitted value is
+		// zero, but a present malformed value is not an exhausted allowance.
+		var remaining float64
+		if value, exists := ps[window.remaining]; exists {
+			var ok bool
+			remaining, ok = asFloat(value)
+			if !ok || math.IsNaN(remaining) || math.IsInf(remaining, 0) || remaining < 0 || remaining > 100 {
+				return unknown, true
+			}
+		}
+		buckets = append(buckets, Bucket{ID: window.id, UsedPct: 100 - remaining, ResetsAt: asUnix(ps[window.reset])})
 	}
 	if len(buckets) == 0 {
-		return Result{}, false
+		return unknown, true
 	}
 	used := buckets[0].UsedPct
 	resets := buckets[0].ResetsAt
 	for _, b := range buckets[1:] {
 		if b.UsedPct > used {
 			used = b.UsedPct
-		}
-		if b.ResetsAt > 0 && (resets == 0 || b.ResetsAt < resets) {
 			resets = b.ResetsAt
+		} else if b.UsedPct == used {
+			if resets == 0 || b.ResetsAt == 0 {
+				resets = 0
+			} else if b.ResetsAt > resets {
+				resets = b.ResetsAt
+			}
 		}
 	}
 	class := OK
 	switch {
 	case used >= 99.5:
 		class = Exhausted
+		// Every exhausted window must reset before included usage is available.
+		resets = 0
+		for _, b := range buckets {
+			if b.UsedPct < 99.5 {
+				continue
+			}
+			if b.ResetsAt == 0 {
+				resets = 0
+				break
+			}
+			if b.ResetsAt > resets {
+				resets = b.ResetsAt
+			}
+		}
 	case used >= 90:
 		class = Soft
-	}
-	plan := ""
-	if s, _ := pi["planName"].(string); strings.TrimSpace(s) != "" {
-		plan = formatDevinPlan(s)
-	} else if s, _ := us["teamsTier"].(string); s != "" {
-		plan = formatDevinPlan(s)
 	}
 	return Result{Class: class, UsedPct: used, ResetsAt: resets, Source: "http", Plan: plan, Buckets: buckets}, true
 }
@@ -297,16 +332,46 @@ func DevinIdentity(body []byte) (userID, email, plan string) {
 	}
 	us := asMap(root["userStatus"])
 	if us == nil {
-		return "", "", ""
+		us = root
 	}
 	userID, _ = us["userId"].(string)
 	email, _ = us["email"].(string)
 	ps := asMap(us["planStatus"])
 	pi := asMap(ps["planInfo"])
-	if s, _ := pi["planName"].(string); s != "" {
-		plan = formatDevinPlan(s)
-	}
+	plan = devinPlan(us, pi)
 	return strings.TrimSpace(userID), strings.TrimSpace(email), plan
+}
+
+func devinPlan(us, pi map[string]any) string {
+	if s, _ := pi["planName"].(string); strings.TrimSpace(s) != "" {
+		return formatDevinPlan(s)
+	}
+	for _, tier := range []any{pi["teamsTier"], us["teamsTier"]} {
+		if n, ok := asFloat(tier); ok {
+			// Values from the official client's TeamsTier protobuf enum.
+			switch n {
+			case 12:
+				return "Enterprise"
+			case 14, 15:
+				return "Teams"
+			case 16:
+				return "Pro"
+			case 17, 18:
+				return "Max"
+			case 19:
+				return "Free"
+			case 20:
+				return "Trial"
+			}
+		} else if s, ok := tier.(string); ok && strings.TrimSpace(s) != "" {
+			s = strings.TrimPrefix(strings.TrimSpace(s), "TEAMS_TIER_")
+			s = strings.TrimPrefix(s, "DEVIN_")
+			if s != "UNSPECIFIED" {
+				return formatDevinPlan(s)
+			}
+		}
+	}
+	return ""
 }
 
 func asBool(v any) bool {

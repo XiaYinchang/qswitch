@@ -254,7 +254,7 @@ function barColor(used, cls) {
 }
 function usedText(used, tool) {
   if (used == null) return "用量未知";
-  return `已用 ${tool === "grok" ? Math.floor(used) : used.toFixed(0)}%`;
+  return `已用 ${["grok", "kimi", "zcode"].includes(tool) ? Math.floor(used) : used.toFixed(0)}%`;
 }
 function barStyle(used, cls) {
   if (used == null) return "";
@@ -280,6 +280,8 @@ function bucketLabel(id) {
   if (id === "daily") return "日额度";
   if (id === "weekly") return "周额度";
   if (id === "monthly") return "月额度";
+  if (id === "monthly_code") return "月度编程";
+  if (id === "mcp") return "月度 MCP";
   if (id === "5h") return "5小时";
   if (id === "1d") return "日额度";
   return id;
@@ -289,7 +291,7 @@ function bucketHTML(ac) {
   if (!rows.length) return "";
   return `<div class="buckets">${rows.map(b => {
     const used = clampPct(b.used_pct) ?? 0;
-    const cls = used >= (ac.tool === "grok" ? 100 : 99.5) ? "exhausted" : used >= 90 ? "soft" : "ok";
+    const cls = used >= (["grok", "kimi", "zcode"].includes(ac.tool) ? 100 : 99.5) ? "exhausted" : used >= 90 ? "soft" : "ok";
     const when = b.resets_at ? fmtTime(b.resets_at) : "";
     return `<div class="bucket"><span class="name">${attr(bucketLabel(b.id))}</span><div class="bar"><i style="${barStyle(used, cls)}"></i></div><span class="rem">${usedText(used, ac.tool)}</span>${when ? `<span class="when">${when}</span>` : `<span class="when"></span>`}</div>`;
   }).join("")}</div>`;
@@ -299,7 +301,9 @@ function toolTitle(t) {
   if (t === "grok") return "Grok";
   if (t === "cursor") return "Cursor";
   if (t === "grokbot") return "Grok Bot";
-  if (t === "devin") return "Devin";
+  if (t === "devin") return "Devin CLI";
+  if (t === "zcode") return "ZCode 订阅";
+  if (t === "kimi") return "Kimi Code";
   return t;
 }
 function attr(s) {
@@ -314,12 +318,12 @@ function toolActions(tool) {
   if (tool.tool === "grok") html += `<button class="primary" data-act="login-grok">加号</button>`;
   return html;
 }
-function cardActions(ac) {
+function cardActions(ac, switchable) {
   const t = attr(ac.tool), id = attr(ac.stable_id);
   const bits = [];
   if (!ac.desktop) bits.push(`<button class="ghost" data-act="probe" data-tool="${t}" data-id="${id}">查询</button>`);
   if (ac.derived) return bits.join("");
-  if (!ac.live && !ac.desktop) bits.push(`<button data-act="switch" data-tool="${t}" data-id="${id}">切换</button>`);
+  if (switchable && !ac.live && !ac.desktop) bits.push(`<button data-act="switch" data-tool="${t}" data-id="${id}">切换</button>`);
   if (!ac.live) bits.push(`<button class="ghost danger" data-act="forget" data-tool="${t}" data-id="${id}">删除</button>`);
   return bits.join("");
 }
@@ -337,6 +341,7 @@ function render(ov) {
     if (tool.devin_app) flags.push("Devin.app 在跑");
     if (tool.desync) flags.push("桌面/CLI 不一致");
     if (tool.tool === "grokbot") flags.push("随 Cursor 账号");
+    if (tool.tool === "zcode") flags.push("桌面订阅 · 在 ZCode 中切换账号");
     sec.innerHTML = `<div class="sec-head">
       <h2>${toolTitle(tool.tool)} <span class="meta">${flags.join(" · ") || "空闲"}</span></h2>
       <div class="actions">${toolActions(tool)}</div>
@@ -351,10 +356,10 @@ function render(ov) {
       const badges = [];
       if (ac.live) badges.push(`<span class="badge live">当前</span>`);
       badges.push(`<span class="badge ${ac.class}">${clsLabel[ac.class] || ac.class}</span>`);
-      if (ac.plan && ac.plan !== "-") badges.push(`<span class="badge">${ac.plan}</span>`);
+      if (ac.plan && ac.plan !== "-") badges.push(`<span class="badge">${attr(ac.plan)}</span>`);
       if (ac.stale_cli) badges.push(`<span class="badge">CLI 偏旧</span>`);
       if (ac.desktop) badges.push(`<span class="badge">桌面快照</span>`);
-      const acts = cardActions(ac);
+      const acts = cardActions(ac, tool.switchable);
       card.innerHTML = `
         <div class="who">
           <div>
@@ -413,7 +418,8 @@ async function onClick(e) {
         codex: "切换到这个账号？会关掉并重启 ChatGPT.app；空闲的 Codex CLI 也会结束。",
         grok: "切换到这个账号？会关掉并重启 Grok Bot.app；空闲的 grok CLI 也会结束。",
         cursor: "切换到这个账号？会关掉并重启 Cursor.app；空闲的 cursor-agent 也会结束。只改登录字段，不碰聊天记录。",
-        devin: "切换到这个账号？会关掉并重启 Devin.app；空闲的 devin CLI 也会结束。",
+        devin: "切换 Devin CLI 到这个账号？空闲 CLI 会结束，新进程使用新账号。Devin.app 使用独立登录。",
+        kimi: "切换 Kimi Code 到这个账号？请先结束正在运行的 Kimi 会话，新进程将使用新账号。",
       }[tool] || "切换到这个账号？空闲的 CLI 会先结束。";
       if (!confirm(prompt)) return;
       b.disabled = true;

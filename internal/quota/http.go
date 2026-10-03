@@ -20,6 +20,10 @@ var allowHosts = map[string]bool{
 	"api2.cursor.sh":          true,
 	"server.codeium.com":      true,
 	"api.devin.ai":            true,
+	"api.kimi.com":            true,
+	"auth.kimi.com":           true,
+	"bigmodel.cn":             true,
+	"api.z.ai":                true,
 }
 
 type HTTP struct {
