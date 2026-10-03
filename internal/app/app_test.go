@@ -478,6 +478,9 @@ func TestProbeLocalCodexUsageLimitQueuesSwitch(t *testing.T) {
 	if err := a.State.UpdateQuotaSnapshot("codex", "acc-a", "ok", 10, 0, time.Now().Unix()); err != nil {
 		t.Fatal(err)
 	}
+	if err := a.State.LogQuota("codex", "acc-a", "ok", "http", 10, time.Now()); err != nil {
+		t.Fatal(err)
+	}
 	sess := filepath.Join(a.UserHome, ".codex", "sessions")
 	if err := os.MkdirAll(sess, 0o700); err != nil {
 		t.Fatal(err)
@@ -548,6 +551,9 @@ func TestPickNextProbesUnprobedAccount(t *testing.T) {
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header), Request: req}, nil
 	})}
 	if err := a.State.UpdateQuotaSnapshot("codex", "acc-b", "exhausted", 100, 0, time.Now().Unix()); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.State.LogQuota("codex", "acc-b", "exhausted", "http", 100, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	a.considerSwitch(adapter.Codex)

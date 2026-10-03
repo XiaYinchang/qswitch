@@ -358,27 +358,31 @@ func (a *App) resolveAccount(tool, ref string) (string, error) {
 }
 
 func accountRefMatch(ac state.Account, ref string) bool {
-	if ac.Email == ref || strings.EqualFold(ac.PlanHint, ref) {
+	if ac.PlanHint != "" && strings.EqualFold(ac.PlanHint, ref) {
 		return true
 	}
-	label := ac.Email
-	if ac.PlanHint != "" {
-		label = ac.Email + "/" + ac.PlanHint
-	}
-	if label == ref {
-		return true
-	}
-	if ac.Email != "" && ac.PlanHint != "" && len(ac.StableID) >= 8 && ref == ac.Email+"/"+ac.PlanHint+"/"+ac.StableID[:8] {
-		return true
+	for _, label := range []string{ac.Email, ac.Phone, ac.DisplayName} {
+		if label == "" {
+			continue
+		}
+		if label == ref {
+			return true
+		}
+		if ac.PlanHint != "" {
+			label += "/" + ac.PlanHint
+			if label == ref || (len(ac.StableID) >= 8 && ref == label+"/"+ac.StableID[:8]) {
+				return true
+			}
+		}
 	}
 	return false
 }
 
 func ambiguousRef(tool, ref string, hits []state.Account) error {
 	var b strings.Builder
-	fmt.Fprintf(&b, "ambiguous %s %q; pass chatgpt_account_id (same email can have personal + team workspaces):\n", tool, ref)
+	fmt.Fprintf(&b, "ambiguous %s %q; pass a stable_id from these accounts:\n", tool, ref)
 	for _, ac := range hits {
-		fmt.Fprintf(&b, "  %s  plan=%s  %s\n", ac.Email, ac.PlanHint, ac.StableID)
+		fmt.Fprintf(&b, "  %s  plan=%s  %s\n", accountLabel(ac), ac.PlanHint, ac.StableID)
 	}
 	return errors.New(b.String())
 }
@@ -472,10 +476,20 @@ func (a *App) switchLocked(tool adapter.Tool, ref string, opts adapter.RestoreOp
 		}
 	}
 
-	if blobs, _, err := a.captureBlobs(tool); err == nil {
+	blobs, _, captureErr := a.captureBlobs(tool)
+	if tool == adapter.Kimi && captureErr != nil && !errors.Is(captureErr, os.ErrNotExist) {
+		return fmt.Errorf("save current Kimi account before switch: %w", captureErr)
+	}
+	if captureErr == nil {
 		for _, b := range blobs {
 			if err := a.saveBlob(b); err != nil {
 				return fmt.Errorf("save current account before switch: %w", err)
+			}
+			// The official Kimi CLI rotates refresh tokens. Switching to the
+			// current account must use the credentials just captured, not the
+			// older target snapshot loaded before that capture.
+			if tool == adapter.Kimi && b.Identity.StableID == blob.Identity.StableID {
+				blob = b
 			}
 		}
 	}
@@ -521,13 +535,13 @@ func (a *App) switchLocked(tool adapter.Tool, ref string, opts adapter.RestoreOp
 		relaunch = "" // One launch attempt; a failure is reported to the caller.
 		time.Sleep(200 * time.Millisecond)
 		if err := a.Host.Launch(name); err != nil {
-			a.Notify.Send("qswitch", fmt.Sprintf("switched %s -> %s, but failed to relaunch %s: %v", tool, blob.Identity.Email, appLabel(name), err))
+			a.Notify.Send("qswitch", fmt.Sprintf("switched %s -> %s, but failed to relaunch %s: %v", tool, IdentityLabel(blob.Identity), appLabel(name), err))
 			return fmt.Errorf("credentials written, %s relaunch failed: %w", appLabel(name), err)
 		}
-		a.Notify.Send("qswitch", fmt.Sprintf("switched %s -> %s (%s). 已重启 %s。", tool, blob.Identity.Email, blob.Identity.StableID, appLabel(name)))
+		a.Notify.Send("qswitch", fmt.Sprintf("switched %s -> %s (%s). 已重启 %s。", tool, IdentityLabel(blob.Identity), blob.Identity.StableID, appLabel(name)))
 		return nil
 	}
-	a.Notify.Send("qswitch", fmt.Sprintf("switched %s -> %s (%s). 新进程才会用新号。", tool, blob.Identity.Email, blob.Identity.StableID))
+	a.Notify.Send("qswitch", fmt.Sprintf("switched %s -> %s (%s). 新进程才会用新号。", tool, IdentityLabel(blob.Identity), blob.Identity.StableID))
 	return nil
 }
 
@@ -644,9 +658,9 @@ func (a *App) Status() string {
 		man, _ := ad.ManualBlockers(a.UserHome)
 		aut, _ := ad.AutoBlockers(a.UserHome)
 		pend, _ := a.State.GetPending(string(t))
-		email := acc.Email
-		if email == "" {
-			email = p.StableID
+		label := accountLabel(acc)
+		if label == "" {
+			label = p.StableID
 		}
 		class := acc.LastQuotaClass
 		if class == "" {
@@ -657,7 +671,7 @@ func (a *App) Status() string {
 			plan = "-"
 		}
 		fmt.Fprintf(&b, "%s  active=%s plan=%s id=%s class=%s used=%.1f%% auto=%v desync=%v busy=%v blocked_by_pid=%v queued_since=%s chatgpt_app=%v\n",
-			t, email, plan, p.StableID, class, acc.LastUsedPct, cfg.General.AutoSwitch && cfg.ToolEnabled(string(t)) && t != adapter.ZCode, p.Desync, man.ManualBusy(), man.ManualPIDs(), queued(pend), aut.ChatGPTApp)
+			t, label, plan, p.StableID, class, acc.LastUsedPct, cfg.General.AutoSwitch && cfg.ToolEnabled(string(t)) && t != adapter.ZCode, p.Desync, man.ManualBusy(), man.ManualPIDs(), queued(pend), aut.ChatGPTApp)
 	}
 	return b.String()
 }
@@ -690,7 +704,7 @@ func (a *App) List(tool string) string {
 		if plan == "" {
 			plan = "-"
 		}
-		fmt.Fprintf(&b, "%s %s  %s  plan=%s  %s  class=%s used=%.1f%% reset=%s cool=%s incomplete=%v stale_cli=%v\n", mark, ac.Tool, ac.Email, plan, ac.StableID, ac.LastQuotaClass, ac.LastUsedPct, reset, cool, ac.Incomplete, ac.StaleCLI)
+		fmt.Fprintf(&b, "%s %s  %s  plan=%s  %s  class=%s used=%.1f%% reset=%s cool=%s incomplete=%v stale_cli=%v\n", mark, ac.Tool, accountLabel(ac), plan, ac.StableID, ac.LastQuotaClass, ac.LastUsedPct, reset, cool, ac.Incomplete, ac.StaleCLI)
 	}
 	return b.String()
 }
@@ -796,11 +810,7 @@ func (a *App) Ingest(tool adapter.Tool) error {
 		}
 		if isNew {
 			added++
-			label := ident.DisplayName
-			if label == "" {
-				label = ident.Email
-			}
-			a.Notify.Send("qswitch", fmt.Sprintf("收录新账号 %s %s", tool, label))
+			a.Notify.Send("qswitch", fmt.Sprintf("收录新账号 %s %s", tool, IdentityLabel(ident)))
 		}
 	}
 	id := liveCLIIdentity(blobs)
@@ -848,11 +858,11 @@ func (a *App) Ingest(tool adapter.Tool) error {
 		_ = a.State.SetPointer(p)
 		_ = a.State.ClearPending(string(tool))
 		if added == 0 {
-			email := id
-			if ac, err := a.State.GetAccount(string(tool), id); err == nil && ac.Email != "" {
-				email = ac.Email
+			label := id
+			if ac, err := a.State.GetAccount(string(tool), id); err == nil {
+				label = accountLabel(ac)
 			}
-			a.Notify.Send("qswitch", fmt.Sprintf("当前 %s 换成已收录账号 %s", tool, email))
+			a.Notify.Send("qswitch", fmt.Sprintf("当前 %s 换成已收录账号 %s", tool, label))
 		}
 	}
 	if tool == adapter.Codex && prevID != "" && prevID != id {
@@ -1051,7 +1061,7 @@ func (a *App) ProbeRecovered(ctx context.Context, tool adapter.Tool, force bool)
 		}
 		if res.Class == quota.OK || res.Class == quota.Soft {
 			_ = a.State.SetCooling(string(tool), ac.StableID, 0)
-			label := ac.Email
+			label := accountLabel(ac)
 			if ac.PlanHint != "" {
 				label += "/" + ac.PlanHint
 			}
@@ -1380,11 +1390,11 @@ func (a *App) refreshFailureResult(tool adapter.Tool, id string) quota.Result {
 	if ac, err := a.State.GetAccount(string(tool), id); err == nil && ac.LastQuotaClass == string(quota.Expired) {
 		class = quota.Expired
 	}
+	_ = a.State.LogQuota(string(tool), id, string(class), "refresh", 0, a.now())
 	return quota.Result{Class: class, Source: "refresh"}
 }
 
 func (a *App) probeAccount(ctx context.Context, tool adapter.Tool, id string, gateInterval bool) quota.Result {
-	cfg := a.cfgSnapshot()
 	if id == "" || strings.HasPrefix(id, "desktop:") {
 		return quota.Result{Class: quota.Unknown}
 	}
@@ -1393,6 +1403,12 @@ func (a *App) probeAccount(ctx context.Context, tool adapter.Tool, id string, ga
 		return quota.Result{Class: quota.Unknown}
 	}
 	defer lock.Close()
+	return a.probeAccountLocked(ctx, tool, id, gateInterval)
+}
+
+// The caller holds the tool lock through credential refresh and quota storage.
+func (a *App) probeAccountLocked(ctx context.Context, tool adapter.Tool, id string, gateInterval bool) quota.Result {
+	cfg := a.cfgSnapshot()
 	if a.HTTP.Client == nil && secutil.InTest() {
 		acc, _ := a.State.GetAccount(string(tool), id)
 		return quota.Result{Class: quota.Class(acc.LastQuotaClass), UsedPct: acc.LastUsedPct, ResetsAt: acc.LastResetsAt}
@@ -1607,29 +1623,25 @@ func (a *App) pickNext(tool adapter.Tool, current string) string {
 }
 
 func (a *App) candidateRank(ctx context.Context, tool adapter.Tool, ac state.Account) (int, float64) {
-	rank := func(c quota.Class, pct float64) (int, float64) {
-		switch c {
-		case quota.OK:
-			return 0, pct
-		case quota.Soft:
-			return 1, pct
-		default:
-			return 9, pct
-		}
-	}
-	now := a.now().Unix()
-	switch quota.Class(ac.LastQuotaClass) {
-	case quota.OK, quota.Soft:
-		return rank(quota.Class(ac.LastQuotaClass), ac.LastUsedPct)
-	case quota.Expired:
+	lock, err := livefile.Acquire(filepath.Join(a.DataDir, "locks", string(tool)+".lock"))
+	if err != nil {
 		return 9, 0
-	case quota.Exhausted:
-		if ac.LastResetsAt > now || ac.CoolingUntil > now {
-			return 9, 0
+	}
+	defer lock.Close()
+	ac, err = a.State.GetAccount(string(tool), ac.StableID)
+	if err != nil || ac.Incomplete || ac.StaleCLI || ac.CoolingUntil > a.now().Unix() {
+		return 9, 0
+	}
+	res, err := a.automaticQuotaLocked(ctx, tool, ac.StableID)
+	if err == nil {
+		switch res.Class {
+		case quota.OK:
+			return 0, res.UsedPct
+		case quota.Soft:
+			return 1, res.UsedPct
 		}
 	}
-	res := a.probeAccount(ctx, tool, ac.StableID, false)
-	return rank(res.Class, res.UsedPct)
+	return 9, 0
 }
 
 func (a *App) TryApply(tool adapter.Tool, killCLI bool) error {
@@ -1685,6 +1697,46 @@ func (a *App) TryApply(tool adapter.Tool, killCLI bool) error {
 			return nil
 		}
 		killCLI = true
+	}
+	if pend.Reason == "exhausted" {
+		// A pending switch may wait for the CLI for hours. Validate quota only
+		// when it can proceed, before closing an app or terminating a process.
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		defer cancel()
+		from, err := a.automaticQuotaLocked(ctx, tool, pend.FromID)
+		if err != nil {
+			return err
+		}
+		if from.Class != quota.Exhausted {
+			return a.State.ClearPending(string(tool))
+		}
+		to, err := a.automaticQuotaLocked(ctx, tool, pend.ToID)
+		if err != nil {
+			return err
+		}
+		if to.Class != quota.OK && to.Class != quota.Soft {
+			return a.State.ClearPending(string(tool))
+		}
+		// The target request can cross the source's recovery deadline, and
+		// configuration can be reloaded while HTTP is in flight.
+		cfg = a.cfgSnapshot()
+		if !cfg.General.AutoSwitch || !cfg.ToolEnabled(string(tool)) {
+			return a.State.ClearPending(string(tool))
+		}
+		for _, id := range []string{pend.FromID, pend.ToID} {
+			ac, err := a.State.GetAccount(string(tool), id)
+			if err != nil {
+				return err
+			}
+			res, fresh, err := a.cachedAutomaticQuota(tool, ac)
+			if err != nil {
+				return err
+			}
+			if !fresh || (id == pend.FromID && res.Class != quota.Exhausted) ||
+				(id == pend.ToID && res.Class != quota.OK && res.Class != quota.Soft) {
+				return a.State.ClearPending(string(tool))
+			}
+		}
 	}
 	return a.switchLocked(tool, pend.ToID, adapter.RestoreOpts{}, killCLI)
 }

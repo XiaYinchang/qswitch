@@ -92,6 +92,11 @@ func (a *App) keepAliveKimiLocked(ctx context.Context, b adapter.Blob, force, by
 	if liveErr == nil && sameKimiTokens(c, live) {
 		return b, live.AccessToken, nil
 	}
+	// Reading quota with a fresh stored token cannot rotate live credentials.
+	// Only refresh needs to establish that the parked identity differs from live.
+	if !force && !c.NeedsRefresh(a.now()) {
+		return b, c.AccessToken, nil
+	}
 	if liveErr == nil {
 		if a.HTTP.Client == nil && secutil.InTest() {
 			return b, "", errors.New("kimi: HTTP client is required in tests")
@@ -110,9 +115,6 @@ func (a *App) keepAliveKimiLocked(ctx context.Context, b adapter.Blob, force, by
 		}
 	} else if !os.IsNotExist(liveErr) {
 		return b, "", a.recordRefreshResult(adapter.Kimi, b.Identity.StableID, false, errors.New("kimi: cannot read live credentials"))
-	}
-	if !force && !c.NeedsRefresh(a.now()) {
-		return b, c.AccessToken, nil
 	}
 	if c.RefreshToken == "" {
 		return b, c.AccessToken, nil

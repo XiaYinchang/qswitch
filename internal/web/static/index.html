@@ -176,6 +176,7 @@
   }
   .msg.err { color: var(--bad); }
   .empty { color: var(--muted); font-size: 13px; margin: 0; }
+  .quota-note { color: var(--muted); font-size: 12px; margin: 8px 0 0; }
   dialog {
     border: 1px solid var(--line);
     background: var(--card);
@@ -248,6 +249,7 @@ function usedColor(used) {
   return mixRGB(y, r, (p - 80) / 20);
 }
 function barColor(used, cls) {
+  if (cls === "stale") return "var(--muted)";
   if (cls === "expired") return "var(--bad)";
   if (cls === "exhausted") return "var(--bad)";
   return usedColor(used);
@@ -291,9 +293,9 @@ function bucketHTML(ac) {
   if (!rows.length) return "";
   return `<div class="buckets">${rows.map(b => {
     const used = clampPct(b.used_pct) ?? 0;
-    const cls = used >= (["grok", "kimi", "zcode"].includes(ac.tool) ? 100 : 99.5) ? "exhausted" : used >= 90 ? "soft" : "ok";
+    const cls = ac.quota_stale ? "stale" : used >= (["grok", "kimi", "zcode"].includes(ac.tool) ? 100 : 99.5) ? "exhausted" : used >= 90 ? "soft" : "ok";
     const when = b.resets_at ? fmtTime(b.resets_at) : "";
-    return `<div class="bucket"><span class="name">${attr(bucketLabel(b.id))}</span><div class="bar"><i style="${barStyle(used, cls)}"></i></div><span class="rem">${usedText(used, ac.tool)}</span>${when ? `<span class="when">${when}</span>` : `<span class="when"></span>`}</div>`;
+    return `<div class="bucket"><span class="name">${attr(bucketLabel(b.id))}</span><div class="bar"><i style="${barStyle(used, cls)}"></i></div><span class="rem">${ac.quota_stale ? "上次" : ""}${usedText(used, ac.tool)}</span>${when ? `<span class="when">${when}</span>` : `<span class="when"></span>`}</div>`;
   }).join("")}</div>`;
 }
 function toolTitle(t) {
@@ -320,7 +322,15 @@ function toolActions(tool) {
 }
 function accountLabel(ac) {
   if (ac.tool === "kimi") return ac.phone || ac.display_name || ac.email || ac.stable_id;
-  return ac.email || ac.display_name || ac.stable_id;
+  return ac.email || ac.display_name || ac.phone || ac.stable_id;
+}
+function quotaNote(ac) {
+  let text = "";
+  if (ac.class === "expired") text = "认证已失效，请重新登录；用量为上次记录。";
+  else if (ac.last_probe_class === "unknown") text = "最近查询未能确认用量；已有数值为上次记录。";
+  else if (ac.class === "unknown") text = "尚未确认当前用量。";
+  if (text && ac.last_probe_at) text += ` 最近查询 ${fmtTime(ac.last_probe_at)}`;
+  return text;
 }
 function cardActions(ac, switchable) {
   const t = attr(ac.tool), id = attr(ac.stable_id);
@@ -351,7 +361,7 @@ function render(ov) {
       <div class="actions">${toolActions(tool)}</div>
     </div>`;
     (tool.accounts || []).forEach(ac => {
-      const used = (ac.class === "unknown") ? null : clampPct(ac.used_pct);
+      const used = ["unknown", "expired"].includes(ac.class) ? null : clampPct(ac.used_pct);
       const card = document.createElement("div");
       const kinds = ["card"];
       if (ac.live) kinds.push("live");
@@ -359,7 +369,8 @@ function render(ov) {
       card.className = kinds.join(" ");
       const badges = [];
       if (ac.live) badges.push(`<span class="badge live">当前</span>`);
-      badges.push(`<span class="badge ${ac.class}">${clsLabel[ac.class] || ac.class}</span>`);
+      const oldStatus = ac.quota_stale && ["ok", "soft", "exhausted"].includes(ac.class);
+      badges.push(`<span class="badge ${oldStatus ? "" : attr(ac.class)}">${oldStatus ? "上次" : ""}${attr(clsLabel[ac.class] || ac.class)}</span>`);
       if (ac.plan && ac.plan !== "-") badges.push(`<span class="badge">${attr(ac.plan)}</span>`);
       if (ac.stale_cli) badges.push(`<span class="badge">CLI 偏旧</span>`);
       if (ac.desktop) badges.push(`<span class="badge">桌面快照</span>`);
@@ -374,8 +385,9 @@ function render(ov) {
         </div>
         ${ac.buckets && ac.buckets.length
           ? bucketHTML(ac) + (!(ac.buckets || []).some(b => b.resets_at) && whenText(ac) ? `<div class="stats"><span>${whenText(ac)}</span><span></span></div>` : "")
-          : `<div class="bar${used == null ? " empty" : ""}"><i style="${barStyle(used, ac.class)}"></i></div>
-        <div class="stats"><span>${whenText(ac)}</span><span class="rem">${usedText(used, ac.tool)}</span></div>`}`;
+          : `<div class="bar${used == null ? " empty" : ""}"><i style="${barStyle(used, ac.quota_stale ? "stale" : ac.class)}"></i></div>
+        <div class="stats"><span>${whenText(ac)}</span><span class="rem">${ac.quota_stale && used != null ? "上次" : ""}${usedText(used, ac.tool)}</span></div>`}
+        ${quotaNote(ac) ? `<p class="quota-note">${attr(quotaNote(ac))}</p>` : ""}`;
       sec.appendChild(card);
     });
     if (!(tool.accounts || []).length) {
@@ -401,16 +413,23 @@ async function onClick(e) {
     if (act === "capture") {
       b.disabled = true;
       const r = await api("/api/capture", { method: "POST", body: JSON.stringify({ tool }) });
-      msg("已收录 " + (r.captured || []).map(x => x.email || x.stable_id).join(", "));
       await load();
+      msg("已收录 " + (r.captured || []).map(accountLabel).join(", "));
     } else if (act === "reload-all" || act === "probe" || act === "probe-tool") {
       b.disabled = true;
       msg("正在查用量…");
       const body = act === "reload-all" ? {} : { tool, id: act === "probe" ? id : "" };
       const ov = await api("/api/probe", { method: "POST", body: JSON.stringify(body) });
-      if (ov && ov.tools) render(ov);
-      else await load();
-      msg("用量已更新");
+      if (ov && ov.tools) {
+        render(ov);
+        const uncertain = ov.tools.filter(t => !tool || t.tool === tool).some(t => (t.accounts || []).some(ac => ac.quota_stale));
+        msg(uncertain ? "查询完成，部分账号的当前用量未能确认；旧数据已标明。" : "查询完成。", uncertain);
+      } else {
+        await load();
+        if (ov.class === "expired") msg("认证已失效，请重新登录。旧用量已标明。", true);
+        else if (!ov.updated) msg("本次未能确认用量，保留上次记录。", true);
+        else msg("用量已更新");
+      }
       b.disabled = false;
     } else if (act === "forget") {
       if (!confirm("从仓库删掉这个账号？当前登录不会动。")) return;
@@ -429,7 +448,7 @@ async function onClick(e) {
       b.disabled = true;
       await api("/api/switch", { method: "POST", body: JSON.stringify({ tool, id, kill_cli: true }) });
       await load();
-      msg("已切换。对应的 App 会用新号打开。");
+      msg(["kimi", "devin"].includes(tool) ? "已切换。新的 CLI 进程将使用新账号。" : "已切换。对应的 App 会用新号打开。");
     } else if (act === "login-codex" || act === "login-grok") {
       await startLogin(act === "login-grok" ? "grok" : "codex");
     }

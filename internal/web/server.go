@@ -225,7 +225,7 @@ func (s *Server) postCapture(w http.ResponseWriter, r *http.Request) {
 	var ids []map[string]any
 	for _, b := range blobs {
 		ids = append(ids, map[string]any{
-			"email": b.Identity.Email, "stable_id": b.Identity.StableID,
+			"tool": b.Tool, "email": b.Identity.Email, "phone": b.Identity.Phone, "display_name": b.Identity.DisplayName, "stable_id": b.Identity.StableID,
 			"incomplete": b.Incomplete, "stale_cli": b.StaleCLI,
 		})
 	}
@@ -275,6 +275,7 @@ func (s *Server) postProbe(w http.ResponseWriter, r *http.Request) {
 	res := s.App.ProbeAccount(ctx, t, req.ID)
 	writeJSON(w, 200, map[string]any{
 		"buckets": res.Buckets,
+		"updated": res.Class == quota.OK || res.Class == quota.Soft || res.Class == quota.Exhausted,
 		"class":   res.Class, "used_pct": res.UsedPct, "resets_at": res.ResetsAt, "source": res.Source,
 	})
 }

@@ -504,29 +504,14 @@ func first(a, b string) string {
 }
 
 func (a Adapter) Idle(home string, grace time.Duration) bool {
-	if len(busy.CursorAgent(mustList(a))) == 0 {
+	list, err := a.procs()
+	if err != nil {
+		return false
+	}
+	if len(busy.CursorAgent(list)) == 0 {
 		return true
 	}
-	return time.Since(mtime(filepath.Join(home, ".cursor"))) >= grace
-}
-
-func mustList(a Adapter) []adapter.Proc {
-	list, _ := a.procs()
-	return list
-}
-
-func mtime(root string) time.Time {
-	var newest time.Time
-	_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info == nil || info.IsDir() {
-			return nil
-		}
-		if info.ModTime().After(newest) {
-			newest = info.ModTime()
-		}
-		return nil
-	})
-	return newest
+	return busy.FilesIdle(filepath.Join(home, ".cursor"), grace, time.Now())
 }
 
 func (a Adapter) KillCLI(home string) error {

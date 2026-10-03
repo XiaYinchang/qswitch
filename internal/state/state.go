@@ -89,6 +89,7 @@ CREATE TABLE IF NOT EXISTS quota_log (
   source TEXT
 );
 CREATE INDEX IF NOT EXISTS quota_log_ts ON quota_log(ts);
+CREATE INDEX IF NOT EXISTS quota_log_account_ts ON quota_log(tool,stable_id,ts);
 `)
 	if err != nil {
 		return err
@@ -252,7 +253,7 @@ func (d *DB) RecentQuota(tool, id string, n int) ([]QuotaPoint, error) {
 	if n <= 0 {
 		n = 16
 	}
-	rows, err := d.sql.Query(`SELECT ts, used_pct, class FROM quota_log WHERE tool=? AND stable_id=? ORDER BY ts DESC LIMIT ?`, tool, id, n)
+	rows, err := d.sql.Query(`SELECT ts, used_pct, class FROM quota_log WHERE tool=? AND stable_id=? ORDER BY ts DESC,rowid DESC LIMIT ?`, tool, id, n)
 	if err != nil {
 		return nil, err
 	}

@@ -244,14 +244,27 @@ func isKimiCLI(command string) bool {
 	if name == "kimi" {
 		return true
 	}
+	args := f[1:]
 	if strings.HasPrefix(name, "python") {
-		if len(f) > 1 && filepath.Base(f[1]) == "kimi" {
+		for len(args) > 0 && (args[0] == "-u" || args[0] == "-B" || args[0] == "-E" || args[0] == "-I" || args[0] == "-s" || args[0] == "-S" || args[0] == "-O" || args[0] == "-OO") {
+			args = args[1:]
+		}
+		if len(args) > 0 && args[0] == "--" {
+			args = args[1:]
+		}
+		if len(args) > 0 && filepath.Base(args[0]) == "kimi" {
 			return true
 		}
-		return len(f) > 2 && f[1] == "-m" && f[2] == "kimi_cli"
+		return len(args) > 1 && args[0] == "-m" && args[1] == "kimi_cli"
 	}
-	if (name == "node" || name == "bun") && len(f) > 1 {
-		return strings.HasSuffix(filepath.ToSlash(f[1]), "/@moonshot-ai/kimi-code/dist/main.mjs")
+	if name == "node" || name == "bun" {
+		for len(args) > 0 && (args[0] == "--use-system-ca" || args[0] == "--no-warnings") {
+			args = args[1:]
+		}
+		if len(args) > 0 && args[0] == "--" {
+			args = args[1:]
+		}
+		return len(args) > 0 && strings.HasSuffix(filepath.ToSlash(args[0]), "/@moonshot-ai/kimi-code/dist/main.mjs")
 	}
 	return false
 }

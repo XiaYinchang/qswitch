@@ -332,6 +332,21 @@ func (a Adapter) KillCLI(home string) error {
 	if err != nil {
 		return err
 	}
+	// PID files may survive their owner, and macOS may reuse that PID for an
+	// unrelated process. Keep such holders as blockers, but never signal them.
+	list, err := a.procs()
+	if err != nil {
+		return err
+	}
+	verified := make(map[int]bool)
+	for _, p := range busy.GrokCLI(list) {
+		verified[p.PID] = true
+	}
+	for _, p := range h.Manual {
+		if !verified[p.PID] {
+			return &adapter.BusyError{Holders: h}
+		}
+	}
 	var first error
 	for _, p := range h.Manual {
 		if err := syscall.Kill(p.PID, syscall.SIGTERM); err != nil && first == nil {

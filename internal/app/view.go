@@ -31,25 +31,29 @@ type ToolView struct {
 }
 
 type AccountView struct {
-	Tool           string         `json:"tool"`
-	StableID       string         `json:"stable_id"`
-	Email          string         `json:"email"`
-	Phone          string         `json:"phone,omitempty"`
-	DisplayName    string         `json:"display_name,omitempty"`
-	Plan           string         `json:"plan"`
-	Live           bool           `json:"live"`
-	Desktop        bool           `json:"desktop"`
-	Class          string         `json:"class"`
-	UsedPct        float64        `json:"used_pct"`
-	RemainingPct   *float64       `json:"remaining_pct"`
-	CoolingUntil   int64          `json:"cooling_until"`
-	ResetsAt       int64          `json:"resets_at"`
-	Incomplete     bool           `json:"incomplete"`
-	StaleCLI       bool           `json:"stale_cli"`
-	LastProbedAt   int64          `json:"last_probed_at"`
-	LastCapturedAt int64          `json:"last_captured_at"`
-	Buckets        []quota.Bucket `json:"buckets,omitempty"`
-	Derived        bool           `json:"derived,omitempty"`
+	Tool            string         `json:"tool"`
+	StableID        string         `json:"stable_id"`
+	Email           string         `json:"email"`
+	Phone           string         `json:"phone,omitempty"`
+	DisplayName     string         `json:"display_name,omitempty"`
+	Plan            string         `json:"plan"`
+	Live            bool           `json:"live"`
+	Desktop         bool           `json:"desktop"`
+	Class           string         `json:"class"`
+	UsedPct         float64        `json:"used_pct"`
+	RemainingPct    *float64       `json:"remaining_pct"`
+	CoolingUntil    int64          `json:"cooling_until"`
+	ResetsAt        int64          `json:"resets_at"`
+	Incomplete      bool           `json:"incomplete"`
+	StaleCLI        bool           `json:"stale_cli"`
+	LastProbedAt    int64          `json:"last_probed_at"`
+	LastProbeClass  string         `json:"last_probe_class,omitempty"`
+	LastProbeSource string         `json:"last_probe_source,omitempty"`
+	LastProbeAt     int64          `json:"last_probe_at,omitempty"`
+	QuotaStale      bool           `json:"quota_stale"`
+	LastCapturedAt  int64          `json:"last_captured_at"`
+	Buckets         []quota.Bucket `json:"buckets,omitempty"`
+	Derived         bool           `json:"derived,omitempty"`
 }
 
 func remainingPct(class string, used float64) *float64 {
@@ -98,7 +102,12 @@ func (a *App) Overview() Overview {
 			if hideOverviewAccount(t, ac) {
 				continue
 			}
-			tv.Accounts = append(tv.Accounts, accountView(ac, p.StableID, now))
+			view := accountView(ac, p.StableID, now)
+			if last, err := a.State.LatestQuota(ac.Tool, ac.StableID); err == nil {
+				view.LastProbeClass, view.LastProbeSource, view.LastProbeAt = last.Class, last.Source, last.Ts
+				view.QuotaStale = view.QuotaStale || last.Class == string(quota.Unknown) || last.Class == string(quota.Expired)
+			}
+			tv.Accounts = append(tv.Accounts, view)
 		}
 		if t == adapter.Cursor {
 			cursor, bot := splitCursorBot(tv)
@@ -149,6 +158,9 @@ func splitCursorBot(tv ToolView) (ToolView, ToolView) {
 			class = "exhausted"
 		case used >= 90:
 			class = "soft"
+		}
+		if ac.Class == string(quota.Expired) || ac.Class == string(quota.Unknown) {
+			class = ac.Class
 		}
 		bc := ac
 		bc.Tool = "cursor"
@@ -216,6 +228,7 @@ func accountView(ac state.Account, liveID string, now int64) AccountView {
 		Incomplete:     ac.Incomplete,
 		StaleCLI:       ac.StaleCLI,
 		LastProbedAt:   ac.LastProbedAt,
+		QuotaStale:     class == string(quota.Expired) || class == string(quota.Unknown),
 		LastCapturedAt: ac.LastCapturedAt,
 		Buckets:        quota.DecodeBuckets(ac.QuotaDetail),
 	}

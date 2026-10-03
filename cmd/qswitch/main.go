@@ -53,7 +53,7 @@ func run(args []string) int {
 				continue
 			}
 			for _, b := range blobs {
-				fmt.Printf("captured %s %s %s incomplete=%v stale_cli=%v\n", t, b.Identity.Email, b.Identity.StableID, b.Incomplete, b.StaleCLI)
+				fmt.Printf("captured %s %s %s incomplete=%v stale_cli=%v\n", t, app.IdentityLabel(b.Identity), b.Identity.StableID, b.Incomplete, b.StaleCLI)
 			}
 			for _, w := range warn {
 				fmt.Fprintf(os.Stderr, "warning: %s\n", w)
@@ -109,7 +109,7 @@ func run(args []string) int {
 		return 0
 	case "switch":
 		if len(rest) < 2 {
-			fmt.Fprintln(os.Stderr, "usage: qswitch switch <tool> <account-id|email> [--force-align] [--allow-stale-cli] [--kill-cli] [--cli-only]")
+			fmt.Fprintln(os.Stderr, "usage: qswitch switch <tool> <id|account> [--force-align] [--allow-stale-cli] [--kill-cli] [--cli-only]")
 			fmt.Fprintln(os.Stderr, "  会关掉并重启 ChatGPT.app / Cursor.app / Grok Bot.app；空闲 CLI 一并结束")
 			fmt.Fprintln(os.Stderr, "  --cli-only 只写 CLI 登录文件，不动桌面 App")
 			fmt.Fprintln(os.Stderr, "  same email with personal+team workspaces: pass chatgpt_account_id")
@@ -176,7 +176,7 @@ func run(args []string) int {
 		return 0
 	case "forget":
 		if len(rest) < 2 {
-			fmt.Fprintln(os.Stderr, "usage: qswitch forget <tool> <id|email>")
+			fmt.Fprintln(os.Stderr, "usage: qswitch forget <tool> <id|account>")
 			return 2
 		}
 		t, err := adapter.ParseTool(rest[0])
@@ -291,11 +291,11 @@ func usage() {
   qswitch list [--tool ...]
   qswitch status
   qswitch probe [--tool codex|grok|cursor|devin|zcode|kimi]
-  qswitch switch <tool> <id|email> [--force-align] [--allow-stale-cli] [--kill-cli]
+  qswitch switch <tool> <id|account> [--force-align] [--allow-stale-cli] [--kill-cli]
   qswitch apply [--tool ...] [--kill-cli]
   qswitch enable-auto [--tool ...]
   qswitch disable-auto [--tool ...]
-  qswitch forget <tool> <id|email>
+  qswitch forget <tool> <id|account>
   qswitch doctor
   qswitch serve [--addr 127.0.0.1:7432]
 `)

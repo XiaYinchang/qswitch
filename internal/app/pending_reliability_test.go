@@ -62,6 +62,9 @@ func TestTryApplyRevalidatesExhaustedPending(t *testing.T) {
 			if err := a.State.UpdateQuotaSnapshot("codex", "acc-a", targetClass, 21, 0, time.Now().Unix()); err != nil {
 				t.Fatal(err)
 			}
+			if err := a.State.LogQuota("codex", "acc-a", targetClass, "http", 21, time.Now()); err != nil {
+				t.Fatal(err)
+			}
 			target, err := a.State.GetAccount("codex", "acc-a")
 			if err != nil {
 				t.Fatal(err)
@@ -76,6 +79,9 @@ func TestTryApplyRevalidatesExhaustedPending(t *testing.T) {
 				}
 			}
 			if err := a.State.UpdateQuotaSnapshot("codex", tc.from, tc.class, 100, 0, time.Now().Unix()); err != nil {
+				t.Fatal(err)
+			}
+			if err := a.State.LogQuota("codex", tc.from, tc.class, "http", 100, time.Now()); err != nil {
 				t.Fatal(err)
 			}
 			if err := a.State.SetPending(state.Pending{Tool: "codex", FromID: tc.from, ToID: "acc-a", Reason: tc.reason, QueuedAt: time.Now().Unix()}); err != nil {
@@ -132,6 +138,12 @@ func TestTryApplyHoldsToolLockThroughValidationAndRestore(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := a.State.UpdateQuotaSnapshot("codex", "acc-b", "exhausted", 100, 0, time.Now().Unix()); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.State.LogQuota("codex", "acc-a", "ok", "http", 21, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.State.LogQuota("codex", "acc-b", "exhausted", "http", 100, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.State.SetPending(state.Pending{Tool: "codex", FromID: "acc-b", ToID: "acc-a", Reason: "exhausted", QueuedAt: time.Now().Unix()}); err != nil {
