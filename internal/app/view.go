@@ -34,6 +34,8 @@ type AccountView struct {
 	Tool           string         `json:"tool"`
 	StableID       string         `json:"stable_id"`
 	Email          string         `json:"email"`
+	Phone          string         `json:"phone,omitempty"`
+	DisplayName    string         `json:"display_name,omitempty"`
 	Plan           string         `json:"plan"`
 	Live           bool           `json:"live"`
 	Desktop        bool           `json:"desktop"`
@@ -201,6 +203,8 @@ func accountView(ac state.Account, liveID string, now int64) AccountView {
 		Tool:           ac.Tool,
 		StableID:       ac.StableID,
 		Email:          ac.Email,
+		Phone:          ac.Phone,
+		DisplayName:    ac.DisplayName,
 		Plan:           plan,
 		Live:           ac.StableID == liveID && liveID != "",
 		Desktop:        strings.HasPrefix(ac.StableID, "desktop:"),

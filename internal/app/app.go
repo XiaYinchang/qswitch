@@ -284,6 +284,8 @@ func (a *App) saveBlob(b adapter.Blob) error {
 		Tool:           string(b.Tool),
 		StableID:       id.StableID,
 		Email:          id.Email,
+		Phone:          id.Phone,
+		DisplayName:    id.DisplayName,
 		PlanHint:       plan,
 		Incomplete:     b.Incomplete,
 		StaleCLI:       b.StaleCLI,

@@ -197,3 +197,23 @@ func TestKimiHomeOverride(t *testing.T) {
 		t.Fatalf("must not read fallback home %v", err)
 	}
 }
+
+func TestKimiPhoneIdentity(t *testing.T) {
+	for _, tc := range []struct{ name, body, phone, display string }{
+		{"phone and nickname", `{"user_id":"u","nickname":"Kimi user","phone":{"country_code":"86","number":"176****0000"}}`, "+86 176****0000", "Kimi user"},
+		{"no country code", `{"user_id":"u","phone":{"number":"012****7890"}}`, "012****7890", ""},
+		{"already international", `{"user_id":"u","phone":{"country_code":"86","number":"+86 176****0000"}}`, "+86 176****0000", ""},
+		{"nickname fallback", `{"user_id":"u","nickname":"name"}`, "", "name"},
+		{"username fallback", `{"user_id":"u","username":"handle"}`, "", "handle"},
+		{"country only is not identity", `{"user_id":"u","nickname":"name","phone":{"country_code":"86"}}`, "", "name"},
+		{"bad phone does not hide nickname", `{"user_id":"u","nickname":"name","phone":{"number":1234}}`, "", "name"},
+		{"bad optional field does not hide phone", `{"user_id":"u","nickname":7,"phone":{"number":"176****0000"}}`, "176****0000", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := EnrichIdentity(adapter.Identity{}, []byte(tc.body))
+			if got.StableID != "u" || got.Phone != tc.phone || got.DisplayName != tc.display || got.Email != "" {
+				t.Fatalf("identity = %+v", got)
+			}
+		})
+	}
+}

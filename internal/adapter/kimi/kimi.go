@@ -267,11 +267,25 @@ func EnrichIdentity(id adapter.Identity, body []byte) adapter.Identity {
 	if plan != "" {
 		id.PlanHint = plan
 	}
-	var profile struct {
-		Nickname string `json:"nickname"`
-	}
+	var profile map[string]any
 	if uid != "" && json.Unmarshal(body, &profile) == nil {
-		id.DisplayName = profile.Nickname
+		id.DisplayName, _ = profile["nickname"].(string)
+		id.DisplayName = strings.TrimSpace(id.DisplayName)
+		if id.DisplayName == "" {
+			id.DisplayName, _ = profile["username"].(string)
+			id.DisplayName = strings.TrimSpace(id.DisplayName)
+		}
+		if phone, ok := profile["phone"].(map[string]any); ok {
+			number, _ := phone["number"].(string)
+			country, _ := phone["country_code"].(string)
+			number, country = strings.TrimSpace(number), strings.TrimSpace(country)
+			if number != "" {
+				id.Phone = number
+				if country != "" && !strings.HasPrefix(number, "+") {
+					id.Phone = "+" + strings.TrimPrefix(country, "+") + " " + number
+				}
+			}
+		}
 	}
 	id.Tool = adapter.Kimi
 	return id

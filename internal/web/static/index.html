@@ -318,6 +318,10 @@ function toolActions(tool) {
   if (tool.tool === "grok") html += `<button class="primary" data-act="login-grok">加号</button>`;
   return html;
 }
+function accountLabel(ac) {
+  if (ac.tool === "kimi") return ac.phone || ac.display_name || ac.email || ac.stable_id;
+  return ac.email || ac.display_name || ac.stable_id;
+}
 function cardActions(ac, switchable) {
   const t = attr(ac.tool), id = attr(ac.stable_id);
   const bits = [];
@@ -363,7 +367,7 @@ function render(ov) {
       card.innerHTML = `
         <div class="who">
           <div>
-            <div class="email">${attr(ac.email || "(无邮箱)")} ${badges.join(" ")}</div>
+            <div class="email">${attr(accountLabel(ac))} ${badges.join(" ")}</div>
             <div class="id">${attr(ac.stable_id)}</div>
           </div>
           ${acts ? `<div class="actions">${acts}</div>` : ""}

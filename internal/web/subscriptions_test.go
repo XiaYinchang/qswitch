@@ -32,7 +32,7 @@ func subscriptionApp(t *testing.T) *app.App {
 			if id != "kimi-a" && id != "kimi-b" {
 				return nil, fmt.Errorf("unexpected fixture token")
 			}
-			body = fmt.Sprintf(`{"user_id":%q,"email":%q,"user_level_name":"Allegretto"}`, id, id+"@example.test")
+			body = fmt.Sprintf(`{"user_id":%q,"nickname":%q,"phone":{"country_code":"86","number":"176****0000"},"user_level_name":"Allegretto"}`, id, id)
 		case "api.kimi.com/coding/v1/usages":
 			body = `{"usages":{"limit_5h":{"used_ratio":0.25,"reset_time":"2027-01-02T08:00:00Z"},"limit_7d":{"used_ratio":0.40,"reset_time":"2027-01-07T08:00:00Z"},"limit_month_total":{"used_ratio":0.10,"reset_time":"2027-02-01T08:00:00Z"},"limit_month_code":{"used_ratio":0.99}}}`
 		default:
@@ -106,7 +106,7 @@ func TestKimiSubscriptionLifecycleHTTP(t *testing.T) {
 	call("/api/forget", map[string]string{"tool": "kimi", "id": "kimi-a"}, 200)
 	call("/api/switch", map[string]any{"tool": "zcode", "id": "any"}, 400)
 	for _, tool := range a.Overview().Tools {
-		if tool.Tool == "kimi" && (len(tool.Accounts) != 1 || len(tool.Accounts[0].Buckets) != 4 || tool.Accounts[0].UsedPct != 40 || !tool.Switchable) {
+		if tool.Tool == "kimi" && (len(tool.Accounts) != 1 || len(tool.Accounts[0].Buckets) != 4 || tool.Accounts[0].UsedPct != 40 || tool.Accounts[0].Phone != "+86 176****0000" || tool.Accounts[0].Email != "" || !tool.Switchable) {
 			t.Fatalf("Kimi overview: %+v", tool)
 		}
 		if tool.Tool == "zcode" && (tool.Switchable || tool.Auto) {

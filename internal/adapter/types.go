@@ -43,6 +43,7 @@ type Identity struct {
 	Tool        Tool   `json:"tool"`
 	StableID    string `json:"stable_id"`
 	Email       string `json:"email"`
+	Phone       string `json:"phone,omitempty"`
 	DisplayName string `json:"display_name,omitempty"`
 	PlanHint    string `json:"plan_hint,omitempty"`
 }
