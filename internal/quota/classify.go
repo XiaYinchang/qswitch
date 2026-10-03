@@ -68,12 +68,15 @@ func Classify(kind Kind, status int, body []byte) (result Result) {
 	if kind == KindCursor && cursorCapacityText(text) {
 		return Result{Class: Unknown, Source: "http_capacity"}
 	}
-	if kind == KindGrok && grokQuotaExhausted(status, text) {
+	if kind == KindGrok && status != 200 && grokQuotaExhausted(status, text) {
 		return Result{Class: Exhausted, UsedPct: 100, Source: "http_402", ResetsAt: resetFromBody(body)}
 	}
 	if status == 200 && json.Valid(body) && len(body) > 0 {
 		var v any
 		if err := json.Unmarshal(body, &v); err == nil {
+			if kind == KindGrok {
+				return withPlan(kind, classifyGrokBilling(v, "http"), v)
+			}
 			if kind == KindCursor {
 				if r, ok := classifyCursorPeriod(v); ok {
 					return withPlan(kind, r, v)
@@ -152,9 +155,6 @@ func classifyValue(v any, source string, kind Kind) Result {
 			pct = 100
 		}
 		if kind == KindCursor && cursorOnDemandAvailable(v) {
-			return Result{Class: Soft, UsedPct: pct, Source: source, ResetsAt: resets}
-		}
-		if kind == KindGrok && grokPrepaidOrOnDemand(v) {
 			return Result{Class: Soft, UsedPct: pct, Source: source, ResetsAt: resets}
 		}
 		return Result{Class: Exhausted, UsedPct: pct, Source: source, ResetsAt: resets}
@@ -748,18 +748,6 @@ func grokQuotaExhausted(status int, s string) bool {
 
 func looksLikeX402(low string) bool {
 	return strings.Contains(low, "x402") || (strings.Contains(low, "accepts") && strings.Contains(low, "payment"))
-}
-
-func grokPrepaidOrOnDemand(v any) bool {
-	if n, ok := findFloat(v, []string{"prepaidBalance"}); ok && n > 0 {
-		return true
-	}
-	capv, cok := findFloat(v, []string{"onDemandCap"})
-	used, uok := findFloat(v, []string{"onDemandUsed"})
-	if cok && capv > 0 && (!uok || used < capv) {
-		return true
-	}
-	return false
 }
 
 func cursorCapacityText(s string) bool {

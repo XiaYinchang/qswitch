@@ -180,14 +180,11 @@ func classifyGrokLine(line string) (result Result, ok bool) {
 	if !strings.Contains(msg, "fetched credits") && !strings.Contains(msg, "billing") && !strings.Contains(line, "creditUsagePercent") {
 		return Result{}, false
 	}
-	cfg := lookup(obj, "config")
-	if cfg == nil {
-		cfg = obj
+	root := obj
+	if ctx := asMap(obj["ctx"]); ctx != nil {
+		root = ctx
 	}
-	r := classifyValue(cfg, "jsonl_billing", KindGrok)
-	if r.Class == Unknown {
-		r = classifyValue(obj, "jsonl_billing", KindGrok)
-	}
+	r := classifyGrokBilling(root, "jsonl_billing")
 	if r.Class != Unknown {
 		return withPlan(KindGrok, r, obj), true
 	}

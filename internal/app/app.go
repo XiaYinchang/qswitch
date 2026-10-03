@@ -856,6 +856,9 @@ func (a *App) ProbeLocal(tool adapter.Tool) {
 		}
 	}
 	_ = a.State.UpdateQuotaSnapshot(string(tool), p.StableID, string(r.Class), r.UsedPct, r.ResetsAt, a.now().Unix())
+	if tool == adapter.Grok && r.Source == "jsonl_billing" {
+		_ = a.State.SetQuotaDetail(string(tool), p.StableID, quota.EncodeBuckets(r.Buckets))
+	}
 	if r.Plan != "" {
 		acc, _ := a.State.GetAccount(string(tool), p.StableID)
 		_ = a.State.SetPlanHint(string(tool), p.StableID, quota.MergePlan(acc.PlanHint, r.Plan))
@@ -1440,7 +1443,11 @@ func (a *App) probeAccount(ctx context.Context, tool adapter.Tool, id string, ga
 		backoff = now.Add(cfg.Backoff()).Unix()
 	}
 	_ = a.State.UpdateQuota(string(tool), id, string(res.Class), res.UsedPct, res.ResetsAt, now.Unix(), now.Unix(), backoff)
-	if len(res.Buckets) > 0 {
+	if tool == adapter.Grok && (res.Class == quota.OK || res.Class == quota.Soft || res.Class == quota.Exhausted) {
+		// Grok returns one complete current-period snapshot; a plan change must
+		// remove obsolete buckets rather than merge them into the new period.
+		_ = a.State.SetQuotaDetail(string(tool), id, quota.EncodeBuckets(res.Buckets))
+	} else if len(res.Buckets) > 0 {
 		_ = a.State.SetQuotaDetail(string(tool), id, quota.EncodeBuckets(quota.MergeBuckets(quota.DecodeBuckets(acc.QuotaDetail), res.Buckets)))
 	}
 	if res.Plan != "" {

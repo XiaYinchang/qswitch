@@ -252,9 +252,9 @@ function barColor(used, cls) {
   if (cls === "exhausted") return "var(--bad)";
   return usedColor(used);
 }
-function usedText(used) {
+function usedText(used, tool) {
   if (used == null) return "用量未知";
-  return `已用 ${used.toFixed(0)}%`;
+  return `已用 ${tool === "grok" ? Math.floor(used) : used.toFixed(0)}%`;
 }
 function barStyle(used, cls) {
   if (used == null) return "";
@@ -279,6 +279,7 @@ function bucketLabel(id) {
   if (id === "bot") return "Bot";
   if (id === "daily") return "日额度";
   if (id === "weekly") return "周额度";
+  if (id === "monthly") return "月额度";
   if (id === "5h") return "5小时";
   if (id === "1d") return "日额度";
   return id;
@@ -288,9 +289,9 @@ function bucketHTML(ac) {
   if (!rows.length) return "";
   return `<div class="buckets">${rows.map(b => {
     const used = clampPct(b.used_pct) ?? 0;
-    const cls = used >= 99.5 ? "exhausted" : used >= 90 ? "soft" : "ok";
+    const cls = used >= (ac.tool === "grok" ? 100 : 99.5) ? "exhausted" : used >= 90 ? "soft" : "ok";
     const when = b.resets_at ? fmtTime(b.resets_at) : "";
-    return `<div class="bucket"><span class="name">${attr(bucketLabel(b.id))}</span><div class="bar"><i style="${barStyle(used, cls)}"></i></div><span class="rem">${usedText(used)}</span>${when ? `<span class="when">${when}</span>` : `<span class="when"></span>`}</div>`;
+    return `<div class="bucket"><span class="name">${attr(bucketLabel(b.id))}</span><div class="bar"><i style="${barStyle(used, cls)}"></i></div><span class="rem">${usedText(used, ac.tool)}</span>${when ? `<span class="when">${when}</span>` : `<span class="when"></span>`}</div>`;
   }).join("")}</div>`;
 }
 function toolTitle(t) {
@@ -365,7 +366,7 @@ function render(ov) {
         ${ac.buckets && ac.buckets.length
           ? bucketHTML(ac) + (!(ac.buckets || []).some(b => b.resets_at) && whenText(ac) ? `<div class="stats"><span>${whenText(ac)}</span><span></span></div>` : "")
           : `<div class="bar${used == null ? " empty" : ""}"><i style="${barStyle(used, ac.class)}"></i></div>
-        <div class="stats"><span>${whenText(ac)}</span><span class="rem">${usedText(used)}</span></div>`}`;
+        <div class="stats"><span>${whenText(ac)}</span><span class="rem">${usedText(used, ac.tool)}</span></div>`}`;
       sec.appendChild(card);
     });
     if (!(tool.accounts || []).length) {
