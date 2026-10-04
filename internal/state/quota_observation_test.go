@@ -18,6 +18,9 @@ func TestLatestQuotaUsesTimeThenInsertionOrder(t *testing.T) {
 	if _, err := db.LatestQuota("codex", "a"); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("missing observation error=%v", err)
 	}
+	if _, err := db.LatestConfirmedQuota("codex", "a"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("missing confirmed observation error=%v", err)
+	}
 	now := time.Unix(1791000000, 0)
 	for _, p := range []struct {
 		tool, id, class, source string
@@ -41,6 +44,13 @@ func TestLatestQuotaUsesTimeThenInsertionOrder(t *testing.T) {
 	if err != nil || len(points) != 3 || points[0].Class != "soft" || points[1].Class != "ok" || points[2].Class != "unknown" {
 		t.Fatalf("recent ordering=%+v error=%v", points, err)
 	}
+	if err := db.LogQuota("codex", "a", "expired", "http", 0, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	p, err = db.LatestConfirmedQuota("codex", "a")
+	if err != nil || p.Class != "ok" || p.Source != "http" || p.Ts != now.Unix() || p.UsedPct != 21 {
+		t.Fatalf("failed observations replaced confirmed record: %+v, error=%v", p, err)
+	}
 	var id, parent, unused int
 	var detail string
 	err = db.sql.QueryRow(`EXPLAIN QUERY PLAN SELECT ts,class,source,used_pct FROM quota_log WHERE tool=? AND stable_id=? ORDER BY ts DESC,rowid DESC LIMIT 1`, "codex", "a").Scan(&id, &parent, &unused, &detail)
@@ -52,5 +62,8 @@ func TestLatestQuotaUsesTimeThenInsertionOrder(t *testing.T) {
 	}
 	if _, err := db.LatestQuota("codex", "a"); err == nil {
 		t.Fatal("database errors must not look like an absent observation")
+	}
+	if _, err := db.LatestConfirmedQuota("codex", "a"); err == nil {
+		t.Fatal("database errors must not look like an absent confirmed observation")
 	}
 }

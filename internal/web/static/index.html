@@ -232,6 +232,7 @@ const api = (path, opt) => fetch(path, Object.assign({ cache: "no-store", header
 });
 const clsLabel = { ok: "正常", soft: "接近用尽", exhausted: "已用尽", expired: "票失效", unknown: "未查到" };
 function clampPct(n) {
+  if (n == null || n === "") return null;
   const x = Number(n);
   if (!Number.isFinite(x)) return null;
   return Math.max(0, Math.min(100, x));
@@ -248,19 +249,13 @@ function usedColor(used) {
   if (p <= 80) return mixRGB(g, y, (p - 50) / 30);
   return mixRGB(y, r, (p - 80) / 20);
 }
-function barColor(used, cls) {
-  if (cls === "stale") return "var(--muted)";
-  if (cls === "expired") return "var(--bad)";
-  if (cls === "exhausted") return "var(--bad)";
-  return usedColor(used);
-}
 function usedText(used, tool) {
   if (used == null) return "用量未知";
   return `已用 ${["grok", "kimi", "zcode"].includes(tool) ? Math.floor(used) : used.toFixed(0)}%`;
 }
-function barStyle(used, cls) {
+function barStyle(used) {
   if (used == null) return "";
-  return `width:${used}%;background:${barColor(used, cls)}`;
+  return `width:${used}%;background:${usedColor(used)}`;
 }
 function fmtTime(sec) {
   if (!sec) return "";
@@ -292,10 +287,9 @@ function bucketHTML(ac) {
   const rows = ac.buckets || [];
   if (!rows.length) return "";
   return `<div class="buckets">${rows.map(b => {
-    const used = clampPct(b.used_pct) ?? 0;
-    const cls = ac.quota_stale ? "stale" : used >= (["grok", "kimi", "zcode"].includes(ac.tool) ? 100 : 99.5) ? "exhausted" : used >= 90 ? "soft" : "ok";
+    const used = clampPct(b.used_pct);
     const when = b.resets_at ? fmtTime(b.resets_at) : "";
-    return `<div class="bucket"><span class="name">${attr(bucketLabel(b.id))}</span><div class="bar"><i style="${barStyle(used, cls)}"></i></div><span class="rem">${ac.quota_stale ? "上次" : ""}${usedText(used, ac.tool)}</span>${when ? `<span class="when">${when}</span>` : `<span class="when"></span>`}</div>`;
+    return `<div class="bucket"><span class="name">${attr(bucketLabel(b.id))}</span><div class="bar"><i style="${barStyle(used)}"></i></div><span class="rem">${usedText(used, ac.tool)}</span>${when ? `<span class="when">${when}</span>` : `<span class="when"></span>`}</div>`;
   }).join("")}</div>`;
 }
 function toolTitle(t) {
@@ -325,12 +319,16 @@ function accountLabel(ac) {
   return ac.email || ac.display_name || ac.phone || ac.stable_id;
 }
 function quotaNote(ac) {
-  let text = "";
-  if (ac.class === "expired") text = "认证已失效，请重新登录；用量为上次记录。";
-  else if (ac.last_probe_class === "unknown") text = "最近查询未能确认用量；已有数值为上次记录。";
-  else if (ac.class === "unknown") text = "尚未确认当前用量。";
-  if (text && ac.last_probe_at) text += ` 最近查询 ${fmtTime(ac.last_probe_at)}`;
-  return text;
+  const known = (ac.buckets || []).some(b => clampPct(b.used_pct) != null) ||
+    (["ok", "soft", "exhausted"].includes(ac.class) && clampPct(ac.used_pct) != null);
+  const parts = [];
+  if (ac.class === "expired") parts.push("认证已失效，请重新登录。" + (known ? "显示历史用量。" : ""));
+  else if (ac.last_probe_class === "unknown") parts.push("最近查询未能确认用量。" + (known ? "显示历史用量。" : ""));
+  else if (ac.class === "unknown") parts.push("尚未确认当前用量。" + (known ? "显示历史用量。" : ""));
+  else if (ac.quota_stale && known) parts.push("显示历史用量。");
+  if (known && ac.last_quota_at) parts.push(`用量记录 ${fmtTime(ac.last_quota_at)}`);
+  if (parts.length && ac.last_probe_at && ac.last_probe_at !== ac.last_quota_at) parts.push(`最近查询 ${fmtTime(ac.last_probe_at)}`);
+  return parts.join(" · ");
 }
 function cardActions(ac, switchable) {
   const t = attr(ac.tool), id = attr(ac.stable_id);
@@ -385,8 +383,8 @@ function render(ov) {
         </div>
         ${ac.buckets && ac.buckets.length
           ? bucketHTML(ac) + (!(ac.buckets || []).some(b => b.resets_at) && whenText(ac) ? `<div class="stats"><span>${whenText(ac)}</span><span></span></div>` : "")
-          : `<div class="bar${used == null ? " empty" : ""}"><i style="${barStyle(used, ac.quota_stale ? "stale" : ac.class)}"></i></div>
-        <div class="stats"><span>${whenText(ac)}</span><span class="rem">${ac.quota_stale && used != null ? "上次" : ""}${usedText(used, ac.tool)}</span></div>`}
+          : `<div class="bar${used == null ? " empty" : ""}"><i style="${barStyle(used)}"></i></div>
+        <div class="stats"><span>${whenText(ac)}</span><span class="rem">${usedText(used, ac.tool)}</span></div>`}
         ${quotaNote(ac) ? `<p class="quota-note">${attr(quotaNote(ac))}</p>` : ""}`;
       sec.appendChild(card);
     });

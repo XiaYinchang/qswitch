@@ -50,6 +50,7 @@ type AccountView struct {
 	LastProbeClass  string         `json:"last_probe_class,omitempty"`
 	LastProbeSource string         `json:"last_probe_source,omitempty"`
 	LastProbeAt     int64          `json:"last_probe_at,omitempty"`
+	LastQuotaAt     int64          `json:"last_quota_at,omitempty"`
 	QuotaStale      bool           `json:"quota_stale"`
 	LastCapturedAt  int64          `json:"last_captured_at"`
 	Buckets         []quota.Bucket `json:"buckets,omitempty"`
@@ -106,6 +107,14 @@ func (a *App) Overview() Overview {
 			if last, err := a.State.LatestQuota(ac.Tool, ac.StableID); err == nil {
 				view.LastProbeClass, view.LastProbeSource, view.LastProbeAt = last.Class, last.Source, last.Ts
 				view.QuotaStale = view.QuotaStale || last.Class == string(quota.Unknown) || last.Class == string(quota.Expired)
+				switch quota.Class(last.Class) {
+				case quota.OK, quota.Soft, quota.Exhausted:
+					view.LastQuotaAt = last.Ts
+				default:
+					if confirmed, err := a.State.LatestConfirmedQuota(ac.Tool, ac.StableID); err == nil {
+						view.LastQuotaAt = confirmed.Ts
+					}
+				}
 			}
 			tv.Accounts = append(tv.Accounts, view)
 		}

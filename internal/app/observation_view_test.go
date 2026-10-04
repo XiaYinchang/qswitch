@@ -18,6 +18,10 @@ func TestOverviewRetainsQuotaAndReportsLatestFailedObservation(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Unix(1790000000, 0)
+	confirmedAt := now.Add(-time.Hour)
+	if err := a.State.LogQuota(ac.Tool, ac.StableID, "ok", "http", 20, confirmedAt); err != nil {
+		t.Fatal(err)
+	}
 	if err := a.State.LogQuota(ac.Tool, ac.StableID, "unknown", "http", 0, now); err != nil {
 		t.Fatal(err)
 	}
@@ -32,14 +36,14 @@ func TestOverviewRetainsQuotaAndReportsLatestFailedObservation(t *testing.T) {
 		return AccountView{}
 	}
 	v := view()
-	if v.Class != "ok" || v.UsedPct != 20 || len(v.Buckets) != 1 || v.Buckets[0].UsedPct != 20 || !v.QuotaStale || v.LastProbeClass != "unknown" || v.LastProbeSource != "http" || v.LastProbeAt != now.Unix() {
+	if v.Class != "ok" || v.UsedPct != 20 || len(v.Buckets) != 1 || v.Buckets[0].UsedPct != 20 || !v.QuotaStale || v.LastProbeClass != "unknown" || v.LastProbeSource != "http" || v.LastProbeAt != now.Unix() || v.LastQuotaAt != confirmedAt.Unix() {
 		t.Fatalf("retained quota was not distinguished from failed observation: %+v", v)
 	}
 	if err := a.State.LogQuota(ac.Tool, ac.StableID, "ok", "http", 20, now); err != nil {
 		t.Fatal(err)
 	}
 	v = view()
-	if v.QuotaStale || v.LastProbeClass != "ok" {
+	if v.QuotaStale || v.LastProbeClass != "ok" || v.LastQuotaAt != now.Unix() {
 		t.Fatal("later success in the same second did not clear the failed observation")
 	}
 }
