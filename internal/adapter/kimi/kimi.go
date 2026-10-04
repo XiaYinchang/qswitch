@@ -58,7 +58,15 @@ func ParseCreds(raw []byte) (Creds, error) {
 	return c, nil
 }
 
-func (c Creds) NeedsRefresh(now time.Time) bool { return c.ExpiresAt <= now.Add(time.Minute).Unix() }
+func (c Creds) NeedsRefresh(now time.Time) bool {
+	// Match the official client's threshold and leave room for the daemon's
+	// two-minute keepalive tick even for short-lived access tokens.
+	threshold := int64(300)
+	if c.ExpiresIn/2 > threshold {
+		threshold = c.ExpiresIn / 2
+	}
+	return c.ExpiresAt-now.Unix() <= threshold
+}
 
 func ReadLiveCreds(home string) (Creds, error) {
 	if err := validateConfig(home); err != nil {

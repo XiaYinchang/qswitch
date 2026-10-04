@@ -57,9 +57,8 @@ func (a *App) keepAliveKimiAccounts(ctx context.Context) {
 	if err != nil {
 		return
 	}
-	p, _ := a.State.GetPointer(string(adapter.Kimi))
 	for _, account := range accounts {
-		if account.StableID == p.StableID || account.HTTPBackoffUntil > a.now().Unix() {
+		if account.HTTPBackoffUntil > a.now().Unix() {
 			continue
 		}
 		lock, err := livefile.Acquire(filepath.Join(a.DataDir, "locks", "kimi.lock"))
@@ -81,8 +80,8 @@ func (a *App) keepAliveKimiAccounts(ctx context.Context) {
 	}
 }
 
-// Caller holds the Kimi tool lock. Live refresh belongs to the official CLI.
-// A parked account is refreshed only after establishing it differs from live.
+// Caller holds the Kimi tool lock. A running CLI owns live renewal; with no
+// CLI, qswitch can renew a verified live account under the official auth lock.
 func (a *App) keepAliveKimiLocked(ctx context.Context, b adapter.Blob, force, bypassBackoff bool) (adapter.Blob, string, error) {
 	c, err := kimi.CredsFromBlob(b)
 	if err != nil {
@@ -90,7 +89,7 @@ func (a *App) keepAliveKimiLocked(ctx context.Context, b adapter.Blob, force, by
 	}
 	live, liveErr := kimi.ReadLiveCreds(a.UserHome)
 	if liveErr == nil && sameKimiTokens(c, live) {
-		return b, live.AccessToken, nil
+		return a.keepAliveLiveKimiLocked(ctx, b, live, force, bypassBackoff)
 	}
 	// Reading quota with a fresh stored token cannot rotate live credentials.
 	// Only refresh needs to establish that the parked identity differs from live.
@@ -111,7 +110,7 @@ func (a *App) keepAliveKimiLocked(ctx context.Context, b adapter.Blob, force, by
 			return b, "", a.recordRefreshResult(adapter.Kimi, b.Identity.StableID, false, errors.New("kimi: live profile missing identity"))
 		}
 		if liveID == b.Identity.StableID {
-			return b, live.AccessToken, nil
+			return a.keepAliveLiveKimiLocked(ctx, b, live, force, bypassBackoff)
 		}
 	} else if !os.IsNotExist(liveErr) {
 		return b, "", a.recordRefreshResult(adapter.Kimi, b.Identity.StableID, false, errors.New("kimi: cannot read live credentials"))

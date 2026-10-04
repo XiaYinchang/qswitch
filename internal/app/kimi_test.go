@@ -105,10 +105,11 @@ func TestKimiCaptureRequiresStableProfileAndUnchangedToken(t *testing.T) {
 	}
 }
 
-func TestKimiLiveAccountNeverRefreshes(t *testing.T) {
+func TestKimiLiveCLIOwnsRefresh(t *testing.T) {
 	for _, rotated := range []bool{false, true} {
 		t.Run(fmt.Sprint(rotated), func(t *testing.T) {
 			a, blob, now := parkedKimiAccount(t)
+			a.Adapters[adapter.Kimi] = kimi.Adapter{List: func() ([]adapter.Proc, error) { return []adapter.Proc{{PID: 42, Command: "/bin/kimi acp"}}, nil }}
 			if !rotated {
 				writeKimiLive(t, a, "old", now.Add(-time.Minute).Unix())
 			}
