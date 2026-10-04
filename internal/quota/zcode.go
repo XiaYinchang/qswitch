@@ -59,7 +59,9 @@ func (h HTTP) ZCode(ctx context.Context, key, provider string) (Result, error) {
 	if err != nil {
 		return unknown, err
 	}
-	return ClassifyZCode(res.StatusCode, body), nil
+	r := ClassifyZCode(res.StatusCode, body)
+	r.RetryAfter = responseRetryAfter(res)
+	return r, nil
 }
 
 type zcodeLimit struct {

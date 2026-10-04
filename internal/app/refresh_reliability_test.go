@@ -131,7 +131,7 @@ func TestKeepAliveRefreshFailuresBackOff(t *testing.T) {
 					return &http.Response{StatusCode: code, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header), Request: req}, nil
 				})}
 				a.KeepAlive(context.Background(), tool)
-				a.Clock = clock.Fixed{T: now.Add(2 * time.Minute)}
+				a.Clock = clock.Fixed{T: now.Add(a.refreshRetryDelay(status == 400) - time.Second)}
 				a.KeepAlive(context.Background(), tool)
 				if hits != 1 {
 					t.Fatalf("failed keepalive retried before backoff: %d requests", hits)
@@ -141,20 +141,20 @@ func TestKeepAliveRefreshFailuresBackOff(t *testing.T) {
 				if status == 400 {
 					wantClass = "expired"
 				}
-				if err != nil || ac.LastQuotaClass != wantClass || ac.LastUsedPct != 21 || ac.HTTPBackoffUntil != now.Add(a.Cfg.Backoff()).Unix() {
+				if err != nil || ac.LastQuotaClass != wantClass || ac.LastUsedPct != 21 || ac.RefreshBackoffUntil != now.Add(a.refreshRetryDelay(status == 400)).Unix() {
 					t.Fatalf("wrong refresh failure state: %+v err=%v", ac, err)
 				}
 				success = true
-				a.Clock = clock.Fixed{T: now.Add(a.Cfg.Backoff())}
+				a.Clock = clock.Fixed{T: now.Add(a.refreshRetryDelay(status == 400))}
 				a.KeepAlive(context.Background(), tool)
 				ac, err = a.State.GetAccount(string(tool), blob.Identity.StableID)
 				if status == 400 {
 					wantClass = "unknown"
 				}
-				if hits != 2 || err != nil || ac.HTTPBackoffUntil != 0 || ac.LastQuotaClass != wantClass {
+				if hits != 2 || err != nil || ac.RefreshBackoffUntil != 0 || ac.LastQuotaClass != wantClass {
 					t.Fatalf("refresh did not recover after backoff: hits=%d account=%+v err=%v", hits, ac, err)
 				}
-				a.Clock = clock.Fixed{T: now.Add(a.Cfg.Backoff() + 2*time.Minute)}
+				a.Clock = clock.Fixed{T: now.Add(a.refreshRetryDelay(status == 400) + 2*time.Minute)}
 				a.KeepAlive(context.Background(), tool)
 				if hits != 2 {
 					t.Fatal("successfully refreshed account must not remain forced-expired")
@@ -178,7 +178,7 @@ func TestProbeRefreshTemporaryFailurePreservesQuota(t *testing.T) {
 				t.Fatalf("temporary refresh failure should stop probing: class=%s requests=%d", res.Class, hits)
 			}
 			ac, err := a.State.GetAccount(string(tool), blob.Identity.StableID)
-			if err != nil || ac.LastQuotaClass != "ok" || ac.LastUsedPct != 21 || ac.HTTPBackoffUntil == 0 {
+			if err != nil || ac.LastQuotaClass != "ok" || ac.LastUsedPct != 21 || ac.RefreshBackoffUntil == 0 {
 				t.Fatalf("temporary failure destroyed known quota or lost backoff: %+v err=%v", ac, err)
 			}
 		})

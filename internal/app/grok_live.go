@@ -33,7 +33,7 @@ func (a *App) keepAliveLiveGrokLocked(ctx context.Context, b adapter.Blob, live 
 		if err != nil {
 			return b, "", err
 		}
-		if ac.HTTPBackoffUntil > a.now().Unix() {
+		if ac.RefreshBackoffUntil > a.now().Unix() {
 			return b, "", errors.New("grok: refresh is in backoff")
 		}
 	}

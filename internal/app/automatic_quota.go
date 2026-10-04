@@ -18,7 +18,7 @@ import (
 func (a *App) cachedAutomaticQuota(tool adapter.Tool, ac state.Account) (quota.Result, bool, error) {
 	unknown := quota.Result{Class: quota.Unknown}
 	now := a.now().Unix()
-	if ac.Incomplete || ac.StaleCLI || ac.HTTPBackoffUntil > now {
+	if ac.Incomplete || ac.StaleCLI || ac.HTTPBackoffUntil > now || ac.RefreshBackoffUntil > now {
 		return unknown, false, nil
 	}
 	last, err := a.State.LatestQuota(string(tool), ac.StableID)
@@ -71,7 +71,7 @@ func (a *App) automaticQuotaLocked(ctx context.Context, tool adapter.Tool, id st
 	if err != nil {
 		return unknown, err
 	}
-	if ac.Incomplete || ac.StaleCLI || ac.HTTPBackoffUntil > a.now().Unix() || quota.Class(ac.LastQuotaClass) == quota.Expired {
+	if ac.Incomplete || ac.StaleCLI || ac.HTTPBackoffUntil > a.now().Unix() || ac.RefreshBackoffUntil > a.now().Unix() || quota.Class(ac.LastQuotaClass) == quota.Expired {
 		return unknown, nil
 	}
 	res, fresh, err := a.cachedAutomaticQuota(tool, ac)

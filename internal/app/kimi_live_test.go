@@ -259,7 +259,7 @@ func TestLiveKimiRefreshFailureKeepsCredentialsAndBacksOff(t *testing.T) {
 			if permanent {
 				want = "expired"
 			}
-			if calls != 1 || ac.LastQuotaClass != want || ac.LastUsedPct != 21 || ac.HTTPBackoffUntil != now.Add(a.Cfg.Backoff()).Unix() {
+			if calls != 1 || ac.LastQuotaClass != want || ac.LastUsedPct != 21 || ac.RefreshBackoffUntil != now.Add(a.refreshRetryDelay(permanent)).Unix() {
 				t.Fatal("refresh failure lost history or ignored backoff")
 			}
 			after, _ := os.ReadFile(path)

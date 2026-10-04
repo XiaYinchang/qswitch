@@ -12,9 +12,12 @@ import (
 )
 
 const (
-	HTTPIntervalFloor = 10 * time.Minute
-	DefaultHTTPMin    = 10 * time.Minute
-	DefaultHTTPMax    = 2 * time.Hour
+	HTTPIntervalFloor = 2 * time.Minute
+	DefaultHTTPMin    = 5 * time.Minute
+	DefaultHTTPMax    = 15 * time.Minute
+	IdleQuotaInterval = 30 * time.Minute
+	QuotaRetryMin     = 2 * time.Minute
+	QuotaRetryMax     = 15 * time.Minute
 	DefaultETADivisor = 6.0
 	DefaultJitter     = 2 * time.Minute
 	DefaultBackoff    = 2 * time.Hour
@@ -76,11 +79,11 @@ func Default() Config {
 			WritebackWindow: "60s",
 		},
 		Quota: Quota{
-			IntervalMin:       "10m",
-			IntervalMax:       "2h",
+			IntervalMin:       "5m",
+			IntervalMax:       "15m",
 			ETAChecks:         DefaultETADivisor,
 			Jitter:            "2m",
-			ProbeIdleAccounts: false,
+			ProbeIdleAccounts: true,
 			HTTPBackoff:       "2h",
 		},
 		Notify: Notify{Enabled: true},

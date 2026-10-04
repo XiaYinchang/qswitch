@@ -298,7 +298,7 @@ func TestLiveGrokRefreshFailureAndBackoffPreserveCredentials(t *testing.T) {
 			if status == 400 {
 				want = "expired"
 			}
-			if ac.LastQuotaClass != want || ac.LastUsedPct != 21 || ac.HTTPBackoffUntil != now.Add(a.Cfg.Backoff()).Unix() {
+			if ac.LastQuotaClass != want || ac.LastUsedPct != 21 || ac.RefreshBackoffUntil != now.Add(a.refreshRetryDelay(status == 400)).Unix() {
 				t.Fatal("incorrect failure state")
 			}
 		})

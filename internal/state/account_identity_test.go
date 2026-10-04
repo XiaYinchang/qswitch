@@ -68,7 +68,7 @@ func TestAccountIdentityRoundTripPreservesQuotaAndMissingLabels(t *testing.T) {
 			_ = db.Close()
 		}
 	}()
-	want := Account{Tool: "kimi", StableID: "fixture", Email: "fixture@example.test", PlanHint: "Pro", Phone: "+8613800000000", DisplayName: "Fixture Name", CoolingUntil: 110, LastQuotaClass: "soft", LastUsedPct: 95, LastResetsAt: 120, LastProbedAt: 130, LastHTTPAt: 140, HTTPBackoffUntil: 150, LastCapturedAt: 160, VaultGen: 7}
+	want := Account{Tool: "kimi", StableID: "fixture", Email: "fixture@example.test", PlanHint: "Pro", Phone: "+8613800000000", DisplayName: "Fixture Name", CoolingUntil: 110, LastQuotaClass: "soft", LastUsedPct: 95, LastResetsAt: 120, LastProbedAt: 130, LastHTTPAt: 140, HTTPBackoffUntil: 150, RefreshBackoffUntil: 155, LastCapturedAt: 160, VaultGen: 7}
 	if err := db.UpsertAccount(want); err != nil {
 		t.Fatal(err)
 	}

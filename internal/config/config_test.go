@@ -9,10 +9,10 @@ import (
 
 func TestIntervalBounds(t *testing.T) {
 	c := Default()
-	if c.IntervalMin() != 10*time.Minute {
+	if c.IntervalMin() != 5*time.Minute {
 		t.Fatalf("min %s", c.IntervalMin())
 	}
-	if c.IntervalMax() != 2*time.Hour {
+	if c.IntervalMax() != 15*time.Minute {
 		t.Fatalf("max %s", c.IntervalMax())
 	}
 	if c.ETAChecks() != 6 {

@@ -3,8 +3,10 @@ package app
 import (
 	"context"
 	"strings"
+	"time"
 
 	"qswitch/internal/adapter"
+	"qswitch/internal/config"
 	"qswitch/internal/quota"
 	"qswitch/internal/state"
 )
@@ -116,6 +118,13 @@ func (a *App) Overview() Overview {
 					}
 				}
 			}
+			maxAge := cfg.IntervalMax() + 2*time.Minute // Allow one daemon tick.
+			if !view.Live {
+				maxAge = config.IdleQuotaInterval + 2*time.Minute
+			}
+			view.QuotaStale = view.QuotaStale || view.LastQuotaAt <= 0 || view.LastQuotaAt > now ||
+				now-view.LastQuotaAt >= int64(maxAge.Seconds()) ||
+				(ac.LastResetsAt > view.LastQuotaAt && ac.LastResetsAt <= now)
 			tv.Accounts = append(tv.Accounts, view)
 		}
 		if t == adapter.Cursor {

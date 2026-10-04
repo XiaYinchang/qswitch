@@ -32,7 +32,7 @@ func (a *App) keepAliveLiveKimiLocked(ctx context.Context, b adapter.Blob, live 
 		if err != nil {
 			return b, "", err
 		}
-		if ac.HTTPBackoffUntil > a.now().Unix() {
+		if ac.RefreshBackoffUntil > a.now().Unix() {
 			return b, "", errors.New("kimi: refresh is in backoff")
 		}
 	}

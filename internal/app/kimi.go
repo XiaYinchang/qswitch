@@ -58,7 +58,7 @@ func (a *App) keepAliveKimiAccounts(ctx context.Context) {
 		return
 	}
 	for _, account := range accounts {
-		if account.HTTPBackoffUntil > a.now().Unix() {
+		if account.RefreshBackoffUntil > a.now().Unix() {
 			continue
 		}
 		lock, err := livefile.Acquire(filepath.Join(a.DataDir, "locks", "kimi.lock"))
@@ -123,7 +123,7 @@ func (a *App) keepAliveKimiLocked(ctx context.Context, b adapter.Blob, force, by
 		if err != nil {
 			return b, "", err
 		}
-		if ac.HTTPBackoffUntil > a.now().Unix() {
+		if ac.RefreshBackoffUntil > a.now().Unix() {
 			return b, "", errors.New("kimi: refresh is in backoff")
 		}
 	}

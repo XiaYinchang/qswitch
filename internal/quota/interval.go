@@ -9,8 +9,8 @@ type Sample struct {
 }
 
 const (
-	DefaultIntervalMin = 10 * time.Minute
-	DefaultIntervalMax = 2 * time.Hour
+	DefaultIntervalMin = 5 * time.Minute
+	DefaultIntervalMax = 15 * time.Minute
 	DefaultETADivisor  = 6.0
 )
 
@@ -25,6 +25,9 @@ func Interval(samples []Sample, min, max time.Duration, etaDiv float64) time.Dur
 	}
 	if max < min {
 		max = DefaultIntervalMax
+		if max < min {
+			max = min
+		}
 	}
 	if etaDiv < 2 {
 		etaDiv = DefaultETADivisor

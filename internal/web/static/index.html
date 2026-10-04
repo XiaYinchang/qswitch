@@ -325,7 +325,7 @@ function quotaNote(ac) {
   if (ac.class === "expired") parts.push("认证已失效，请重新登录。" + (known ? "显示历史用量。" : ""));
   else if (ac.last_probe_class === "unknown") parts.push("最近查询未能确认用量。" + (known ? "显示历史用量。" : ""));
   else if (ac.class === "unknown") parts.push("尚未确认当前用量。" + (known ? "显示历史用量。" : ""));
-  else if (ac.quota_stale && known) parts.push("显示历史用量。");
+  else if (ac.quota_stale && known) parts.push("用量记录已过期。");
   if (known && ac.last_quota_at) parts.push(`用量记录 ${fmtTime(ac.last_quota_at)}`);
   if (parts.length && ac.last_probe_at && ac.last_probe_at !== ac.last_quota_at) parts.push(`最近查询 ${fmtTime(ac.last_probe_at)}`);
   return parts.join(" · ");

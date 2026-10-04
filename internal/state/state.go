@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS accounts (
   last_probed_at INTEGER,
   last_http_at INTEGER,
   http_backoff_until INTEGER,
+  refresh_backoff_until INTEGER NOT NULL DEFAULT 0,
   last_captured_at INTEGER,
   vault_gen INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (tool, stable_id)
@@ -125,11 +126,15 @@ func (d *DB) migrateAccountIdentity() error {
 	if err := rows.Close(); err != nil {
 		return fmt.Errorf("close account columns: %w", err)
 	}
-	for _, name := range []string{"phone", "display_name"} {
+	for _, name := range []string{"phone", "display_name", "refresh_backoff_until"} {
 		if columns[name] {
 			continue
 		}
-		if _, err := tx.Exec(`ALTER TABLE accounts ADD COLUMN ` + name + ` TEXT`); err != nil {
+		columnType := " TEXT"
+		if name == "refresh_backoff_until" {
+			columnType = " INTEGER NOT NULL DEFAULT 0"
+		}
+		if _, err := tx.Exec(`ALTER TABLE accounts ADD COLUMN ` + name + columnType); err != nil {
 			return fmt.Errorf("add account %s: %w", name, err)
 		}
 	}
@@ -150,6 +155,7 @@ type Account struct {
 	LastProbedAt                    int64
 	LastHTTPAt                      int64
 	HTTPBackoffUntil                int64
+	RefreshBackoffUntil             int64
 	LastCapturedAt                  int64
 	VaultGen                        int64
 	QuotaDetail                     string
@@ -163,8 +169,8 @@ func (d *DB) UpsertAccount(a Account) error {
 	if a.StaleCLI {
 		st = 1
 	}
-	_, err := d.sql.Exec(`INSERT INTO accounts(tool,stable_id,email,phone,display_name,plan_hint,incomplete,stale_cli,cooling_until,last_quota_class,last_used_pct,last_resets_at,last_probed_at,last_http_at,http_backoff_until,last_captured_at,vault_gen)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+	_, err := d.sql.Exec(`INSERT INTO accounts(tool,stable_id,email,phone,display_name,plan_hint,incomplete,stale_cli,cooling_until,last_quota_class,last_used_pct,last_resets_at,last_probed_at,last_http_at,http_backoff_until,refresh_backoff_until,last_captured_at,vault_gen)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(tool,stable_id) DO UPDATE SET
  email=excluded.email,
  phone=CASE WHEN excluded.phone='' THEN accounts.phone ELSE excluded.phone END,
@@ -172,22 +178,22 @@ ON CONFLICT(tool,stable_id) DO UPDATE SET
  plan_hint=CASE WHEN excluded.plan_hint='' THEN accounts.plan_hint ELSE excluded.plan_hint END,
  incomplete=excluded.incomplete, stale_cli=excluded.stale_cli,
  last_captured_at=excluded.last_captured_at, vault_gen=excluded.vault_gen`,
-		a.Tool, a.StableID, a.Email, a.Phone, a.DisplayName, a.PlanHint, inc, st, a.CoolingUntil, a.LastQuotaClass, a.LastUsedPct, a.LastResetsAt, a.LastProbedAt, a.LastHTTPAt, a.HTTPBackoffUntil, a.LastCapturedAt, a.VaultGen)
+		a.Tool, a.StableID, a.Email, a.Phone, a.DisplayName, a.PlanHint, inc, st, a.CoolingUntil, a.LastQuotaClass, a.LastUsedPct, a.LastResetsAt, a.LastProbedAt, a.LastHTTPAt, a.HTTPBackoffUntil, a.RefreshBackoffUntil, a.LastCapturedAt, a.VaultGen)
 	return err
 }
 
 func (d *DB) GetAccount(tool, id string) (Account, error) {
 	var a Account
 	var inc, st int
-	err := d.sql.QueryRow(`SELECT tool,stable_id,email,IFNULL(phone,''),IFNULL(display_name,''),plan_hint,incomplete,stale_cli,IFNULL(cooling_until,0),IFNULL(last_quota_class,''),IFNULL(last_used_pct,0),IFNULL(last_resets_at,0),IFNULL(last_probed_at,0),IFNULL(last_http_at,0),IFNULL(http_backoff_until,0),IFNULL(last_captured_at,0),vault_gen,IFNULL(quota_detail,'') FROM accounts WHERE tool=? AND stable_id=?`, tool, id).
-		Scan(&a.Tool, &a.StableID, &a.Email, &a.Phone, &a.DisplayName, &a.PlanHint, &inc, &st, &a.CoolingUntil, &a.LastQuotaClass, &a.LastUsedPct, &a.LastResetsAt, &a.LastProbedAt, &a.LastHTTPAt, &a.HTTPBackoffUntil, &a.LastCapturedAt, &a.VaultGen, &a.QuotaDetail)
+	err := d.sql.QueryRow(`SELECT tool,stable_id,email,IFNULL(phone,''),IFNULL(display_name,''),plan_hint,incomplete,stale_cli,IFNULL(cooling_until,0),IFNULL(last_quota_class,''),IFNULL(last_used_pct,0),IFNULL(last_resets_at,0),IFNULL(last_probed_at,0),IFNULL(last_http_at,0),IFNULL(http_backoff_until,0),IFNULL(refresh_backoff_until,0),IFNULL(last_captured_at,0),vault_gen,IFNULL(quota_detail,'') FROM accounts WHERE tool=? AND stable_id=?`, tool, id).
+		Scan(&a.Tool, &a.StableID, &a.Email, &a.Phone, &a.DisplayName, &a.PlanHint, &inc, &st, &a.CoolingUntil, &a.LastQuotaClass, &a.LastUsedPct, &a.LastResetsAt, &a.LastProbedAt, &a.LastHTTPAt, &a.HTTPBackoffUntil, &a.RefreshBackoffUntil, &a.LastCapturedAt, &a.VaultGen, &a.QuotaDetail)
 	a.Incomplete = inc == 1
 	a.StaleCLI = st == 1
 	return a, err
 }
 
 func (d *DB) ListAccounts(tool string) ([]Account, error) {
-	q := `SELECT tool,stable_id,email,IFNULL(phone,''),IFNULL(display_name,''),plan_hint,incomplete,stale_cli,IFNULL(cooling_until,0),IFNULL(last_quota_class,''),IFNULL(last_used_pct,0),IFNULL(last_resets_at,0),IFNULL(last_probed_at,0),IFNULL(last_http_at,0),IFNULL(http_backoff_until,0),IFNULL(last_captured_at,0),vault_gen,IFNULL(quota_detail,'') FROM accounts`
+	q := `SELECT tool,stable_id,email,IFNULL(phone,''),IFNULL(display_name,''),plan_hint,incomplete,stale_cli,IFNULL(cooling_until,0),IFNULL(last_quota_class,''),IFNULL(last_used_pct,0),IFNULL(last_resets_at,0),IFNULL(last_probed_at,0),IFNULL(last_http_at,0),IFNULL(http_backoff_until,0),IFNULL(refresh_backoff_until,0),IFNULL(last_captured_at,0),vault_gen,IFNULL(quota_detail,'') FROM accounts`
 	var args []any
 	if tool != "" {
 		q += ` WHERE tool=?`
@@ -202,7 +208,7 @@ func (d *DB) ListAccounts(tool string) ([]Account, error) {
 	for rows.Next() {
 		var a Account
 		var inc, st int
-		if err := rows.Scan(&a.Tool, &a.StableID, &a.Email, &a.Phone, &a.DisplayName, &a.PlanHint, &inc, &st, &a.CoolingUntil, &a.LastQuotaClass, &a.LastUsedPct, &a.LastResetsAt, &a.LastProbedAt, &a.LastHTTPAt, &a.HTTPBackoffUntil, &a.LastCapturedAt, &a.VaultGen, &a.QuotaDetail); err != nil {
+		if err := rows.Scan(&a.Tool, &a.StableID, &a.Email, &a.Phone, &a.DisplayName, &a.PlanHint, &inc, &st, &a.CoolingUntil, &a.LastQuotaClass, &a.LastUsedPct, &a.LastResetsAt, &a.LastProbedAt, &a.LastHTTPAt, &a.HTTPBackoffUntil, &a.RefreshBackoffUntil, &a.LastCapturedAt, &a.VaultGen, &a.QuotaDetail); err != nil {
 			return nil, err
 		}
 		a.Incomplete = inc == 1
@@ -225,6 +231,11 @@ func (d *DB) UpdateQuota(tool, id, class string, pct float64, resets, probed, ht
 
 func (d *DB) SetQuotaDetail(tool, id, detail string) error {
 	_, err := d.sql.Exec(`UPDATE accounts SET quota_detail=? WHERE tool=? AND stable_id=?`, detail, tool, id)
+	return err
+}
+
+func (d *DB) SetRefreshBackoff(tool, id string, until int64) error {
+	_, err := d.sql.Exec(`UPDATE accounts SET refresh_backoff_until=? WHERE tool=? AND stable_id=?`, until, tool, id)
 	return err
 }
 

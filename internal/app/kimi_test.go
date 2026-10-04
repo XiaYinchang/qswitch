@@ -204,7 +204,7 @@ func TestKimiParkedRefreshUncertainLiveBacksOff(t *testing.T) {
 				t.Fatal("refreshed without establishing live identity")
 			}
 			ac, err := a.State.GetAccount("kimi", "user-old")
-			if err != nil || ac.HTTPBackoffUntil != now.Add(a.Cfg.Backoff()).Unix() {
+			if err != nil || ac.RefreshBackoffUntil != now.Add(a.refreshRetryDelay(false)).Unix() {
 				t.Fatalf("backoff missing: %v", err)
 			}
 		})

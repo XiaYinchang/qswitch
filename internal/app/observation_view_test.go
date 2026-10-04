@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"qswitch/internal/clock"
 	"qswitch/internal/quota"
 	"qswitch/internal/state"
 )
@@ -18,6 +19,7 @@ func TestOverviewRetainsQuotaAndReportsLatestFailedObservation(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Unix(1790000000, 0)
+	a.Clock = clock.Fixed{T: now}
 	confirmedAt := now.Add(-time.Hour)
 	if err := a.State.LogQuota(ac.Tool, ac.StableID, "ok", "http", 20, confirmedAt); err != nil {
 		t.Fatal(err)
@@ -45,6 +47,11 @@ func TestOverviewRetainsQuotaAndReportsLatestFailedObservation(t *testing.T) {
 	v = view()
 	if v.QuotaStale || v.LastProbeClass != "ok" || v.LastQuotaAt != now.Unix() {
 		t.Fatal("later success in the same second did not clear the failed observation")
+	}
+	a.Clock = clock.Fixed{T: now.Add(32 * time.Minute)}
+	v = view()
+	if !v.QuotaStale || v.Class != "ok" || v.UsedPct != 20 || v.LastQuotaAt != now.Unix() {
+		t.Fatal("old parked quota appeared current or lost its recorded usage")
 	}
 }
 

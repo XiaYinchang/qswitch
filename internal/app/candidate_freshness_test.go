@@ -110,7 +110,7 @@ func TestUnknownCandidateHonorsBackoffAcrossAutomaticSelection(t *testing.T) {
 		calls++
 		return &http.Response{StatusCode: 503, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"error":"unavailable"}`)), Request: req}, nil
 	})}
-	for _, elapsed := range []time.Duration{0, 2 * time.Minute} {
+	for _, elapsed := range []time.Duration{0, time.Minute} {
 		a.Clock = clock.Fixed{T: now.Add(elapsed)}
 		if next := a.pickNext(adapter.Codex, "acc-b"); next != "" {
 			t.Fatal("failed candidate was selected")

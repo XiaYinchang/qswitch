@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1018,7 +1019,7 @@ func (a *App) ProbeHTTP(ctx context.Context, tool adapter.Tool, force bool) {
 		return
 	}
 	res := a.probeAccount(ctx, tool, p.StableID, !force)
-	if res.Class == quota.Exhausted {
+	if res.Class == quota.Exhausted && res.Source != "backoff" {
 		a.considerSwitch(tool)
 	}
 }
@@ -1033,11 +1034,15 @@ func (a *App) ProbeRecovered(ctx context.Context, tool adapter.Tool, force bool)
 	if err != nil {
 		return
 	}
-	now := a.now().Unix()
 	limit := 1
 	if force {
 		limit = 8
 	}
+	// Oldest attempts first so a repeatedly failing account cannot monopolize
+	// the bounded parked-account request budget.
+	sort.SliceStable(accs, func(i, j int) bool {
+		return max(accs[i].LastHTTPAt, accs[i].LastProbedAt) < max(accs[j].LastHTTPAt, accs[j].LastProbedAt)
+	})
 	n := 0
 	for _, ac := range accs {
 		if n >= limit {
@@ -1046,20 +1051,19 @@ func (a *App) ProbeRecovered(ctx context.Context, tool adapter.Tool, force bool)
 		if ac.StableID == p.StableID || ac.Incomplete || ac.StaleCLI || strings.HasPrefix(ac.StableID, "desktop:") {
 			continue
 		}
-		if quota.Class(ac.LastQuotaClass) != quota.Exhausted {
-			continue
-		}
-		if !force && !a.recoverDue(tool, ac) {
+		recovering := quota.Class(ac.LastQuotaClass) == quota.Exhausted
+		if recovering {
+			if !force && !a.recoverDue(tool, ac) {
+				continue
+			}
+		} else if !cfg.Quota.ProbeIdleAccounts || (!force && !a.idleQuotaDue(ac)) {
 			continue
 		}
 		res := a.probeAccount(ctx, tool, ac.StableID, false)
-		n++
-		if res.Class == quota.Unknown {
-			_ = a.State.UpdateQuotaSnapshot(string(tool), ac.StableID, string(quota.Exhausted), ac.LastUsedPct, ac.LastResetsAt, now)
-			a.setCooling(string(tool), ac.StableID, a.now().Add(cfg.Backoff()).Unix())
-			continue
+		if res.Source != "" { // Unreadable snapshots did not spend the HTTP budget.
+			n++
 		}
-		if res.Class == quota.OK || res.Class == quota.Soft {
+		if recovering && (res.Class == quota.OK || res.Class == quota.Soft) {
 			_ = a.State.SetCooling(string(tool), ac.StableID, 0)
 			label := accountLabel(ac)
 			if ac.PlanHint != "" {
@@ -1076,8 +1080,11 @@ func (a *App) ProbeRecovered(ctx context.Context, tool adapter.Tool, force bool)
 
 func (a *App) recoverDue(tool adapter.Tool, ac state.Account) bool {
 	now := a.now().Unix()
-	if ac.HTTPBackoffUntil > now {
+	if ac.HTTPBackoffUntil > now || ac.RefreshBackoffUntil > now {
 		return false
+	}
+	if ac.HTTPBackoffUntil > 0 {
+		return true
 	}
 	if tool == adapter.Codex {
 		wait := a.codexRecoverInterval(ac)
@@ -1129,7 +1136,7 @@ func (a *App) keepAliveCodexAccounts(ctx context.Context) {
 		if ac.StableID == p.StableID || strings.HasPrefix(ac.StableID, "desktop:") {
 			continue
 		}
-		if ac.HTTPBackoffUntil > a.now().Unix() {
+		if ac.RefreshBackoffUntil > a.now().Unix() {
 			continue
 		}
 		blob, err := a.loadBlob(adapter.Codex, ac.StableID)
@@ -1166,7 +1173,7 @@ func (a *App) keepAliveGrokAccounts(ctx context.Context) {
 		if strings.HasPrefix(ac.StableID, "desktop:") {
 			continue
 		}
-		if ac.HTTPBackoffUntil > a.now().Unix() {
+		if ac.RefreshBackoffUntil > a.now().Unix() {
 			continue
 		}
 		blob, err := a.loadBlob(adapter.Grok, ac.StableID)
@@ -1246,7 +1253,7 @@ func (a *App) keepAliveCodexLocked(ctx context.Context, blob adapter.Blob, force
 		if err != nil {
 			return blob, "", stored.AccountID, err
 		}
-		if ac.HTTPBackoffUntil > a.now().Unix() {
+		if ac.RefreshBackoffUntil > a.now().Unix() {
 			return blob, "", stored.AccountID, errors.New("codex: refresh is in backoff")
 		}
 	}
@@ -1342,7 +1349,7 @@ func (a *App) keepAliveGrokLocked(ctx context.Context, blob adapter.Blob, force,
 		if err != nil {
 			return blob, "", err
 		}
-		if ac.HTTPBackoffUntil > a.now().Unix() {
+		if ac.RefreshBackoffUntil > a.now().Unix() {
 			return blob, "", errors.New("grok: refresh is in backoff")
 		}
 	}
@@ -1376,17 +1383,29 @@ func (a *App) recordRefreshResult(tool adapter.Tool, id string, permanent bool, 
 		return errors.Join(refreshErr, err)
 	}
 	class := ac.LastQuotaClass
-	var backoff int64
+	backoff := ac.HTTPBackoffUntil
+	var refreshBackoff int64
 	if refreshErr != nil {
-		backoff = a.now().Add(a.cfgSnapshot().Backoff()).Unix()
+		refreshBackoff = a.now().Add(a.refreshRetryDelay(permanent)).Unix()
 		if permanent {
 			class = string(quota.Expired)
 		}
 	} else if class == string(quota.Expired) {
 		class = string(quota.Unknown)
+		backoff = 0
 	}
-	err = a.State.UpdateQuota(string(tool), id, class, ac.LastUsedPct, ac.LastResetsAt, ac.LastProbedAt, ac.LastHTTPAt, backoff)
-	return errors.Join(refreshErr, err)
+	probedAt := ac.LastProbedAt
+	if refreshErr != nil {
+		probedAt = a.now().Unix()
+		failedClass := quota.Unknown
+		if permanent {
+			failedClass = quota.Expired
+		}
+		err = a.State.LogQuota(string(tool), id, string(failedClass), "refresh", 0, a.now())
+	}
+	updateErr := a.State.UpdateQuota(string(tool), id, class, ac.LastUsedPct, ac.LastResetsAt, probedAt, ac.LastHTTPAt, backoff)
+	refreshErrState := a.State.SetRefreshBackoff(string(tool), id, refreshBackoff)
+	return errors.Join(refreshErr, err, updateErr, refreshErrState)
 }
 
 func (a *App) refreshFailureResult(tool adapter.Tool, id string) quota.Result {
@@ -1394,7 +1413,10 @@ func (a *App) refreshFailureResult(tool adapter.Tool, id string) quota.Result {
 	if ac, err := a.State.GetAccount(string(tool), id); err == nil && ac.LastQuotaClass == string(quota.Expired) {
 		class = quota.Expired
 	}
-	_ = a.State.LogQuota(string(tool), id, string(class), "refresh", 0, a.now())
+	last, err := a.State.LatestQuota(string(tool), id)
+	if err != nil || last.Ts != a.now().Unix() || last.Source != "refresh" || last.Class != string(class) {
+		_ = a.State.LogQuota(string(tool), id, string(class), "refresh", 0, a.now())
+	}
 	return quota.Result{Class: class, Source: "refresh"}
 }
 
@@ -1425,7 +1447,10 @@ func (a *App) probeAccountLocked(ctx context.Context, tool adapter.Tool, id stri
 	if gateInterval && acc.HTTPBackoffUntil > now.Unix() {
 		return quota.Result{Class: quota.Class(acc.LastQuotaClass), UsedPct: acc.LastUsedPct, ResetsAt: acc.LastResetsAt, Source: "backoff"}
 	}
-	if gateInterval {
+	if gateInterval && acc.RefreshBackoffUntil > now.Unix() {
+		return quota.Result{Class: quota.Unknown, Source: "refresh_backoff"}
+	}
+	if gateInterval && acc.HTTPBackoffUntil == 0 {
 		if tool == adapter.Codex && acc.LastQuotaClass == string(quota.Exhausted) {
 			// The current account needs the same early recovery checks as parked accounts.
 			if !a.recoverDue(tool, acc) {
@@ -1517,12 +1542,13 @@ func (a *App) probeAccountLocked(ctx context.Context, tool adapter.Tool, id stri
 		return quota.Result{Class: quota.Unknown}
 	}
 	// Refresh can change an expired authentication state before the quota request.
+	now = a.now()
 	acc, err = a.State.GetAccount(string(tool), id)
 	if err != nil {
 		return quota.Result{Class: quota.Unknown}
 	}
 	if res.Class == quota.Unknown {
-		backoff := now.Add(cfg.Backoff()).Unix()
+		backoff := now.Add(quotaRetryDelay(acc, res.RetryAfter)).Unix()
 		class := acc.LastQuotaClass
 		pct := acc.LastUsedPct
 		resets := acc.LastResetsAt
@@ -1547,6 +1573,7 @@ func (a *App) probeAccountLocked(ctx context.Context, tool adapter.Tool, id stri
 	var backoff int64
 	if res.Class == quota.Expired {
 		backoff = now.Add(cfg.Backoff()).Unix()
+		_ = a.State.SetRefreshBackoff(string(tool), id, backoff)
 	}
 	_ = a.State.UpdateQuota(string(tool), id, string(res.Class), res.UsedPct, res.ResetsAt, now.Unix(), now.Unix(), backoff)
 	if (tool == adapter.Grok || tool == adapter.Devin || tool == adapter.Kimi || tool == adapter.ZCode) && (res.Class == quota.OK || res.Class == quota.Soft || res.Class == quota.Exhausted) {

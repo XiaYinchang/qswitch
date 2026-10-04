@@ -40,9 +40,10 @@ type Result struct {
 	Source        string
 	Plan          string
 	Buckets       []Bucket
-	ObservedAt    time.Time // Local evidence time, not the time the file was polled.
-	Timestamped   bool      // False when only the containing file's mtime is available.
-	Authenticated bool      // A successful JSON object from the protected quota endpoint.
+	ObservedAt    time.Time     // Local evidence time, not the time the file was polled.
+	Timestamped   bool          // False when only the containing file's mtime is available.
+	Authenticated bool          // A successful JSON object from the protected quota endpoint.
+	RetryAfter    time.Duration // Server delay for a throttled/unavailable quota request.
 }
 
 func ClassifyHTTP(status int, body []byte) Result {

@@ -9,62 +9,67 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 const KimiOAuthClientID = "17e5f671-d194-4dfb-9706-5516cb48c098"
 
 func (h HTTP) Kimi(ctx context.Context, token string) (Result, error) {
-	body, status, err := h.KimiBody(ctx, token)
+	body, status, retry, err := h.kimiGet(ctx, token, "/usages")
 	if err != nil {
 		return Result{Class: Unknown, Source: "http"}, err
 	}
-	return ParseKimiUsage(status, body), nil
+	r := ParseKimiUsage(status, body)
+	r.RetryAfter = retry
+	return r, nil
 }
 
 func (h HTTP) KimiBody(ctx context.Context, token string) ([]byte, int, error) {
-	return h.kimiGet(ctx, token, "/usages")
+	body, status, _, err := h.kimiGet(ctx, token, "/usages")
+	return body, status, err
 }
 
 func (h HTTP) KimiProfile(ctx context.Context, token string) ([]byte, int, error) {
-	return h.kimiGet(ctx, token, "/me")
+	body, status, _, err := h.kimiGet(ctx, token, "/me")
+	return body, status, err
 }
 
-func (h HTTP) kimiGet(ctx context.Context, token, path string) ([]byte, int, error) {
+func (h HTTP) kimiGet(ctx context.Context, token, path string) ([]byte, int, time.Duration, error) {
 	if strings.TrimSpace(token) == "" {
-		return nil, 0, fmt.Errorf("kimi: empty access token")
+		return nil, 0, 0, fmt.Errorf("kimi: empty access token")
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.kimi.com/coding/v1"+path, nil)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
 	return h.kimiRequest(req)
 }
 
-func (h HTTP) kimiRequest(req *http.Request) ([]byte, int, error) {
+func (h HTTP) kimiRequest(req *http.Request) ([]byte, int, time.Duration, error) {
 	if err := checkHost(req.URL); err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 	client := *h.client()
 	// Subscription credentials must not follow a server redirect to another URL.
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	res, err := client.Do(req)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 	defer res.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(res.Body, (1<<20)+1))
 	if err != nil {
-		return nil, res.StatusCode, err
+		return nil, res.StatusCode, responseRetryAfter(res), err
 	}
 	if len(raw) > 1<<20 {
-		return nil, res.StatusCode, fmt.Errorf("kimi: response too large")
+		return nil, res.StatusCode, responseRetryAfter(res), fmt.Errorf("kimi: response too large")
 	}
-	return raw, res.StatusCode, nil
+	return raw, res.StatusCode, responseRetryAfter(res), nil
 }
 
 type KimiTokens struct {
@@ -93,7 +98,7 @@ func (h HTTP) KimiRefresh(ctx context.Context, refresh string) (KimiTokens, erro
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "qswitch/0.1")
-	raw, status, err := h.kimiRequest(req)
+	raw, status, _, err := h.kimiRequest(req)
 	if err != nil {
 		return KimiTokens{}, err
 	}

@@ -19,7 +19,7 @@ func TestCurrentCodexRecoverySchedule(t *testing.T) {
 		wait  time.Duration
 	}{
 		{name: "before advertised reset", reset: 3 * time.Hour, wait: 30 * time.Minute},
-		{name: "after advertised reset", reset: -time.Hour, wait: 10 * time.Minute},
+		{name: "after advertised reset", reset: -time.Hour, wait: 5 * time.Minute},
 		{name: "without advertised reset", wait: 30 * time.Minute},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -84,7 +84,7 @@ func TestSuccessfulForcedProbeClearsBackoff(t *testing.T) {
 		t.Fatalf("first probe should fail: %+v", res)
 	}
 	ac, err := a.State.GetAccount("codex", "acc-a")
-	if err != nil || ac.HTTPBackoffUntil != start.Add(a.Cfg.Backoff()).Unix() {
+	if err != nil || ac.HTTPBackoffUntil != start.Add(2*time.Minute).Unix() {
 		t.Fatalf("failed probe should set backoff: %+v err=%v", ac, err)
 	}
 	if res := a.ProbeAccount(context.Background(), adapter.Codex, "acc-a"); res.Class != "soft" {
