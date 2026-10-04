@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -17,6 +19,8 @@ import (
 	"qswitch/internal/adapter/cursoradp"
 	"qswitch/internal/adapter/devin"
 	"qswitch/internal/adapter/grok"
+	"qswitch/internal/adapter/kimi"
+	"qswitch/internal/adapter/zcode"
 	"qswitch/internal/busy"
 	"qswitch/internal/clock"
 	"qswitch/internal/config"
@@ -44,10 +48,14 @@ type App struct {
 	ListProcs func() ([]adapter.Proc, error)
 	Host      hostapp.Controller
 
-	lastFP     map[adapter.Tool][32]byte
-	deskFP     [32]byte
-	deskFPOk   bool
-	lastDeskAt time.Time
+	cfgMu          sync.RWMutex
+	fpMu           sync.Mutex
+	deskMu         sync.Mutex
+	lastFP         map[adapter.Tool][32]byte
+	deskFP         [32]byte
+	deskFPOk       bool
+	lastDeskAt     time.Time
+	captureRetryAt map[adapter.Tool]time.Time
 }
 
 func Open(userHome, dataDir string, keys secutil.KeyProvider, bins []string, n notify.Notifier, list func() ([]adapter.Proc, error)) (*App, error) {
@@ -92,24 +100,27 @@ func Open(userHome, dataDir string, keys secutil.KeyProvider, bins []string, n n
 		list = func() ([]adapter.Proc, error) { return (busy.PS{}).List() }
 	}
 	a := &App{
-		UserHome:  userHome,
-		DataDir:   dataDir,
-		Cfg:       cfg,
-		Vault:     &vault.Store{Dir: dataDir, Keys: keys, Bins: bins},
-		State:     st,
-		HTTP:      quota.HTTP{},
-		Notify:    n,
-		Clock:     clock.Real{},
-		Bins:      bins,
-		ListProcs: list,
-		Host:      hostapp.Default(),
-		lastFP:    map[adapter.Tool][32]byte{},
+		UserHome:       userHome,
+		DataDir:        dataDir,
+		Cfg:            cfg,
+		Vault:          &vault.Store{Dir: dataDir, Keys: keys, Bins: bins},
+		State:          st,
+		HTTP:           quota.HTTP{},
+		Notify:         n,
+		Clock:          clock.Real{},
+		Bins:           bins,
+		ListProcs:      list,
+		Host:           hostapp.Default(),
+		lastFP:         map[adapter.Tool][32]byte{},
+		captureRetryAt: map[adapter.Tool]time.Time{},
 	}
 	a.Adapters = map[adapter.Tool]adapter.Adapter{
 		adapter.Codex:  codex.Adapter{List: list},
 		adapter.Grok:   grok.Adapter{List: list},
 		adapter.Cursor: cursoradp.Adapter{List: list},
 		adapter.Devin:  devin.Adapter{List: list},
+		adapter.Kimi:   kimi.Adapter{List: list},
+		adapter.ZCode:  zcode.Adapter{},
 	}
 	return a, nil
 }
@@ -189,31 +200,62 @@ func (a *App) captureBlobs(tool adapter.Tool) ([]adapter.Blob, []adapter.Warning
 	if err != nil {
 		return blobs, warn, err
 	}
+	if tool == adapter.Kimi {
+		return a.enrichKimiCapture(blobs, warn)
+	}
 	if tool == adapter.Devin {
 		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 		defer cancel()
 		for i := range blobs {
-			blobs[i] = a.enrichDevin(ctx, blobs[i])
+			blobs[i], err = a.enrichDevin(ctx, blobs[i])
+			if err != nil {
+				return nil, warn, err
+			}
 		}
 	}
 	return blobs, warn, nil
 }
 
-func (a *App) enrichDevin(ctx context.Context, b adapter.Blob) adapter.Blob {
+func (a *App) enrichDevin(ctx context.Context, b adapter.Blob) (adapter.Blob, error) {
 	c, err := devin.CredsFromBlob(b)
 	if err != nil {
-		return b
+		return b, errors.New("devin: invalid credential snapshot")
 	}
 	raw, status, err := a.HTTP.DevinBody(ctx, c.APIKey, c.Server)
-	if err != nil || status != 200 {
-		return b
+	if err == nil && status == 200 {
+		id := devin.EnrichIdentity(adapter.Identity{Tool: adapter.Devin}, raw)
+		if id.StableID != "" {
+			return devin.WriteIdentity(b, id)
+		}
 	}
-	id := devin.EnrichIdentity(b.Identity, raw)
-	out, err := devin.WriteIdentity(b, id)
+	// Capture's key hash is temporary. Reuse an identity established earlier
+	// only when its encrypted snapshot contains the same key and API server.
+	accounts, err := a.State.ListAccounts(string(adapter.Devin))
 	if err != nil {
-		return b
+		return b, fmt.Errorf("devin: read saved identities: %w", err)
 	}
-	return out
+	var known adapter.Identity
+	for _, ac := range accounts {
+		if ac.StableID == "" || ac.StableID == b.Identity.StableID {
+			continue
+		}
+		saved, err := a.loadBlob(adapter.Devin, ac.StableID)
+		if err != nil || saved.Identity.StableID != ac.StableID {
+			continue
+		}
+		previous, err := devin.CredsFromBlob(saved)
+		if err != nil || previous.APIKey != c.APIKey || strings.TrimRight(previous.Server, "/") != strings.TrimRight(c.Server, "/") {
+			continue
+		}
+		if known.StableID != "" && known.StableID != saved.Identity.StableID {
+			return b, errors.New("devin: saved identities conflict; retry capture when the service is available")
+		}
+		known = saved.Identity
+	}
+	if known.StableID != "" {
+		return devin.WriteIdentity(b, known)
+	}
+	return b, errors.New("devin: cannot verify account identity; retry capture when the service is available")
 }
 
 func liveCLIIdentity(blobs []adapter.Blob) string {
@@ -231,6 +273,9 @@ func (a *App) saveBlob(b adapter.Blob) error {
 	if err != nil {
 		return err
 	}
+	if strings.TrimSpace(id.StableID) == "" {
+		return errors.New("account identity must be verified before saving")
+	}
 	if err := a.Vault.Put(string(b.Tool), id.StableID, b.Payload); err != nil {
 		return err
 	}
@@ -240,6 +285,8 @@ func (a *App) saveBlob(b adapter.Blob) error {
 		Tool:           string(b.Tool),
 		StableID:       id.StableID,
 		Email:          id.Email,
+		Phone:          id.Phone,
+		DisplayName:    id.DisplayName,
 		PlanHint:       plan,
 		Incomplete:     b.Incomplete,
 		StaleCLI:       b.StaleCLI,
@@ -312,32 +359,50 @@ func (a *App) resolveAccount(tool, ref string) (string, error) {
 }
 
 func accountRefMatch(ac state.Account, ref string) bool {
-	if ac.Email == ref || strings.EqualFold(ac.PlanHint, ref) {
+	if ac.PlanHint != "" && strings.EqualFold(ac.PlanHint, ref) {
 		return true
 	}
-	label := ac.Email
-	if ac.PlanHint != "" {
-		label = ac.Email + "/" + ac.PlanHint
-	}
-	if label == ref {
-		return true
-	}
-	if ac.Email != "" && ac.PlanHint != "" && len(ac.StableID) >= 8 && ref == ac.Email+"/"+ac.PlanHint+"/"+ac.StableID[:8] {
-		return true
+	for _, label := range []string{ac.Email, ac.Phone, ac.DisplayName} {
+		if label == "" {
+			continue
+		}
+		if label == ref {
+			return true
+		}
+		if ac.PlanHint != "" {
+			label += "/" + ac.PlanHint
+			if label == ref || (len(ac.StableID) >= 8 && ref == label+"/"+ac.StableID[:8]) {
+				return true
+			}
+		}
 	}
 	return false
 }
 
 func ambiguousRef(tool, ref string, hits []state.Account) error {
 	var b strings.Builder
-	fmt.Fprintf(&b, "ambiguous %s %q; pass chatgpt_account_id (same email can have personal + team workspaces):\n", tool, ref)
+	fmt.Fprintf(&b, "ambiguous %s %q; pass a stable_id from these accounts:\n", tool, ref)
 	for _, ac := range hits {
-		fmt.Fprintf(&b, "  %s  plan=%s  %s\n", ac.Email, ac.PlanHint, ac.StableID)
+		fmt.Fprintf(&b, "  %s  plan=%s  %s\n", accountLabel(ac), ac.PlanHint, ac.StableID)
 	}
 	return errors.New(b.String())
 }
 
 func (a *App) Switch(tool adapter.Tool, ref string, opts adapter.RestoreOpts, killCLI bool) error {
+	lock, err := livefile.Acquire(filepath.Join(a.DataDir, "locks", string(tool)+".lock"))
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	return a.switchLocked(tool, ref, opts, killCLI)
+}
+
+// The caller holds the tool lock through validation and credential restore.
+func (a *App) switchLocked(tool adapter.Tool, ref string, opts adapter.RestoreOpts, killCLI bool) (retErr error) {
+	if tool == adapter.ZCode {
+		return errors.New("zcode: subscription monitoring only; switch accounts in ZCode")
+	}
+	cfg := a.cfgSnapshot()
 	ad := a.Adapters[tool]
 	blob, err := a.loadBlob(tool, ref)
 	if err != nil {
@@ -349,11 +414,23 @@ func (a *App) Switch(tool adapter.Tool, ref string, opts adapter.RestoreOpts, ki
 	if tool == adapter.Cursor && blob.Incomplete && !opts.ForceAlign {
 		return errors.New("cursor blob incomplete; quit Cursor.app then: qswitch switch cursor <desktop-id> --force-align")
 	}
-	lock, err := livefile.Acquire(filepath.Join(a.DataDir, "locks", string(tool)+".lock"))
+	// Check CLI blockers before quitting a desktop app. Cursor itself will be
+	// closed below, but its CLI must pass the same idle check as other tools.
+	preflight, err := ad.ManualBlockers(a.UserHome)
 	if err != nil {
 		return err
 	}
-	defer lock.Close()
+	if tool == adapter.Cursor {
+		preflight = stripCursorApp(preflight)
+	}
+	if preflight.ManualBusy() {
+		if !killCLI {
+			return &adapter.BusyError{Holders: preflight}
+		}
+		if !ad.Idle(a.UserHome, cfg.IdleGrace()) {
+			return fmt.Errorf("not idle (idle_grace=%s); blocked_by_pid=%v", cfg.IdleGrace(), preflight.ManualPIDs())
+		}
+	}
 
 	relaunch := ""
 	if !opts.CLIOnly {
@@ -362,6 +439,14 @@ func (a *App) Switch(tool adapter.Tool, ref string, opts adapter.RestoreOpts, ki
 			return err
 		}
 	}
+	defer func() {
+		if retErr != nil && relaunch != "" {
+			if err := a.Host.Launch(relaunch); err != nil {
+				retErr = errors.Join(retErr, fmt.Errorf("%s relaunch failed: %w", appLabel(relaunch), err))
+				a.Notify.Send("qswitch", fmt.Sprintf("切换失败，%s 未能重新打开。", appLabel(relaunch)))
+			}
+		}
+	}()
 
 	h, err := ad.ManualBlockers(a.UserHome)
 	if err != nil {
@@ -373,8 +458,8 @@ func (a *App) Switch(tool adapter.Tool, ref string, opts adapter.RestoreOpts, ki
 
 	if h.ManualBusy() {
 		if killCLI {
-			if !opts.CLIOnly && !ad.Idle(a.UserHome, a.Cfg.IdleGrace()) {
-				return fmt.Errorf("not idle (idle_grace=%s); blocked_by_pid=%v", a.Cfg.IdleGrace(), h.ManualPIDs())
+			if !ad.Idle(a.UserHome, cfg.IdleGrace()) {
+				return fmt.Errorf("not idle (idle_grace=%s); blocked_by_pid=%v", cfg.IdleGrace(), h.ManualPIDs())
 			}
 			if err := ad.KillCLI(a.UserHome); err != nil {
 				return err
@@ -392,9 +477,21 @@ func (a *App) Switch(tool adapter.Tool, ref string, opts adapter.RestoreOpts, ki
 		}
 	}
 
-	if blobs, _, err := a.captureBlobs(tool); err == nil {
+	blobs, _, captureErr := a.captureBlobs(tool)
+	if tool == adapter.Kimi && captureErr != nil && !errors.Is(captureErr, os.ErrNotExist) {
+		return fmt.Errorf("save current Kimi account before switch: %w", captureErr)
+	}
+	if captureErr == nil {
 		for _, b := range blobs {
-			_ = a.saveBlob(b)
+			if err := a.saveBlob(b); err != nil {
+				return fmt.Errorf("save current account before switch: %w", err)
+			}
+			// The official Kimi CLI rotates refresh tokens. Switching to the
+			// current account must use the credentials just captured, not the
+			// older target snapshot loaded before that capture.
+			if tool == adapter.Kimi && b.Identity.StableID == blob.Identity.StableID {
+				blob = b
+			}
 		}
 	}
 
@@ -435,15 +532,17 @@ func (a *App) Switch(tool adapter.Tool, ref string, opts adapter.RestoreOpts, ki
 	}
 	_ = a.State.ClearPending(string(tool))
 	if relaunch != "" {
+		name := relaunch
+		relaunch = "" // One launch attempt; a failure is reported to the caller.
 		time.Sleep(200 * time.Millisecond)
-		if err := a.Host.Launch(relaunch); err != nil {
-			a.Notify.Send("qswitch", fmt.Sprintf("switched %s -> %s, but failed to relaunch %s: %v", tool, blob.Identity.Email, appLabel(relaunch), err))
-			return fmt.Errorf("credentials written, %s relaunch failed: %w", appLabel(relaunch), err)
+		if err := a.Host.Launch(name); err != nil {
+			a.Notify.Send("qswitch", fmt.Sprintf("switched %s -> %s, but failed to relaunch %s: %v", tool, IdentityLabel(blob.Identity), appLabel(name), err))
+			return fmt.Errorf("credentials written, %s relaunch failed: %w", appLabel(name), err)
 		}
-		a.Notify.Send("qswitch", fmt.Sprintf("switched %s -> %s (%s). 已重启 %s。", tool, blob.Identity.Email, blob.Identity.StableID, appLabel(relaunch)))
+		a.Notify.Send("qswitch", fmt.Sprintf("switched %s -> %s (%s). 已重启 %s。", tool, IdentityLabel(blob.Identity), blob.Identity.StableID, appLabel(name)))
 		return nil
 	}
-	a.Notify.Send("qswitch", fmt.Sprintf("switched %s -> %s (%s). 新进程才会用新号。", tool, blob.Identity.Email, blob.Identity.StableID))
+	a.Notify.Send("qswitch", fmt.Sprintf("switched %s -> %s (%s). 新进程才会用新号。", tool, IdentityLabel(blob.Identity), blob.Identity.StableID))
 	return nil
 }
 
@@ -462,8 +561,6 @@ func desktopApp(tool adapter.Tool) (string, func([]adapter.Proc) []adapter.Proc)
 		return "Cursor", busy.CursorApp
 	case adapter.Grok:
 		return "Grok Bot", busy.GrokBotApp
-	case adapter.Devin:
-		return "Devin", busy.DevinApp
 	default:
 		return "", nil
 	}
@@ -492,6 +589,9 @@ func (a *App) quitDesktop(tool adapter.Tool) (string, error) {
 	}
 	if len(pick(list)) == 0 {
 		return "", nil
+	}
+	if !a.Adapters[tool].Idle(a.UserHome, a.cfgSnapshot().IdleGrace()) {
+		return "", fmt.Errorf("%s is active; wait for idle before switching", appLabel(name))
 	}
 	_ = a.Host.Quit(name)
 	gone := func() bool {
@@ -530,6 +630,11 @@ func (a *App) waitManualClear(ad adapter.Adapter, tool adapter.Tool, cliOnly boo
 }
 
 func (a *App) Forget(tool adapter.Tool, ref string) error {
+	lock, err := livefile.Acquire(filepath.Join(a.DataDir, "locks", string(tool)+".lock"))
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
 	b, err := a.loadBlob(tool, ref)
 	if err != nil {
 		return err
@@ -545,6 +650,7 @@ func (a *App) Forget(tool adapter.Tool, ref string) error {
 }
 
 func (a *App) Status() string {
+	cfg := a.cfgSnapshot()
 	var b strings.Builder
 	for _, t := range adapter.AllTools() {
 		p, _ := a.State.GetPointer(string(t))
@@ -553,9 +659,9 @@ func (a *App) Status() string {
 		man, _ := ad.ManualBlockers(a.UserHome)
 		aut, _ := ad.AutoBlockers(a.UserHome)
 		pend, _ := a.State.GetPending(string(t))
-		email := acc.Email
-		if email == "" {
-			email = p.StableID
+		label := accountLabel(acc)
+		if label == "" {
+			label = p.StableID
 		}
 		class := acc.LastQuotaClass
 		if class == "" {
@@ -566,7 +672,7 @@ func (a *App) Status() string {
 			plan = "-"
 		}
 		fmt.Fprintf(&b, "%s  active=%s plan=%s id=%s class=%s used=%.1f%% auto=%v desync=%v busy=%v blocked_by_pid=%v queued_since=%s chatgpt_app=%v\n",
-			t, email, plan, p.StableID, class, acc.LastUsedPct, a.Cfg.General.AutoSwitch && a.Cfg.ToolEnabled(string(t)), p.Desync, man.ManualBusy(), man.ManualPIDs(), queued(pend), aut.ChatGPTApp)
+			t, label, plan, p.StableID, class, acc.LastUsedPct, cfg.General.AutoSwitch && cfg.ToolEnabled(string(t)) && t != adapter.ZCode, p.Desync, man.ManualBusy(), man.ManualPIDs(), queued(pend), aut.ChatGPTApp)
 	}
 	return b.String()
 }
@@ -599,12 +705,14 @@ func (a *App) List(tool string) string {
 		if plan == "" {
 			plan = "-"
 		}
-		fmt.Fprintf(&b, "%s %s  %s  plan=%s  %s  class=%s used=%.1f%% reset=%s cool=%s incomplete=%v stale_cli=%v\n", mark, ac.Tool, ac.Email, plan, ac.StableID, ac.LastQuotaClass, ac.LastUsedPct, reset, cool, ac.Incomplete, ac.StaleCLI)
+		fmt.Fprintf(&b, "%s %s  %s  plan=%s  %s  class=%s used=%.1f%% reset=%s cool=%s incomplete=%v stale_cli=%v\n", mark, ac.Tool, accountLabel(ac), plan, ac.StableID, ac.LastQuotaClass, ac.LastUsedPct, reset, cool, ac.Incomplete, ac.StaleCLI)
 	}
 	return b.String()
 }
 
 func (a *App) SaveConfig() error {
+	a.cfgMu.Lock()
+	defer a.cfgMu.Unlock()
 	return a.Cfg.Save(filepath.Join(a.DataDir, "config.toml"))
 }
 
@@ -612,8 +720,11 @@ func (a *App) liveFingerprint(tool adapter.Tool) ([32]byte, error) {
 	if tool != adapter.Cursor {
 		return a.Adapters[tool].Fingerprint(a.UserHome)
 	}
+	cfg := a.cfgSnapshot()
+	a.deskMu.Lock()
+	defer a.deskMu.Unlock()
 	cli, cliErr := cursoradp.HashCLI(a.UserHome)
-	if a.lastDeskAt.IsZero() || a.now().Sub(a.lastDeskAt) >= a.Cfg.CursorPoll() {
+	if a.lastDeskAt.IsZero() || a.now().Sub(a.lastDeskAt) >= cfg.CursorPoll() {
 		if d, err := cursoradp.HashDesktop(a.UserHome); err == nil {
 			a.deskFP = d
 			a.deskFPOk = true
@@ -633,23 +744,26 @@ func (a *App) rememberFP(tool adapter.Tool) {
 	if err != nil {
 		return
 	}
-	if a.lastFP == nil {
-		a.lastFP = map[adapter.Tool][32]byte{}
-	}
-	a.lastFP[tool] = fp
+	a.setLastFP(tool, fp)
 	_ = a.State.RememberSelfWrite("fingerprint:"+string(tool), fp, a.now().Add(2*time.Second))
 }
 
 func (a *App) Ingest(tool adapter.Tool) error {
+	if tool == adapter.Kimi || tool == adapter.Devin {
+		a.fpMu.Lock()
+		deferAt := a.captureRetryAt[tool]
+		a.fpMu.Unlock()
+		if a.now().Before(deferAt) {
+			return nil
+		}
+	}
+	cfg := a.cfgSnapshot()
 	ad := a.Adapters[tool]
 	fp, err := a.liveFingerprint(tool)
 	if err != nil {
 		return nil
 	}
-	if a.lastFP == nil {
-		a.lastFP = map[adapter.Tool][32]byte{}
-	}
-	if prev, ok := a.lastFP[tool]; ok && prev == fp {
+	if a.sameLastFP(tool, fp) {
 		return nil
 	}
 	self, err := a.State.IsSelfWrite("fingerprint:"+string(tool), fp, a.now())
@@ -657,7 +771,7 @@ func (a *App) Ingest(tool adapter.Tool) error {
 		return err
 	}
 	if self {
-		a.lastFP[tool] = fp
+		a.setLastFP(tool, fp)
 		return nil
 	}
 	lock, err := livefile.Acquire(filepath.Join(a.DataDir, "locks", string(tool)+".lock"))
@@ -666,6 +780,17 @@ func (a *App) Ingest(tool adapter.Tool) error {
 	}
 	defer lock.Close()
 	blobs, _, err := a.captureBlobs(tool)
+	if tool == adapter.Kimi || tool == adapter.Devin {
+		a.fpMu.Lock()
+		if a.captureRetryAt == nil {
+			a.captureRetryAt = make(map[adapter.Tool]time.Time)
+		}
+		a.captureRetryAt[tool] = time.Time{}
+		if err != nil {
+			a.captureRetryAt[tool] = a.now().Add(time.Minute)
+		}
+		a.fpMu.Unlock()
+	}
 	if err != nil {
 		return err
 	}
@@ -686,16 +811,12 @@ func (a *App) Ingest(tool adapter.Tool) error {
 		}
 		if isNew {
 			added++
-			label := ident.DisplayName
-			if label == "" {
-				label = ident.Email
-			}
-			a.Notify.Send("qswitch", fmt.Sprintf("收录新账号 %s %s", tool, label))
+			a.Notify.Send("qswitch", fmt.Sprintf("收录新账号 %s %s", tool, IdentityLabel(ident)))
 		}
 	}
 	id := liveCLIIdentity(blobs)
 	if id == "" {
-		a.lastFP[tool] = fp
+		a.setLastFP(tool, fp)
 		return nil
 	}
 	p, _ := a.State.GetPointer(string(tool))
@@ -711,17 +832,15 @@ func (a *App) Ingest(tool adapter.Tool) error {
 			p.Desync = len(blobs) > 1
 		}
 		_ = a.State.SetPointer(p)
-	case p.LastApplyAt > 0 && now-p.LastApplyAt < int64(a.Cfg.Writeback().Seconds()) && p.WritebackRetries == 0:
+	case p.LastApplyAt > 0 && now-p.LastApplyAt < int64(cfg.Writeback().Seconds()) && p.WritebackRetries == 0:
 		target, err := a.loadBlob(tool, p.LastApplyTo)
 		if err != nil {
-			a.Cfg.SetToolEnabled(string(tool), false)
-			_ = a.SaveConfig()
+			_ = a.disableTool(tool)
 			a.Notify.Send("qswitch", "writeback restore failed; auto disabled")
 			return err
 		}
 		if err := ad.Restore(a.UserHome, target, adapter.RestoreOpts{}); err != nil {
-			a.Cfg.SetToolEnabled(string(tool), false)
-			_ = a.SaveConfig()
+			_ = a.disableTool(tool)
 			a.Notify.Send("qswitch", "writeback restore failed; auto disabled")
 			return err
 		}
@@ -730,9 +849,8 @@ func (a *App) Ingest(tool adapter.Tool) error {
 		a.rememberFP(tool)
 		a.Notify.Send("qswitch", "reverted writeback once")
 		return nil
-	case p.LastApplyAt > 0 && now-p.LastApplyAt < int64(a.Cfg.Writeback().Seconds()) && p.WritebackRetries >= 1:
-		a.Cfg.SetToolEnabled(string(tool), false)
-		_ = a.SaveConfig()
+	case p.LastApplyAt > 0 && now-p.LastApplyAt < int64(cfg.Writeback().Seconds()) && p.WritebackRetries >= 1:
+		_ = a.disableTool(tool)
 		a.Notify.Send("qswitch", "旧进程仍在回写; auto disabled")
 	default:
 		p.StableID = id
@@ -741,17 +859,21 @@ func (a *App) Ingest(tool adapter.Tool) error {
 		_ = a.State.SetPointer(p)
 		_ = a.State.ClearPending(string(tool))
 		if added == 0 {
-			email := id
-			if ac, err := a.State.GetAccount(string(tool), id); err == nil && ac.Email != "" {
-				email = ac.Email
+			label := id
+			if ac, err := a.State.GetAccount(string(tool), id); err == nil {
+				label = accountLabel(ac)
 			}
-			a.Notify.Send("qswitch", fmt.Sprintf("当前 %s 换成已收录账号 %s", tool, email))
+			a.Notify.Send("qswitch", fmt.Sprintf("当前 %s 换成已收录账号 %s", tool, label))
 		}
 	}
 	if tool == adapter.Codex && prevID != "" && prevID != id {
+		// Refresh takes the same tool lock; release the ingest transaction first.
+		if err := lock.Close(); err != nil {
+			return err
+		}
 		a.refreshParkedCodex(prevID)
 	}
-	a.lastFP[tool] = fp
+	a.setLastFP(tool, fp)
 	return nil
 }
 
@@ -762,14 +884,11 @@ func (a *App) refreshParkedCodex(id string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	_, tok, _, kerr := a.keepAliveCodex(ctx, blob, true)
-	if kerr != nil && tok == "" {
-		acc, _ := a.State.GetAccount(string(adapter.Codex), id)
-		_ = a.State.UpdateQuotaSnapshot(string(adapter.Codex), id, string(quota.Expired), acc.LastUsedPct, acc.LastResetsAt, a.now().Unix())
-	}
+	_, _, _, _ = a.keepAliveCodex(ctx, blob, true)
 }
 
 func (a *App) quotaInterval(tool, id string) time.Duration {
+	cfg := a.cfgSnapshot()
 	pts, err := a.State.RecentQuota(tool, id, 16)
 	var samples []quota.Sample
 	if err == nil {
@@ -781,10 +900,15 @@ func (a *App) quotaInterval(tool, id string) time.Duration {
 			})
 		}
 	}
-	return quota.Interval(samples, a.Cfg.IntervalMin(), a.Cfg.IntervalMax(), a.Cfg.ETAChecks())
+	return quota.Interval(samples, cfg.IntervalMin(), cfg.IntervalMax(), cfg.ETAChecks())
 }
 
 func (a *App) ProbeLocal(tool adapter.Tool) {
+	lock, err := livefile.Acquire(filepath.Join(a.DataDir, "locks", string(tool)+".lock"))
+	if err != nil {
+		return
+	}
+	defer lock.Close()
 	p, _ := a.State.GetPointer(string(tool))
 	if p.StableID == "" {
 		return
@@ -805,6 +929,9 @@ func (a *App) ProbeLocal(tool adapter.Tool) {
 		}
 	}
 	_ = a.State.UpdateQuotaSnapshot(string(tool), p.StableID, string(r.Class), r.UsedPct, r.ResetsAt, a.now().Unix())
+	if tool == adapter.Grok && r.Source == "jsonl_billing" {
+		_ = a.State.SetQuotaDetail(string(tool), p.StableID, quota.EncodeBuckets(r.Buckets))
+	}
 	if r.Plan != "" {
 		acc, _ := a.State.GetAccount(string(tool), p.StableID)
 		_ = a.State.SetPlanHint(string(tool), p.StableID, quota.MergePlan(acc.PlanHint, r.Plan))
@@ -812,17 +939,38 @@ func (a *App) ProbeLocal(tool adapter.Tool) {
 	_ = a.State.LogQuota(string(tool), p.StableID, string(r.Class), r.Source, r.UsedPct, a.now())
 	if r.Class == quota.Exhausted {
 		a.setCooling(string(tool), p.StableID, r.ResetsAt)
+		_ = lock.Close()
 		a.considerSwitch(tool)
 	}
 }
 
 func (a *App) tailLocal(tool adapter.Tool) (quota.Result, bool) {
 	kind := quota.Kind(tool)
+	p, err := a.State.GetPointer(string(tool))
+	if err != nil {
+		return quota.Result{}, false
+	}
+	ac, err := a.State.GetAccount(string(tool), p.StableID)
+	if err != nil {
+		return quota.Result{}, false
+	}
+	cutoff := ac.LastProbedAt
+	if p.LastApplyAt > cutoff {
+		cutoff = p.LastApplyAt
+	}
 	var best quota.Result
 	hit := false
 	for _, path := range a.localQuotaFiles(tool) {
 		r, ok := quota.Tail(kind, path)
 		if !ok {
+			continue
+		}
+		// An unrelated append cannot refresh an old quota event. Untimestamped
+		// legacy logs are only a bootstrap hint before any switch or quota probe.
+		if cutoff > 0 && (!r.Timestamped || r.ObservedAt.Unix() <= cutoff) {
+			continue
+		}
+		if r.ObservedAt.Before(time.Unix(ac.LastCapturedAt, 0)) {
 			continue
 		}
 		if !hit {
@@ -863,7 +1011,7 @@ func (a *App) localQuotaFiles(tool adapter.Tool) []string {
 }
 
 func (a *App) ProbeHTTP(ctx context.Context, tool adapter.Tool, force bool) {
-	if !force && !a.Cfg.ToolEnabled(string(tool)) {
+	if !force && !a.cfgSnapshot().ToolEnabled(string(tool)) {
 		return
 	}
 	p, _ := a.State.GetPointer(string(tool))
@@ -871,13 +1019,14 @@ func (a *App) ProbeHTTP(ctx context.Context, tool adapter.Tool, force bool) {
 		return
 	}
 	res := a.probeAccount(ctx, tool, p.StableID, !force)
-	if res.Class == quota.Exhausted {
+	if res.Class == quota.Exhausted && res.Source != "backoff" {
 		a.considerSwitch(tool)
 	}
 }
 
 func (a *App) ProbeRecovered(ctx context.Context, tool adapter.Tool, force bool) {
-	if !force && !a.Cfg.ToolEnabled(string(tool)) {
+	cfg := a.cfgSnapshot()
+	if !force && !cfg.ToolEnabled(string(tool)) {
 		return
 	}
 	p, _ := a.State.GetPointer(string(tool))
@@ -885,11 +1034,15 @@ func (a *App) ProbeRecovered(ctx context.Context, tool adapter.Tool, force bool)
 	if err != nil {
 		return
 	}
-	now := a.now().Unix()
 	limit := 1
 	if force {
 		limit = 8
 	}
+	// Oldest attempts first so a repeatedly failing account cannot monopolize
+	// the bounded parked-account request budget.
+	sort.SliceStable(accs, func(i, j int) bool {
+		return max(accs[i].LastHTTPAt, accs[i].LastProbedAt) < max(accs[j].LastHTTPAt, accs[j].LastProbedAt)
+	})
 	n := 0
 	for _, ac := range accs {
 		if n >= limit {
@@ -898,22 +1051,21 @@ func (a *App) ProbeRecovered(ctx context.Context, tool adapter.Tool, force bool)
 		if ac.StableID == p.StableID || ac.Incomplete || ac.StaleCLI || strings.HasPrefix(ac.StableID, "desktop:") {
 			continue
 		}
-		if quota.Class(ac.LastQuotaClass) != quota.Exhausted {
-			continue
-		}
-		if !force && !a.recoverDue(tool, ac) {
+		recovering := quota.Class(ac.LastQuotaClass) == quota.Exhausted
+		if recovering {
+			if !force && !a.recoverDue(tool, ac) {
+				continue
+			}
+		} else if !cfg.Quota.ProbeIdleAccounts || (!force && !a.idleQuotaDue(ac)) {
 			continue
 		}
 		res := a.probeAccount(ctx, tool, ac.StableID, false)
-		n++
-		if res.Class == quota.Unknown {
-			_ = a.State.UpdateQuotaSnapshot(string(tool), ac.StableID, string(quota.Exhausted), ac.LastUsedPct, ac.LastResetsAt, now)
-			a.setCooling(string(tool), ac.StableID, a.now().Add(a.Cfg.Backoff()).Unix())
-			continue
+		if res.Source != "" { // Unreadable snapshots did not spend the HTTP budget.
+			n++
 		}
-		if res.Class == quota.OK || res.Class == quota.Soft {
+		if recovering && (res.Class == quota.OK || res.Class == quota.Soft) {
 			_ = a.State.SetCooling(string(tool), ac.StableID, 0)
-			label := ac.Email
+			label := accountLabel(ac)
 			if ac.PlanHint != "" {
 				label += "/" + ac.PlanHint
 			}
@@ -928,8 +1080,11 @@ func (a *App) ProbeRecovered(ctx context.Context, tool adapter.Tool, force bool)
 
 func (a *App) recoverDue(tool adapter.Tool, ac state.Account) bool {
 	now := a.now().Unix()
-	if ac.HTTPBackoffUntil > now {
+	if ac.HTTPBackoffUntil > now || ac.RefreshBackoffUntil > now {
 		return false
+	}
+	if ac.HTTPBackoffUntil > 0 {
+		return true
 	}
 	if tool == adapter.Codex {
 		wait := a.codexRecoverInterval(ac)
@@ -941,7 +1096,7 @@ func (a *App) recoverDue(tool adapter.Tool, ac state.Account) bool {
 	if ac.CoolingUntil > now || ac.LastResetsAt > now {
 		return false
 	}
-	if ac.LastHTTPAt > 0 && now-ac.LastHTTPAt < int64(a.Cfg.IntervalMin().Seconds()) {
+	if ac.LastHTTPAt > 0 && now-ac.LastHTTPAt < int64(a.cfgSnapshot().IntervalMin().Seconds()) {
 		return false
 	}
 	return true
@@ -954,7 +1109,7 @@ func (a *App) codexRecoverInterval(ac state.Account) time.Duration {
 		advertised = ac.CoolingUntil
 	}
 	if advertised > 0 && advertised <= now {
-		return a.Cfg.IntervalMin()
+		return a.cfgSnapshot().IntervalMin()
 	}
 	return config.DefaultCodexRecover
 }
@@ -965,6 +1120,8 @@ func (a *App) KeepAlive(ctx context.Context, tool adapter.Tool) {
 		a.keepAliveCodexAccounts(ctx)
 	case adapter.Grok:
 		a.keepAliveGrokAccounts(ctx)
+	case adapter.Kimi:
+		a.keepAliveKimiAccounts(ctx)
 	}
 }
 
@@ -977,6 +1134,9 @@ func (a *App) keepAliveCodexAccounts(ctx context.Context) {
 	n := 0
 	for _, ac := range accs {
 		if ac.StableID == p.StableID || strings.HasPrefix(ac.StableID, "desktop:") {
+			continue
+		}
+		if ac.RefreshBackoffUntil > a.now().Unix() {
 			continue
 		}
 		blob, err := a.loadBlob(adapter.Codex, ac.StableID)
@@ -995,7 +1155,7 @@ func (a *App) keepAliveCodexAccounts(ctx context.Context) {
 		if !force && !stored.NeedsRefresh(a.now()) {
 			continue
 		}
-		_, _, _, _ = a.keepAliveCodex(ctx, blob, force)
+		_, _, _, _ = a.keepAliveCodex(ctx, blob, false)
 		n++
 		if n >= 1 {
 			return
@@ -1004,14 +1164,16 @@ func (a *App) keepAliveCodexAccounts(ctx context.Context) {
 }
 
 func (a *App) keepAliveGrokAccounts(ctx context.Context) {
-	p, _ := a.State.GetPointer(string(adapter.Grok))
 	accs, err := a.State.ListAccounts(string(adapter.Grok))
 	if err != nil {
 		return
 	}
 	n := 0
 	for _, ac := range accs {
-		if ac.StableID == p.StableID || strings.HasPrefix(ac.StableID, "desktop:") {
+		if strings.HasPrefix(ac.StableID, "desktop:") {
+			continue
+		}
+		if ac.RefreshBackoffUntil > a.now().Unix() {
 			continue
 		}
 		blob, err := a.loadBlob(adapter.Grok, ac.StableID)
@@ -1022,15 +1184,11 @@ func (a *App) keepAliveGrokAccounts(ctx context.Context) {
 		if err != nil || !stored.Refreshable() {
 			continue
 		}
-		liveRaw, _ := os.ReadFile(filepath.Join(a.UserHome, ".grok", "auth.json"))
-		if live, err := grok.ReadAuthBytes(liveRaw); err == nil && grok.SameOIDCUser(stored, live) {
-			continue
-		}
 		force := quota.Class(ac.LastQuotaClass) == quota.Expired
 		if !force && !stored.NeedsRefresh(a.now()) {
 			continue
 		}
-		_, _, _ = a.keepAliveGrok(ctx, blob, force)
+		_, _, _ = a.keepAliveGrok(ctx, blob, false)
 		n++
 		if n >= 1 {
 			return
@@ -1039,6 +1197,36 @@ func (a *App) keepAliveGrokAccounts(ctx context.Context) {
 }
 
 func (a *App) keepAliveCodex(ctx context.Context, blob adapter.Blob, force bool) (adapter.Blob, string, string, error) {
+	previous, err := codex.ReadAuth(blob)
+	if err != nil {
+		return blob, "", "", err
+	}
+	lock, err := livefile.Acquire(filepath.Join(a.DataDir, "locks", string(adapter.Codex)+".lock"))
+	if err != nil {
+		return blob, "", "", err
+	}
+	defer lock.Close()
+	blob, err = a.loadBlob(adapter.Codex, blob.Identity.StableID)
+	if err != nil {
+		return blob, "", "", err
+	}
+	latest, err := codex.ReadAuth(blob)
+	if err != nil {
+		return blob, "", "", err
+	}
+	ac, err := a.State.GetAccount(string(adapter.Codex), blob.Identity.StableID)
+	if err != nil {
+		return blob, "", "", err
+	}
+	force = force || ac.LastQuotaClass == string(quota.Expired)
+	if latest.Access != previous.Access || latest.Refresh != previous.Refresh || !latest.LastRefresh.Equal(previous.LastRefresh) {
+		force = false
+	}
+	return a.keepAliveCodexLocked(ctx, blob, force, false)
+}
+
+// The caller holds the tool lock and has loaded blob while holding that lock.
+func (a *App) keepAliveCodexLocked(ctx context.Context, blob adapter.Blob, force, bypassBackoff bool) (adapter.Blob, string, string, error) {
 	stored, err := codex.ReadAuth(blob)
 	if err != nil {
 		return blob, "", "", err
@@ -1056,23 +1244,35 @@ func (a *App) keepAliveCodex(ctx context.Context, blob adapter.Blob, force bool)
 	}
 	if stored.Refresh == "" {
 		if stored.Access == "" {
-			return blob, "", stored.AccountID, errors.New("codex: no refresh_token")
+			return blob, "", stored.AccountID, a.recordRefreshResult(adapter.Codex, blob.Identity.StableID, true, errors.New("codex: no refresh_token"))
 		}
 		return blob, stored.Access, stored.AccountID, nil
 	}
-	tok, err := a.HTTP.CodexRefresh(ctx, stored.Refresh)
-	if err != nil {
-		if tok.Permanent {
+	if !bypassBackoff {
+		ac, err := a.State.GetAccount(string(adapter.Codex), blob.Identity.StableID)
+		if err != nil {
 			return blob, "", stored.AccountID, err
 		}
-		return blob, stored.Access, stored.AccountID, err
+		if ac.RefreshBackoffUntil > a.now().Unix() {
+			return blob, "", stored.AccountID, errors.New("codex: refresh is in backoff")
+		}
+	}
+	if a.HTTP.Client == nil && secutil.InTest() {
+		return blob, "", stored.AccountID, errors.New("codex: refresh HTTP client is required in tests")
+	}
+	tok, err := a.HTTP.CodexRefresh(ctx, stored.Refresh)
+	if err != nil {
+		return blob, "", stored.AccountID, a.recordRefreshResult(adapter.Codex, blob.Identity.StableID, tok.Permanent, err)
 	}
 	nb, aerr := codex.ApplyRefresh(blob, tok, a.now())
 	if aerr != nil {
-		return blob, tok.AccessToken, stored.AccountID, aerr
+		return blob, "", stored.AccountID, a.recordRefreshResult(adapter.Codex, blob.Identity.StableID, false, aerr)
 	}
 	if err := a.saveBlob(nb); err != nil {
-		return nb, tok.AccessToken, stored.AccountID, err
+		return nb, "", stored.AccountID, a.recordRefreshResult(adapter.Codex, blob.Identity.StableID, false, err)
+	}
+	if err := a.recordRefreshResult(adapter.Codex, blob.Identity.StableID, false, nil); err != nil {
+		return nb, "", stored.AccountID, err
 	}
 	access := tok.AccessToken
 	acct := stored.AccountID
@@ -1088,36 +1288,87 @@ func (a *App) keepAliveCodex(ctx context.Context, blob adapter.Blob, force bool)
 }
 
 func (a *App) keepAliveGrok(ctx context.Context, blob adapter.Blob, force bool) (adapter.Blob, string, error) {
+	previous, err := grok.ReadAuth(blob)
+	if err != nil {
+		return blob, "", err
+	}
+	lock, err := livefile.Acquire(filepath.Join(a.DataDir, "locks", string(adapter.Grok)+".lock"))
+	if err != nil {
+		return blob, "", err
+	}
+	defer lock.Close()
+	blob, err = a.loadBlob(adapter.Grok, blob.Identity.StableID)
+	if err != nil {
+		return blob, "", err
+	}
+	latest, err := grok.ReadAuth(blob)
+	if err != nil {
+		return blob, "", err
+	}
+	ac, err := a.State.GetAccount(string(adapter.Grok), blob.Identity.StableID)
+	if err != nil {
+		return blob, "", err
+	}
+	force = force || ac.LastQuotaClass == string(quota.Expired)
+	if latest.Key != previous.Key || latest.Refresh != previous.Refresh || !latest.ExpiresAt.Equal(previous.ExpiresAt) {
+		force = false
+	}
+	return a.keepAliveGrokLocked(ctx, blob, force, false)
+}
+
+// The caller holds the tool lock and has loaded blob while holding that lock.
+func (a *App) keepAliveGrokLocked(ctx context.Context, blob adapter.Blob, force, bypassBackoff bool) (adapter.Blob, string, error) {
 	stored, err := grok.ReadAuth(blob)
 	if err != nil {
 		return blob, "", err
 	}
-	liveRaw, _ := os.ReadFile(filepath.Join(a.UserHome, ".grok", "auth.json"))
-	if live, err := grok.ReadAuthBytes(liveRaw); err == nil && live.Key != "" && grok.SameOIDCUser(stored, live) {
-		return blob, live.Key, nil
+	liveRaw, liveErr := os.ReadFile(filepath.Join(a.UserHome, ".grok", "auth.json"))
+	if liveErr != nil && !os.IsNotExist(liveErr) {
+		return blob, "", errors.New("grok: cannot read live credentials")
+	}
+	if liveErr == nil {
+		live, err := grok.ReadAuthForIdentity(liveRaw, blob.Identity.StableID)
+		if err != nil {
+			return blob, "", errors.New("grok: cannot establish live identity")
+		}
+		if live.Key != "" && grok.SameOIDCUser(stored, live) {
+			return a.keepAliveLiveGrokLocked(ctx, blob, live, force, bypassBackoff)
+		}
 	}
 	if !force && stored.Key != "" && !stored.NeedsRefresh(a.now()) {
 		return blob, stored.Key, nil
 	}
 	if !stored.Refreshable() {
 		if stored.Key == "" {
-			return blob, "", errors.New("grok: no refresh_token")
+			return blob, "", a.recordRefreshResult(adapter.Grok, blob.Identity.StableID, true, errors.New("grok: no refresh_token"))
 		}
 		return blob, stored.Key, nil
 	}
-	tok, err := a.HTTP.GrokRefresh(ctx, stored.Refresh, stored.ClientID)
-	if err != nil {
-		if tok.Permanent {
+	if !bypassBackoff {
+		ac, err := a.State.GetAccount(string(adapter.Grok), blob.Identity.StableID)
+		if err != nil {
 			return blob, "", err
 		}
-		return blob, stored.Key, err
+		if ac.RefreshBackoffUntil > a.now().Unix() {
+			return blob, "", errors.New("grok: refresh is in backoff")
+		}
+	}
+	if a.HTTP.Client == nil && secutil.InTest() {
+		return blob, "", errors.New("grok: refresh HTTP client is required in tests")
+	}
+	tok, err := a.HTTP.GrokRefresh(ctx, stored.Refresh, stored.ClientID)
+	if err != nil {
+		return blob, "", a.recordRefreshResult(adapter.Grok, blob.Identity.StableID, tok.Permanent, err)
 	}
 	nb, aerr := grok.ApplyRefresh(blob, tok, a.now())
 	if aerr != nil {
-		return blob, tok.AccessToken, aerr
+		return blob, "", a.recordRefreshResult(adapter.Grok, blob.Identity.StableID, false, aerr)
 	}
 	if err := a.saveBlob(nb); err != nil {
-		return nb, tok.AccessToken, err
+		return nb, "", a.recordRefreshResult(adapter.Grok, blob.Identity.StableID, false, err)
+	}
+	if err := a.recordRefreshResult(adapter.Grok, blob.Identity.StableID, false, nil); err != nil {
+		return nb, "", err
 	}
 	access := tok.AccessToken
 	if na, err := grok.ReadAuth(nb); err == nil && na.Key != "" {
@@ -1126,10 +1377,64 @@ func (a *App) keepAliveGrok(ctx context.Context, blob adapter.Blob, force bool) 
 	return nb, access, nil
 }
 
+func (a *App) recordRefreshResult(tool adapter.Tool, id string, permanent bool, refreshErr error) error {
+	ac, err := a.State.GetAccount(string(tool), id)
+	if err != nil {
+		return errors.Join(refreshErr, err)
+	}
+	class := ac.LastQuotaClass
+	backoff := ac.HTTPBackoffUntil
+	var refreshBackoff int64
+	if refreshErr != nil {
+		refreshBackoff = a.now().Add(a.refreshRetryDelay(permanent)).Unix()
+		if permanent {
+			class = string(quota.Expired)
+		}
+	} else if class == string(quota.Expired) {
+		class = string(quota.Unknown)
+		backoff = 0
+	}
+	probedAt := ac.LastProbedAt
+	if refreshErr != nil {
+		probedAt = a.now().Unix()
+		failedClass := quota.Unknown
+		if permanent {
+			failedClass = quota.Expired
+		}
+		err = a.State.LogQuota(string(tool), id, string(failedClass), "refresh", 0, a.now())
+	}
+	updateErr := a.State.UpdateQuota(string(tool), id, class, ac.LastUsedPct, ac.LastResetsAt, probedAt, ac.LastHTTPAt, backoff)
+	refreshErrState := a.State.SetRefreshBackoff(string(tool), id, refreshBackoff)
+	return errors.Join(refreshErr, err, updateErr, refreshErrState)
+}
+
+func (a *App) refreshFailureResult(tool adapter.Tool, id string) quota.Result {
+	class := quota.Unknown
+	if ac, err := a.State.GetAccount(string(tool), id); err == nil && ac.LastQuotaClass == string(quota.Expired) {
+		class = quota.Expired
+	}
+	last, err := a.State.LatestQuota(string(tool), id)
+	if err != nil || last.Ts != a.now().Unix() || last.Source != "refresh" || last.Class != string(class) {
+		_ = a.State.LogQuota(string(tool), id, string(class), "refresh", 0, a.now())
+	}
+	return quota.Result{Class: class, Source: "refresh"}
+}
+
 func (a *App) probeAccount(ctx context.Context, tool adapter.Tool, id string, gateInterval bool) quota.Result {
 	if id == "" || strings.HasPrefix(id, "desktop:") {
 		return quota.Result{Class: quota.Unknown}
 	}
+	lock, err := livefile.Acquire(filepath.Join(a.DataDir, "locks", string(tool)+".lock"))
+	if err != nil {
+		return quota.Result{Class: quota.Unknown}
+	}
+	defer lock.Close()
+	return a.probeAccountLocked(ctx, tool, id, gateInterval)
+}
+
+// The caller holds the tool lock through credential refresh and quota storage.
+func (a *App) probeAccountLocked(ctx context.Context, tool adapter.Tool, id string, gateInterval bool) quota.Result {
+	cfg := a.cfgSnapshot()
 	if a.HTTP.Client == nil && secutil.InTest() {
 		acc, _ := a.State.GetAccount(string(tool), id)
 		return quota.Result{Class: quota.Class(acc.LastQuotaClass), UsedPct: acc.LastUsedPct, ResetsAt: acc.LastResetsAt}
@@ -1142,13 +1447,23 @@ func (a *App) probeAccount(ctx context.Context, tool adapter.Tool, id string, ga
 	if gateInterval && acc.HTTPBackoffUntil > now.Unix() {
 		return quota.Result{Class: quota.Class(acc.LastQuotaClass), UsedPct: acc.LastUsedPct, ResetsAt: acc.LastResetsAt, Source: "backoff"}
 	}
-	if gateInterval {
-		interval := a.quotaInterval(string(tool), id)
-		if acc.LastHTTPAt > 0 && now.Unix()-acc.LastHTTPAt < int64(interval.Seconds()) {
-			return quota.Result{Class: quota.Class(acc.LastQuotaClass), UsedPct: acc.LastUsedPct, ResetsAt: acc.LastResetsAt, Source: "cached"}
-		}
-		if acc.LastQuotaClass == string(quota.Exhausted) && acc.LastResetsAt > now.Unix() {
-			return quota.Result{Class: quota.Exhausted, UsedPct: acc.LastUsedPct, ResetsAt: acc.LastResetsAt, Source: "cached"}
+	if gateInterval && acc.RefreshBackoffUntil > now.Unix() {
+		return quota.Result{Class: quota.Unknown, Source: "refresh_backoff"}
+	}
+	if gateInterval && acc.HTTPBackoffUntil == 0 {
+		if tool == adapter.Codex && acc.LastQuotaClass == string(quota.Exhausted) {
+			// The current account needs the same early recovery checks as parked accounts.
+			if !a.recoverDue(tool, acc) {
+				return quota.Result{Class: quota.Exhausted, UsedPct: acc.LastUsedPct, ResetsAt: acc.LastResetsAt, Source: "cached"}
+			}
+		} else {
+			interval := a.quotaInterval(string(tool), id)
+			if acc.LastHTTPAt > 0 && now.Unix()-acc.LastHTTPAt < int64(interval.Seconds()) {
+				return quota.Result{Class: quota.Class(acc.LastQuotaClass), UsedPct: acc.LastUsedPct, ResetsAt: acc.LastResetsAt, Source: "cached"}
+			}
+			if acc.LastQuotaClass == string(quota.Exhausted) && acc.LastResetsAt > now.Unix() {
+				return quota.Result{Class: quota.Exhausted, UsedPct: acc.LastUsedPct, ResetsAt: acc.LastResetsAt, Source: "cached"}
+			}
 		}
 	}
 	blob, err := a.loadBlob(tool, id)
@@ -1159,28 +1474,32 @@ func (a *App) probeAccount(ctx context.Context, tool adapter.Tool, id string, ga
 	switch tool {
 	case adapter.Codex:
 		forced := acc.LastQuotaClass == string(quota.Expired)
-		nb, tok, acct, kerr := a.keepAliveCodex(ctx, blob, forced)
-		if kerr != nil && tok == "" {
-			_ = a.State.UpdateQuotaSnapshot(string(tool), id, string(quota.Expired), acc.LastUsedPct, acc.LastResetsAt, now.Unix())
-			return quota.Result{Class: quota.Expired, Source: "refresh"}
+		nb, tok, acct, kerr := a.keepAliveCodexLocked(ctx, blob, forced, !gateInterval)
+		if kerr != nil {
+			return a.refreshFailureResult(tool, id)
 		}
 		res, _ = a.HTTP.Codex(ctx, tok, acct)
 		if res.Class == quota.Expired && !forced {
-			_, tok2, acct2, rerr := a.keepAliveCodex(ctx, nb, true)
+			_, tok2, acct2, rerr := a.keepAliveCodexLocked(ctx, nb, true, !gateInterval)
+			if rerr != nil {
+				return a.refreshFailureResult(tool, id)
+			}
 			if rerr == nil && tok2 != "" && tok2 != tok {
 				res, _ = a.HTTP.Codex(ctx, tok2, acct2)
 			}
 		}
 	case adapter.Grok:
 		forced := acc.LastQuotaClass == string(quota.Expired)
-		nb, tok, kerr := a.keepAliveGrok(ctx, blob, forced)
-		if kerr != nil && tok == "" {
-			_ = a.State.UpdateQuotaSnapshot(string(tool), id, string(quota.Expired), acc.LastUsedPct, acc.LastResetsAt, now.Unix())
-			return quota.Result{Class: quota.Expired, Source: "refresh"}
+		nb, tok, kerr := a.keepAliveGrokLocked(ctx, blob, forced, !gateInterval)
+		if kerr != nil {
+			return a.refreshFailureResult(tool, id)
 		}
 		res, _ = a.HTTP.Grok(ctx, tok)
 		if res.Class == quota.Expired && !forced {
-			_, tok2, rerr := a.keepAliveGrok(ctx, nb, true)
+			_, tok2, rerr := a.keepAliveGrokLocked(ctx, nb, true, !gateInterval)
+			if rerr != nil {
+				return a.refreshFailureResult(tool, id)
+			}
 			if rerr == nil && tok2 != "" && tok2 != tok {
 				res, _ = a.HTTP.Grok(ctx, tok2)
 			}
@@ -1191,6 +1510,28 @@ func (a *App) probeAccount(ctx context.Context, tool adapter.Tool, id string, ga
 			return quota.Result{Class: quota.Unknown}
 		}
 		res, _ = a.HTTP.Cursor(ctx, tok)
+	case adapter.Kimi:
+		forced := acc.LastQuotaClass == string(quota.Expired)
+		nb, tok, kerr := a.keepAliveKimiLocked(ctx, blob, forced, !gateInterval)
+		if kerr != nil {
+			return a.refreshFailureResult(tool, id)
+		}
+		res, _ = a.HTTP.Kimi(ctx, tok)
+		if res.Class == quota.Expired && !forced {
+			_, next, err := a.keepAliveKimiLocked(ctx, nb, true, !gateInterval)
+			if err != nil {
+				return a.refreshFailureResult(tool, id)
+			}
+			if next != "" && next != tok {
+				res, _ = a.HTTP.Kimi(ctx, next)
+			}
+		}
+	case adapter.ZCode:
+		c, err := zcode.CredsFromBlob(blob)
+		if err != nil {
+			return quota.Result{Class: quota.Unknown}
+		}
+		res, _ = a.HTTP.ZCode(ctx, c.APIKey, c.Provider)
 	case adapter.Devin:
 		c, err := devin.CredsFromBlob(blob)
 		if err != nil {
@@ -1200,12 +1541,21 @@ func (a *App) probeAccount(ctx context.Context, tool adapter.Tool, id string, ga
 	default:
 		return quota.Result{Class: quota.Unknown}
 	}
-	backoff := acc.HTTPBackoffUntil
+	// Refresh can change an expired authentication state before the quota request.
+	now = a.now()
+	acc, err = a.State.GetAccount(string(tool), id)
+	if err != nil {
+		return quota.Result{Class: quota.Unknown}
+	}
 	if res.Class == quota.Unknown {
-		backoff = now.Add(a.Cfg.Backoff()).Unix()
+		backoff := now.Add(quotaRetryDelay(acc, res.RetryAfter)).Unix()
 		class := acc.LastQuotaClass
 		pct := acc.LastUsedPct
 		resets := acc.LastResetsAt
+		// Missing quota fields do not invalidate a successful authentication.
+		if class == string(quota.Expired) && res.Authenticated {
+			class = string(quota.Unknown)
+		}
 		if class == "" {
 			class = string(quota.Unknown)
 		}
@@ -1220,8 +1570,16 @@ func (a *App) probeAccount(ctx context.Context, tool adapter.Tool, id string, ga
 		_ = a.State.LogQuota(string(tool), id, string(res.Class), res.Source, res.UsedPct, now)
 		return res
 	}
+	var backoff int64
+	if res.Class == quota.Expired {
+		backoff = now.Add(cfg.Backoff()).Unix()
+		_ = a.State.SetRefreshBackoff(string(tool), id, backoff)
+	}
 	_ = a.State.UpdateQuota(string(tool), id, string(res.Class), res.UsedPct, res.ResetsAt, now.Unix(), now.Unix(), backoff)
-	if len(res.Buckets) > 0 {
+	if (tool == adapter.Grok || tool == adapter.Devin || tool == adapter.Kimi || tool == adapter.ZCode) && (res.Class == quota.OK || res.Class == quota.Soft || res.Class == quota.Exhausted) {
+		// These providers return complete snapshots; remove obsolete windows after plan changes.
+		_ = a.State.SetQuotaDetail(string(tool), id, quota.EncodeBuckets(res.Buckets))
+	} else if len(res.Buckets) > 0 {
 		_ = a.State.SetQuotaDetail(string(tool), id, quota.EncodeBuckets(quota.MergeBuckets(quota.DecodeBuckets(acc.QuotaDetail), res.Buckets)))
 	}
 	if res.Plan != "" {
@@ -1246,7 +1604,11 @@ func (a *App) setCooling(tool, id string, resetsAt int64) {
 }
 
 func (a *App) considerSwitch(tool adapter.Tool) {
-	if !a.Cfg.General.AutoSwitch || !a.Cfg.ToolEnabled(string(tool)) {
+	if tool == adapter.ZCode {
+		return
+	}
+	cfg := a.cfgSnapshot()
+	if !cfg.General.AutoSwitch || !cfg.ToolEnabled(string(tool)) {
 		return
 	}
 	p, _ := a.State.GetPointer(string(tool))
@@ -1292,45 +1654,122 @@ func (a *App) pickNext(tool adapter.Tool, current string) string {
 }
 
 func (a *App) candidateRank(ctx context.Context, tool adapter.Tool, ac state.Account) (int, float64) {
-	rank := func(c quota.Class, pct float64) (int, float64) {
-		switch c {
-		case quota.OK:
-			return 0, pct
-		case quota.Soft:
-			return 1, pct
-		default:
-			return 9, pct
-		}
-	}
-	now := a.now().Unix()
-	switch quota.Class(ac.LastQuotaClass) {
-	case quota.OK, quota.Soft:
-		return rank(quota.Class(ac.LastQuotaClass), ac.LastUsedPct)
-	case quota.Expired:
+	lock, err := livefile.Acquire(filepath.Join(a.DataDir, "locks", string(tool)+".lock"))
+	if err != nil {
 		return 9, 0
-	case quota.Exhausted:
-		if ac.LastResetsAt > now || ac.CoolingUntil > now {
-			return 9, 0
+	}
+	defer lock.Close()
+	ac, err = a.State.GetAccount(string(tool), ac.StableID)
+	if err != nil || ac.Incomplete || ac.StaleCLI || ac.CoolingUntil > a.now().Unix() {
+		return 9, 0
+	}
+	res, err := a.automaticQuotaLocked(ctx, tool, ac.StableID)
+	if err == nil {
+		switch res.Class {
+		case quota.OK:
+			return 0, res.UsedPct
+		case quota.Soft:
+			return 1, res.UsedPct
 		}
 	}
-	res := a.probeAccount(ctx, tool, ac.StableID, false)
-	return rank(res.Class, res.UsedPct)
+	return 9, 0
 }
 
 func (a *App) TryApply(tool adapter.Tool, killCLI bool) error {
+	if tool == adapter.ZCode {
+		return a.State.ClearPending(string(tool))
+	}
+	lock, err := livefile.Acquire(filepath.Join(a.DataDir, "locks", string(tool)+".lock"))
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	cfg := a.cfgSnapshot()
 	pend, err := a.State.GetPending(string(tool))
 	if err != nil || pend.ToID == "" {
 		return err
 	}
+	if pend.Reason == "exhausted" {
+		if !cfg.General.AutoSwitch || !cfg.ToolEnabled(string(tool)) {
+			return a.State.ClearPending(string(tool))
+		}
+		p, err := a.State.GetPointer(string(tool))
+		if err != nil {
+			return err
+		}
+		if p.StableID != pend.FromID {
+			return a.State.ClearPending(string(tool))
+		}
+		ac, err := a.State.GetAccount(string(tool), pend.FromID)
+		if err != nil {
+			return err
+		}
+		if quota.Class(ac.LastQuotaClass) != quota.Exhausted {
+			return a.State.ClearPending(string(tool))
+		}
+		target, err := a.State.GetAccount(string(tool), pend.ToID)
+		if err != nil {
+			return err
+		}
+		if target.Incomplete || target.StaleCLI || target.CoolingUntil > a.now().Unix() {
+			return a.State.ClearPending(string(tool))
+		}
+		if quota.Class(target.LastQuotaClass) != quota.OK && quota.Class(target.LastQuotaClass) != quota.Soft {
+			return a.State.ClearPending(string(tool))
+		}
+	}
 	ad := a.Adapters[tool]
-	auto, _ := ad.AutoBlockers(a.UserHome)
+	auto, err := ad.AutoBlockers(a.UserHome)
+	if err != nil {
+		return err
+	}
 	if auto.ManualBusy() {
-		if !ad.Idle(a.UserHome, a.Cfg.IdleGrace()) {
+		if !ad.Idle(a.UserHome, cfg.IdleGrace()) {
 			return nil
 		}
 		killCLI = true
 	}
-	return a.Switch(tool, pend.ToID, adapter.RestoreOpts{}, killCLI)
+	if pend.Reason == "exhausted" {
+		// A pending switch may wait for the CLI for hours. Validate quota only
+		// when it can proceed, before closing an app or terminating a process.
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		defer cancel()
+		from, err := a.automaticQuotaLocked(ctx, tool, pend.FromID)
+		if err != nil {
+			return err
+		}
+		if from.Class != quota.Exhausted {
+			return a.State.ClearPending(string(tool))
+		}
+		to, err := a.automaticQuotaLocked(ctx, tool, pend.ToID)
+		if err != nil {
+			return err
+		}
+		if to.Class != quota.OK && to.Class != quota.Soft {
+			return a.State.ClearPending(string(tool))
+		}
+		// The target request can cross the source's recovery deadline, and
+		// configuration can be reloaded while HTTP is in flight.
+		cfg = a.cfgSnapshot()
+		if !cfg.General.AutoSwitch || !cfg.ToolEnabled(string(tool)) {
+			return a.State.ClearPending(string(tool))
+		}
+		for _, id := range []string{pend.FromID, pend.ToID} {
+			ac, err := a.State.GetAccount(string(tool), id)
+			if err != nil {
+				return err
+			}
+			res, fresh, err := a.cachedAutomaticQuota(tool, ac)
+			if err != nil {
+				return err
+			}
+			if !fresh || (id == pend.FromID && res.Class != quota.Exhausted) ||
+				(id == pend.ToID && res.Class != quota.OK && res.Class != quota.Soft) {
+				return a.State.ClearPending(string(tool))
+			}
+		}
+	}
+	return a.switchLocked(tool, pend.ToID, adapter.RestoreOpts{}, killCLI)
 }
 
 func (a *App) Apply(tool adapter.Tool, killCLI bool) error {
@@ -1347,6 +1786,7 @@ func (a *App) Apply(tool adapter.Tool, killCLI bool) error {
 }
 
 func (a *App) Doctor() string {
+	cfg := a.cfgSnapshot()
 	var b strings.Builder
 	fmt.Fprintf(&b, "data=%s home=%s test=%v daemon=%v\n", a.DataDir, a.UserHome, secutil.InTest(), a.daemonRunning())
 	for _, t := range adapter.AllTools() {
@@ -1355,7 +1795,7 @@ func (a *App) Doctor() string {
 		au, _ := ad.AutoBlockers(a.UserHome)
 		p, _ := a.State.GetPointer(string(t))
 		fmt.Fprintf(&b, "%s live=%s desync=%v manual_busy=%v auto_busy=%v chatgpt=%v cursor_app=%v pids=%v enabled=%v\n",
-			t, p.StableID, p.Desync, h.ManualBusy(), au.AutoBusy(), au.ChatGPTApp, h.CursorApp, h.ManualPIDs(), a.Cfg.ToolEnabled(string(t)))
+			t, p.StableID, p.Desync, h.ManualBusy(), au.AutoBusy(), au.ChatGPTApp, h.CursorApp, h.ManualPIDs(), cfg.ToolEnabled(string(t)))
 		for _, pth := range ad.LivePaths(a.UserHome) {
 			st, err := os.Stat(pth)
 			if err != nil {
@@ -1394,6 +1834,39 @@ func (a *App) daemonRunning() bool {
 }
 
 func (a *App) RunDaemon(ctx context.Context) error {
+	// Reload separately so slow provider requests cannot delay an auto-off change.
+	var lastConfigError string
+	reload := func() {
+		err := a.ReloadConfig()
+		if err == nil {
+			lastConfigError = ""
+			return
+		}
+		if msg := err.Error(); msg != lastConfigError {
+			fmt.Fprintln(os.Stderr, "config reload failed; keeping previous settings:", msg)
+			lastConfigError = msg
+		}
+	}
+	reload()
+	configCtx, cancelConfig := context.WithCancel(ctx)
+	configDone := make(chan struct{})
+	go func() {
+		defer close(configDone)
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-configCtx.Done():
+				return
+			case <-ticker.C:
+				reload()
+			}
+		}
+	}()
+	defer func() {
+		cancelConfig()
+		<-configDone
+	}()
 	tIngest := time.NewTicker(2 * time.Second)
 	tLocal := time.NewTicker(30 * time.Second)
 	tHTTP := time.NewTicker(2 * time.Minute) // actual HTTP still gated by min_http_interval

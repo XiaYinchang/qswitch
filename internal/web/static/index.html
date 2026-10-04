@@ -176,6 +176,7 @@
   }
   .msg.err { color: var(--bad); }
   .empty { color: var(--muted); font-size: 13px; margin: 0; }
+  .quota-note { color: var(--muted); font-size: 12px; margin: 8px 0 0; }
   dialog {
     border: 1px solid var(--line);
     background: var(--card);
@@ -231,6 +232,7 @@ const api = (path, opt) => fetch(path, Object.assign({ cache: "no-store", header
 });
 const clsLabel = { ok: "正常", soft: "接近用尽", exhausted: "已用尽", expired: "票失效", unknown: "未查到" };
 function clampPct(n) {
+  if (n == null || n === "") return null;
   const x = Number(n);
   if (!Number.isFinite(x)) return null;
   return Math.max(0, Math.min(100, x));
@@ -247,18 +249,13 @@ function usedColor(used) {
   if (p <= 80) return mixRGB(g, y, (p - 50) / 30);
   return mixRGB(y, r, (p - 80) / 20);
 }
-function barColor(used, cls) {
-  if (cls === "expired") return "var(--bad)";
-  if (cls === "exhausted") return "var(--bad)";
-  return usedColor(used);
-}
-function usedText(used) {
+function usedText(used, tool) {
   if (used == null) return "用量未知";
-  return `已用 ${used.toFixed(0)}%`;
+  return `已用 ${["grok", "kimi", "zcode"].includes(tool) ? Math.floor(used) : used.toFixed(0)}%`;
 }
-function barStyle(used, cls) {
+function barStyle(used) {
   if (used == null) return "";
-  return `width:${used}%;background:${barColor(used, cls)}`;
+  return `width:${used}%;background:${usedColor(used)}`;
 }
 function fmtTime(sec) {
   if (!sec) return "";
@@ -279,6 +276,9 @@ function bucketLabel(id) {
   if (id === "bot") return "Bot";
   if (id === "daily") return "日额度";
   if (id === "weekly") return "周额度";
+  if (id === "monthly") return "月额度";
+  if (id === "monthly_code") return "月度编程";
+  if (id === "mcp") return "月度 MCP";
   if (id === "5h") return "5小时";
   if (id === "1d") return "日额度";
   return id;
@@ -287,10 +287,9 @@ function bucketHTML(ac) {
   const rows = ac.buckets || [];
   if (!rows.length) return "";
   return `<div class="buckets">${rows.map(b => {
-    const used = clampPct(b.used_pct) ?? 0;
-    const cls = used >= 99.5 ? "exhausted" : used >= 90 ? "soft" : "ok";
+    const used = clampPct(b.used_pct);
     const when = b.resets_at ? fmtTime(b.resets_at) : "";
-    return `<div class="bucket"><span class="name">${attr(bucketLabel(b.id))}</span><div class="bar"><i style="${barStyle(used, cls)}"></i></div><span class="rem">${usedText(used)}</span>${when ? `<span class="when">${when}</span>` : `<span class="when"></span>`}</div>`;
+    return `<div class="bucket"><span class="name">${attr(bucketLabel(b.id))}</span><div class="bar"><i style="${barStyle(used)}"></i></div><span class="rem">${usedText(used, ac.tool)}</span>${when ? `<span class="when">${when}</span>` : `<span class="when"></span>`}</div>`;
   }).join("")}</div>`;
 }
 function toolTitle(t) {
@@ -298,7 +297,9 @@ function toolTitle(t) {
   if (t === "grok") return "Grok";
   if (t === "cursor") return "Cursor";
   if (t === "grokbot") return "Grok Bot";
-  if (t === "devin") return "Devin";
+  if (t === "devin") return "Devin CLI";
+  if (t === "zcode") return "ZCode 订阅";
+  if (t === "kimi") return "Kimi Code";
   return t;
 }
 function attr(s) {
@@ -313,12 +314,28 @@ function toolActions(tool) {
   if (tool.tool === "grok") html += `<button class="primary" data-act="login-grok">加号</button>`;
   return html;
 }
-function cardActions(ac) {
+function accountLabel(ac) {
+  if (ac.tool === "kimi") return ac.phone || ac.display_name || ac.email || ac.stable_id;
+  return ac.email || ac.display_name || ac.phone || ac.stable_id;
+}
+function quotaNote(ac) {
+  const known = (ac.buckets || []).some(b => clampPct(b.used_pct) != null) ||
+    (["ok", "soft", "exhausted"].includes(ac.class) && clampPct(ac.used_pct) != null);
+  const parts = [];
+  if (ac.class === "expired") parts.push("认证已失效，请重新登录。" + (known ? "显示历史用量。" : ""));
+  else if (ac.last_probe_class === "unknown") parts.push("最近查询未能确认用量。" + (known ? "显示历史用量。" : ""));
+  else if (ac.class === "unknown") parts.push("尚未确认当前用量。" + (known ? "显示历史用量。" : ""));
+  else if (ac.quota_stale && known) parts.push("用量记录已过期。");
+  if (known && ac.last_quota_at) parts.push(`用量记录 ${fmtTime(ac.last_quota_at)}`);
+  if (parts.length && ac.last_probe_at && ac.last_probe_at !== ac.last_quota_at) parts.push(`最近查询 ${fmtTime(ac.last_probe_at)}`);
+  return parts.join(" · ");
+}
+function cardActions(ac, switchable) {
   const t = attr(ac.tool), id = attr(ac.stable_id);
   const bits = [];
   if (!ac.desktop) bits.push(`<button class="ghost" data-act="probe" data-tool="${t}" data-id="${id}">查询</button>`);
   if (ac.derived) return bits.join("");
-  if (!ac.live && !ac.desktop) bits.push(`<button data-act="switch" data-tool="${t}" data-id="${id}">切换</button>`);
+  if (switchable && !ac.live && !ac.desktop) bits.push(`<button data-act="switch" data-tool="${t}" data-id="${id}">切换</button>`);
   if (!ac.live) bits.push(`<button class="ghost danger" data-act="forget" data-tool="${t}" data-id="${id}">删除</button>`);
   return bits.join("");
 }
@@ -336,12 +353,13 @@ function render(ov) {
     if (tool.devin_app) flags.push("Devin.app 在跑");
     if (tool.desync) flags.push("桌面/CLI 不一致");
     if (tool.tool === "grokbot") flags.push("随 Cursor 账号");
+    if (tool.tool === "zcode") flags.push("桌面订阅 · 在 ZCode 中切换账号");
     sec.innerHTML = `<div class="sec-head">
       <h2>${toolTitle(tool.tool)} <span class="meta">${flags.join(" · ") || "空闲"}</span></h2>
       <div class="actions">${toolActions(tool)}</div>
     </div>`;
     (tool.accounts || []).forEach(ac => {
-      const used = (ac.class === "unknown") ? null : clampPct(ac.used_pct);
+      const used = ["unknown", "expired"].includes(ac.class) ? null : clampPct(ac.used_pct);
       const card = document.createElement("div");
       const kinds = ["card"];
       if (ac.live) kinds.push("live");
@@ -349,23 +367,25 @@ function render(ov) {
       card.className = kinds.join(" ");
       const badges = [];
       if (ac.live) badges.push(`<span class="badge live">当前</span>`);
-      badges.push(`<span class="badge ${ac.class}">${clsLabel[ac.class] || ac.class}</span>`);
-      if (ac.plan && ac.plan !== "-") badges.push(`<span class="badge">${ac.plan}</span>`);
+      const oldStatus = ac.quota_stale && ["ok", "soft", "exhausted"].includes(ac.class);
+      if (!oldStatus) badges.push(`<span class="badge ${attr(ac.class)}">${attr(clsLabel[ac.class] || ac.class)}</span>`);
+      if (ac.plan && ac.plan !== "-") badges.push(`<span class="badge">${attr(ac.plan)}</span>`);
       if (ac.stale_cli) badges.push(`<span class="badge">CLI 偏旧</span>`);
       if (ac.desktop) badges.push(`<span class="badge">桌面快照</span>`);
-      const acts = cardActions(ac);
+      const acts = cardActions(ac, tool.switchable);
       card.innerHTML = `
         <div class="who">
           <div>
-            <div class="email">${attr(ac.email || "(无邮箱)")} ${badges.join(" ")}</div>
+            <div class="email">${attr(accountLabel(ac))} ${badges.join(" ")}</div>
             <div class="id">${attr(ac.stable_id)}</div>
           </div>
           ${acts ? `<div class="actions">${acts}</div>` : ""}
         </div>
         ${ac.buckets && ac.buckets.length
           ? bucketHTML(ac) + (!(ac.buckets || []).some(b => b.resets_at) && whenText(ac) ? `<div class="stats"><span>${whenText(ac)}</span><span></span></div>` : "")
-          : `<div class="bar${used == null ? " empty" : ""}"><i style="${barStyle(used, ac.class)}"></i></div>
-        <div class="stats"><span>${whenText(ac)}</span><span class="rem">${usedText(used)}</span></div>`}`;
+          : `<div class="bar${used == null ? " empty" : ""}"><i style="${barStyle(used)}"></i></div>
+        <div class="stats"><span>${whenText(ac)}</span><span class="rem">${usedText(used, ac.tool)}</span></div>`}
+        ${quotaNote(ac) ? `<p class="quota-note">${attr(quotaNote(ac))}</p>` : ""}`;
       sec.appendChild(card);
     });
     if (!(tool.accounts || []).length) {
@@ -391,16 +411,23 @@ async function onClick(e) {
     if (act === "capture") {
       b.disabled = true;
       const r = await api("/api/capture", { method: "POST", body: JSON.stringify({ tool }) });
-      msg("已收录 " + (r.captured || []).map(x => x.email || x.stable_id).join(", "));
       await load();
+      msg("已收录 " + (r.captured || []).map(accountLabel).join(", "));
     } else if (act === "reload-all" || act === "probe" || act === "probe-tool") {
       b.disabled = true;
       msg("正在查用量…");
       const body = act === "reload-all" ? {} : { tool, id: act === "probe" ? id : "" };
       const ov = await api("/api/probe", { method: "POST", body: JSON.stringify(body) });
-      if (ov && ov.tools) render(ov);
-      else await load();
-      msg("用量已更新");
+      if (ov && ov.tools) {
+        render(ov);
+        const uncertain = ov.tools.filter(t => !tool || t.tool === tool).some(t => (t.accounts || []).some(ac => ac.quota_stale));
+        msg(uncertain ? "查询完成，部分账号的当前用量未能确认；旧数据已标明。" : "查询完成。", uncertain);
+      } else {
+        await load();
+        if (ov.class === "expired") msg("认证已失效，请重新登录。旧用量已标明。", true);
+        else if (!ov.updated) msg("本次未能确认用量，保留上次记录。", true);
+        else msg("用量已更新");
+      }
       b.disabled = false;
     } else if (act === "forget") {
       if (!confirm("从仓库删掉这个账号？当前登录不会动。")) return;
@@ -412,23 +439,27 @@ async function onClick(e) {
         codex: "切换到这个账号？会关掉并重启 ChatGPT.app；空闲的 Codex CLI 也会结束。",
         grok: "切换到这个账号？会关掉并重启 Grok Bot.app；空闲的 grok CLI 也会结束。",
         cursor: "切换到这个账号？会关掉并重启 Cursor.app；空闲的 cursor-agent 也会结束。只改登录字段，不碰聊天记录。",
-        devin: "切换到这个账号？会关掉并重启 Devin.app；空闲的 devin CLI 也会结束。",
+        devin: "切换 Devin CLI 到这个账号？空闲 CLI 会结束，新进程使用新账号。Devin.app 使用独立登录。",
+        kimi: "切换 Kimi Code 到这个账号？请先结束正在运行的 Kimi 会话，新进程将使用新账号。",
       }[tool] || "切换到这个账号？空闲的 CLI 会先结束。";
       if (!confirm(prompt)) return;
       b.disabled = true;
       await api("/api/switch", { method: "POST", body: JSON.stringify({ tool, id, kill_cli: true }) });
       await load();
-      msg("已切换。对应的 App 会用新号打开。");
+      msg(["kimi", "devin"].includes(tool) ? "已切换。新的 CLI 进程将使用新账号。" : "已切换。对应的 App 会用新号打开。");
     } else if (act === "login-codex" || act === "login-grok") {
-      startLogin(act === "login-grok" ? "grok" : "codex");
+      await startLogin(act === "login-grok" ? "grok" : "codex");
     }
   } catch (err) {
     b.disabled = false;
     msg(err.message, true);
   }
 }
-let loginTimer = null, loginId = "", loginTool = "codex";
+let loginTimer = null, loginId = "", loginTool = "codex", loginGeneration = 0;
 async function startLogin(tool) {
+  const generation = ++loginGeneration;
+  clearInterval(loginTimer);
+  loginId = "";
   loginTool = tool;
   $("loginTitle").textContent = tool === "grok" ? "Grok Device Code 加号" : "ChatGPT Device Code 加号";
   $("loginHint").textContent = tool === "grok"
@@ -439,7 +470,17 @@ async function startLogin(tool) {
   $("loginCode").textContent = "";
   $("loginMsg").textContent = "正在向官方申请一次性代码…";
   $("loginDlg").showModal();
-  const r = await api("/api/login/" + tool, { method: "POST", body: "{}" });
+  let r;
+  try {
+    r = await api("/api/login/" + tool, { method: "POST", body: "{}" });
+  } catch (e) {
+    if (generation === loginGeneration) $("loginMsg").textContent = e.message;
+    return;
+  }
+  if (generation !== loginGeneration) {
+    await api("/api/login/" + tool + "/cancel", { method: "POST", body: JSON.stringify({ id: r.id }) }).catch(() => {});
+    return;
+  }
   loginId = r.id;
   $("loginUrl").href = r.url;
   $("loginUrl").textContent = r.url;
@@ -449,8 +490,10 @@ async function startLogin(tool) {
 }
 async function pollLogin() {
   if (!loginId) return;
+  const generation = loginGeneration;
   try {
     const r = await api("/api/login/" + loginTool + "?id=" + encodeURIComponent(loginId));
+    if (generation !== loginGeneration) return;
     if (r.status === "ok") {
       clearInterval(loginTimer);
       $("loginDlg").close();
@@ -460,13 +503,18 @@ async function pollLogin() {
       clearInterval(loginTimer);
       $("loginMsg").textContent = r.error || "失败";
     }
-  } catch (e) { $("loginMsg").textContent = e.message; }
+  } catch (e) { if (generation === loginGeneration) $("loginMsg").textContent = e.message; }
 }
-$("loginCancel").onclick = async () => {
+async function cancelLogin() {
+  ++loginGeneration;
   clearInterval(loginTimer);
-  if (loginId) await api("/api/login/" + loginTool + "/cancel", { method: "POST", body: JSON.stringify({ id: loginId }) }).catch(() => {});
+  const id = loginId, tool = loginTool;
+  loginId = "";
   $("loginDlg").close();
-};
+  if (id) await api("/api/login/" + tool + "/cancel", { method: "POST", body: JSON.stringify({ id }) }).catch(() => {});
+}
+$("loginCancel").onclick = cancelLogin;
+$("loginDlg").addEventListener("cancel", e => { e.preventDefault(); cancelLogin(); });
 document.addEventListener("click", onClick);
 load();
 </script>

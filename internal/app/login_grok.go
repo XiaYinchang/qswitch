@@ -12,6 +12,7 @@ import (
 
 	"qswitch/internal/adapter"
 	"qswitch/internal/adapter/grok"
+	"qswitch/internal/livefile"
 	"qswitch/internal/quota"
 	"qswitch/internal/secutil"
 )
@@ -151,8 +152,17 @@ func (a *App) enrollGrokAuthJSON(ctx context.Context, raw []byte) (adapter.Ident
 }
 
 func (a *App) enrollGrokBlob(ctx context.Context, blob adapter.Blob) (adapter.Identity, error) {
-	if err := a.saveBlob(blob); err != nil {
+	lock, err := livefile.Acquire(filepath.Join(a.DataDir, "locks", "grok.lock"))
+	if err != nil {
 		return adapter.Identity{}, err
+	}
+	err = a.saveBlob(blob)
+	closeErr := lock.Close()
+	if err != nil {
+		return adapter.Identity{}, err
+	}
+	if closeErr != nil {
+		return adapter.Identity{}, closeErr
 	}
 	_ = a.probeAccount(ctx, adapter.Grok, blob.Identity.StableID, false)
 	label := blob.Identity.DisplayName

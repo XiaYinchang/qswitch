@@ -85,6 +85,16 @@ func DisplayPlan(tool, raw string) string {
 		return formatCursorPlan(raw)
 	case "devin":
 		return formatDevinPlan(raw)
+	case "zcode":
+		switch strings.ToLower(raw) {
+		case "lite":
+			return "Lite"
+		case "pro":
+			return "Pro"
+		case "max":
+			return "Max"
+		}
+		return raw
 	default:
 		return raw
 	}

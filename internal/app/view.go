@@ -3,8 +3,10 @@ package app
 import (
 	"context"
 	"strings"
+	"time"
 
 	"qswitch/internal/adapter"
+	"qswitch/internal/config"
 	"qswitch/internal/quota"
 	"qswitch/internal/state"
 )
@@ -18,6 +20,7 @@ type ToolView struct {
 	LiveID      string        `json:"live_id"`
 	Enabled     bool          `json:"enabled"`
 	Auto        bool          `json:"auto"`
+	Switchable  bool          `json:"switchable"`
 	Desync      bool          `json:"desync"`
 	Busy        bool          `json:"busy"`
 	ChatGPTApp  bool          `json:"chatgpt_app"`
@@ -30,23 +33,30 @@ type ToolView struct {
 }
 
 type AccountView struct {
-	Tool           string         `json:"tool"`
-	StableID       string         `json:"stable_id"`
-	Email          string         `json:"email"`
-	Plan           string         `json:"plan"`
-	Live           bool           `json:"live"`
-	Desktop        bool           `json:"desktop"`
-	Class          string         `json:"class"`
-	UsedPct        float64        `json:"used_pct"`
-	RemainingPct   *float64       `json:"remaining_pct"`
-	CoolingUntil   int64          `json:"cooling_until"`
-	ResetsAt       int64          `json:"resets_at"`
-	Incomplete     bool           `json:"incomplete"`
-	StaleCLI       bool           `json:"stale_cli"`
-	LastProbedAt   int64          `json:"last_probed_at"`
-	LastCapturedAt int64          `json:"last_captured_at"`
-	Buckets        []quota.Bucket `json:"buckets,omitempty"`
-	Derived        bool           `json:"derived,omitempty"`
+	Tool            string         `json:"tool"`
+	StableID        string         `json:"stable_id"`
+	Email           string         `json:"email"`
+	Phone           string         `json:"phone,omitempty"`
+	DisplayName     string         `json:"display_name,omitempty"`
+	Plan            string         `json:"plan"`
+	Live            bool           `json:"live"`
+	Desktop         bool           `json:"desktop"`
+	Class           string         `json:"class"`
+	UsedPct         float64        `json:"used_pct"`
+	RemainingPct    *float64       `json:"remaining_pct"`
+	CoolingUntil    int64          `json:"cooling_until"`
+	ResetsAt        int64          `json:"resets_at"`
+	Incomplete      bool           `json:"incomplete"`
+	StaleCLI        bool           `json:"stale_cli"`
+	LastProbedAt    int64          `json:"last_probed_at"`
+	LastProbeClass  string         `json:"last_probe_class,omitempty"`
+	LastProbeSource string         `json:"last_probe_source,omitempty"`
+	LastProbeAt     int64          `json:"last_probe_at,omitempty"`
+	LastQuotaAt     int64          `json:"last_quota_at,omitempty"`
+	QuotaStale      bool           `json:"quota_stale"`
+	LastCapturedAt  int64          `json:"last_captured_at"`
+	Buckets         []quota.Bucket `json:"buckets,omitempty"`
+	Derived         bool           `json:"derived,omitempty"`
 }
 
 func remainingPct(class string, used float64) *float64 {
@@ -67,6 +77,7 @@ func remainingPct(class string, used float64) *float64 {
 
 func (a *App) Overview() Overview {
 	var out Overview
+	cfg := a.cfgSnapshot()
 	now := a.now().Unix()
 	for _, t := range adapter.AllTools() {
 		p, _ := a.State.GetPointer(string(t))
@@ -77,8 +88,9 @@ func (a *App) Overview() Overview {
 		tv := ToolView{
 			Tool:        string(t),
 			LiveID:      p.StableID,
-			Enabled:     a.Cfg.ToolEnabled(string(t)),
-			Auto:        a.Cfg.General.AutoSwitch && a.Cfg.ToolEnabled(string(t)),
+			Enabled:     cfg.ToolEnabled(string(t)),
+			Auto:        cfg.General.AutoSwitch && cfg.ToolEnabled(string(t)) && t != adapter.ZCode,
+			Switchable:  t != adapter.ZCode,
 			Desync:      p.Desync,
 			Busy:        man.ManualBusy(),
 			ChatGPTApp:  aut.ChatGPTApp,
@@ -93,7 +105,27 @@ func (a *App) Overview() Overview {
 			if hideOverviewAccount(t, ac) {
 				continue
 			}
-			tv.Accounts = append(tv.Accounts, accountView(ac, p.StableID, now))
+			view := accountView(ac, p.StableID, now)
+			if last, err := a.State.LatestQuota(ac.Tool, ac.StableID); err == nil {
+				view.LastProbeClass, view.LastProbeSource, view.LastProbeAt = last.Class, last.Source, last.Ts
+				view.QuotaStale = view.QuotaStale || last.Class == string(quota.Unknown) || last.Class == string(quota.Expired)
+				switch quota.Class(last.Class) {
+				case quota.OK, quota.Soft, quota.Exhausted:
+					view.LastQuotaAt = last.Ts
+				default:
+					if confirmed, err := a.State.LatestConfirmedQuota(ac.Tool, ac.StableID); err == nil {
+						view.LastQuotaAt = confirmed.Ts
+					}
+				}
+			}
+			maxAge := cfg.IntervalMax() + 2*time.Minute // Allow one daemon tick.
+			if !view.Live {
+				maxAge = config.IdleQuotaInterval + 2*time.Minute
+			}
+			view.QuotaStale = view.QuotaStale || view.LastQuotaAt <= 0 || view.LastQuotaAt > now ||
+				now-view.LastQuotaAt >= int64(maxAge.Seconds()) ||
+				(ac.LastResetsAt > view.LastQuotaAt && ac.LastResetsAt <= now)
+			tv.Accounts = append(tv.Accounts, view)
 		}
 		if t == adapter.Cursor {
 			cursor, bot := splitCursorBot(tv)
@@ -144,6 +176,9 @@ func splitCursorBot(tv ToolView) (ToolView, ToolView) {
 			class = "exhausted"
 		case used >= 90:
 			class = "soft"
+		}
+		if ac.Class == string(quota.Expired) || ac.Class == string(quota.Unknown) {
+			class = ac.Class
 		}
 		bc := ac
 		bc.Tool = "cursor"
@@ -198,6 +233,8 @@ func accountView(ac state.Account, liveID string, now int64) AccountView {
 		Tool:           ac.Tool,
 		StableID:       ac.StableID,
 		Email:          ac.Email,
+		Phone:          ac.Phone,
+		DisplayName:    ac.DisplayName,
 		Plan:           plan,
 		Live:           ac.StableID == liveID && liveID != "",
 		Desktop:        strings.HasPrefix(ac.StableID, "desktop:"),
@@ -209,6 +246,7 @@ func accountView(ac state.Account, liveID string, now int64) AccountView {
 		Incomplete:     ac.Incomplete,
 		StaleCLI:       ac.StaleCLI,
 		LastProbedAt:   ac.LastProbedAt,
+		QuotaStale:     class == string(quota.Expired) || class == string(quota.Unknown),
 		LastCapturedAt: ac.LastCapturedAt,
 		Buckets:        quota.DecodeBuckets(ac.QuotaDetail),
 	}

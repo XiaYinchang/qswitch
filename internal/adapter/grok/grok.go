@@ -240,12 +240,15 @@ func (a Adapter) IdentityOf(blob adapter.Blob) (adapter.Identity, error) {
 	return identityFromRaw(env.AuthJSON)
 }
 
-func (a Adapter) Restore(home string, blob adapter.Blob, _ adapter.RestoreOpts) error {
+func (a Adapter) Restore(home string, blob adapter.Blob, opts adapter.RestoreOpts) error {
 	var head struct {
 		Kind string `json:"kind"`
 	}
 	_ = json.Unmarshal(blob.Payload, &head)
 	if head.Kind == snapshot.KindDesktop {
+		if opts.CLIOnly {
+			return errors.New("grok: cannot restore a desktop-only snapshot with --cli-only")
+		}
 		list, err := a.procs()
 		if err != nil {
 			return err
@@ -262,6 +265,9 @@ func (a Adapter) Restore(home string, blob adapter.Blob, _ adapter.RestoreOpts) 
 		}
 		if env.RelRoot == "" || len(env.Zip) == 0 {
 			return errors.New("grok: empty desktop snapshot")
+		}
+		if env.RelRoot != snapshot.GrokBotRelRoot {
+			return errors.New("grok: invalid desktop snapshot root")
 		}
 		return snapshot.Unpack(filepath.Join(home, env.RelRoot), env.Zip)
 	}
@@ -281,31 +287,40 @@ func (a Adapter) Restore(home string, blob adapter.Blob, _ adapter.RestoreOpts) 
 	if len(env.AuthJSON) == 0 {
 		return errors.New("grok: empty auth_json")
 	}
-	if err := livefile.AtomicWrite(authPath(home), env.AuthJSON, 0o600); err != nil {
-		return err
+	writeAuth := func() error {
+		return livefile.AtomicWrite(authPath(home), env.AuthJSON, 0o600)
 	}
-	return restoreAttachedDesktop(home, blob, a)
+	if opts.CLIOnly {
+		return writeAuth()
+	}
+	return restoreAttachedDesktop(home, blob, a, writeAuth)
 }
 
-func restoreAttachedDesktop(home string, blob adapter.Blob, a Adapter) error {
+func restoreAttachedDesktop(home string, blob adapter.Blob, a Adapter, writeAuth func() error) error {
 	var env struct {
 		DesktopZip []byte `json:"desktop_zip"`
 		RelRoot    string `json:"desktop_rel_root"`
 	}
-	if json.Unmarshal(blob.Payload, &env) != nil || len(env.DesktopZip) == 0 {
-		return nil
+	if err := json.Unmarshal(blob.Payload, &env); err != nil {
+		return err
+	}
+	if len(env.DesktopZip) == 0 {
+		return writeAuth()
 	}
 	list, err := a.procs()
 	if err != nil {
-		return nil
+		return err
 	}
-	if len(busy.GrokBotApp(list)) > 0 {
-		return nil
+	if apps := busy.GrokBotApp(list); len(apps) > 0 {
+		return &adapter.BusyError{Holders: adapter.Holders{Manual: apps, Why: []string{"quit Grok Bot.app to restore desktop session"}}}
 	}
 	if env.RelRoot == "" {
 		env.RelRoot = snapshot.GrokBotRelRoot
 	}
-	return snapshot.Unpack(filepath.Join(home, env.RelRoot), env.DesktopZip)
+	if env.RelRoot != snapshot.GrokBotRelRoot {
+		return errors.New("grok: invalid desktop snapshot root")
+	}
+	return snapshot.Restore(filepath.Join(home, env.RelRoot), env.DesktopZip, writeAuth)
 }
 
 func (a Adapter) Idle(home string, grace time.Duration) bool {
@@ -316,6 +331,21 @@ func (a Adapter) KillCLI(home string) error {
 	h, err := a.ManualBlockers(home)
 	if err != nil {
 		return err
+	}
+	// PID files may survive their owner, and macOS may reuse that PID for an
+	// unrelated process. Keep such holders as blockers, but never signal them.
+	list, err := a.procs()
+	if err != nil {
+		return err
+	}
+	verified := make(map[int]bool)
+	for _, p := range busy.GrokCLI(list) {
+		verified[p.PID] = true
+	}
+	for _, p := range h.Manual {
+		if !verified[p.PID] {
+			return &adapter.BusyError{Holders: h}
+		}
 	}
 	var first error
 	for _, p := range h.Manual {
@@ -375,6 +405,8 @@ func ReadAuth(blob adapter.Blob) (AuthFile, error) {
 }
 
 func ReadAuthBytes(raw []byte) (AuthFile, error) { return parseAuthJSON(raw, "") }
+
+func ReadAuthForIdentity(raw []byte, id string) (AuthFile, error) { return parseAuthJSON(raw, id) }
 
 func parseAuthJSON(raw []byte, preferID string) (AuthFile, error) {
 	var root map[string]any
@@ -518,10 +550,9 @@ func ApplyRefresh(blob adapter.Blob, tok quota.GrokTokens, now time.Time) (adapt
 	entry["create_time"] = now.UTC().Format(time.RFC3339Nano)
 	auth[stored.Slot] = entry
 	env["auth_json"] = auth
-	if ident, err := identityFromRaw(mustJSONMap(auth)); err == nil {
-		env["identity"] = ident
-		blob.Identity = ident
-	}
+	// Renewal cannot change accounts. The live file may contain unrelated slots;
+	// reselecting an identity from the map could save these tokens under one of them.
+	env["identity"] = blob.Identity
 	payload, err := json.Marshal(env)
 	if err != nil {
 		return blob, err

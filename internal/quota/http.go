@@ -20,6 +20,10 @@ var allowHosts = map[string]bool{
 	"api2.cursor.sh":          true,
 	"server.codeium.com":      true,
 	"api.devin.ai":            true,
+	"api.kimi.com":            true,
+	"auth.kimi.com":           true,
+	"bigmodel.cn":             true,
+	"api.z.ai":                true,
 }
 
 type HTTP struct {
@@ -90,18 +94,21 @@ func (h HTTP) grokSettingsPlan(ctx context.Context, bearer string) string {
 }
 
 func (h HTTP) Devin(ctx context.Context, apiKey, server string) (Result, error) {
-	raw, status, err := h.devinStatus(ctx, apiKey, server)
+	raw, status, retry, err := h.devinStatus(ctx, apiKey, server)
 	if err != nil {
 		return Result{Class: Unknown, Source: "http"}, err
 	}
-	return Classify(KindDevin, status, raw), nil
+	res := Classify(KindDevin, status, raw)
+	res.RetryAfter = retry
+	return res, nil
 }
 
 func (h HTTP) DevinBody(ctx context.Context, apiKey, server string) ([]byte, int, error) {
-	return h.devinStatus(ctx, apiKey, server)
+	raw, status, _, err := h.devinStatus(ctx, apiKey, server)
+	return raw, status, err
 }
 
-func (h HTTP) devinStatus(ctx context.Context, apiKey, server string) ([]byte, int, error) {
+func (h HTTP) devinStatus(ctx context.Context, apiKey, server string) ([]byte, int, time.Duration, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -112,7 +119,7 @@ func (h HTTP) devinStatus(ctx context.Context, apiKey, server string) ([]byte, i
 	body := `{"metadata":{"apiKey":` + jsonString(apiKey) + `,"ideName":"devin","ideVersion":"3000.10.21","extensionName":"devin","extensionVersion":"3000.10.21"}}`
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, server+"/exa.seat_management_pb.SeatManagementService/GetUserStatus", strings.NewReader(body))
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Content-Type", "application/json")
@@ -120,15 +127,15 @@ func (h HTTP) devinStatus(ctx context.Context, apiKey, server string) ([]byte, i
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "devin_cli")
 	if err := checkHost(req.URL); err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 	resp, err := h.client().Do(req)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	return raw, resp.StatusCode, nil
+	return raw, resp.StatusCode, responseRetryAfter(resp), nil
 }
 
 func jsonString(s string) string {
@@ -232,7 +239,9 @@ func (h HTTP) do(kind Kind, req *http.Request) (Result, error) {
 	}
 	defer res.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
-	return Classify(kind, res.StatusCode, body), nil
+	r := Classify(kind, res.StatusCode, body)
+	r.RetryAfter = responseRetryAfter(res)
+	return r, nil
 }
 
 func checkHost(u *url.URL) error {

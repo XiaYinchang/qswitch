@@ -82,9 +82,9 @@ func (a Adapter) AutoBlockers(home string) (adapter.Holders, error) {
 	}
 	apps := busy.DevinApp(list)
 	if len(apps) > 0 {
-		h.AutoExtra = apps
+		// Desktop has an independent authentication store. This adapter only
+		// restores CLI credentials, so the desktop process is informational.
 		h.DevinApp = true
-		h.Why = append(h.Why, "devin.app running")
 	}
 	return h, nil
 }
@@ -206,15 +206,14 @@ func (a Adapter) Restore(home string, blob adapter.Blob, _ adapter.RestoreOpts) 
 }
 
 func (a Adapter) Idle(home string, grace time.Duration) bool {
-	if len(busy.DevinCLI(mustList(a))) == 0 {
+	list, err := a.procs()
+	if err != nil {
+		return false
+	}
+	if len(busy.DevinCLI(list)) == 0 {
 		return true
 	}
-	return quota.DirIdle(filepath.Join(dataDir(home), "cli"), grace, time.Now())
-}
-
-func mustList(a Adapter) []adapter.Proc {
-	list, _ := a.procs()
-	return list
+	return busy.FilesIdle(filepath.Join(dataDir(home), "cli"), grace, time.Now())
 }
 
 func (a Adapter) KillCLI(home string) error {

@@ -72,38 +72,5 @@ func writeFile(zw *zip.Writer, path, rel string) error {
 }
 
 func Unpack(root string, data []byte) error {
-	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
-	if err != nil {
-		return err
-	}
-	for _, f := range zr.File {
-		name := filepath.Clean(f.Name)
-		if name == "." || strings.HasPrefix(name, "..") || filepath.IsAbs(name) {
-			continue
-		}
-		dest := filepath.Join(root, name)
-		if f.FileInfo().IsDir() {
-			_ = os.MkdirAll(dest, 0o700)
-			continue
-		}
-		if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
-			return err
-		}
-		rc, err := f.Open()
-		if err != nil {
-			return err
-		}
-		out, err := os.OpenFile(dest, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
-		if err != nil {
-			rc.Close()
-			return err
-		}
-		_, err = io.Copy(out, rc)
-		out.Close()
-		rc.Close()
-		if err != nil {
-			return err
-		}
-	}
-	return nil
+	return Restore(root, data, nil)
 }

@@ -6,13 +6,18 @@ import (
 	"strings"
 	"time"
 
+	"qswitch/internal/livefile"
+
 	toml "github.com/pelletier/go-toml/v2"
 )
 
 const (
-	HTTPIntervalFloor = 10 * time.Minute
-	DefaultHTTPMin    = 10 * time.Minute
-	DefaultHTTPMax    = 2 * time.Hour
+	HTTPIntervalFloor = 2 * time.Minute
+	DefaultHTTPMin    = 5 * time.Minute
+	DefaultHTTPMax    = 15 * time.Minute
+	IdleQuotaInterval = 30 * time.Minute
+	QuotaRetryMin     = 2 * time.Minute
+	QuotaRetryMax     = 15 * time.Minute
 	DefaultETADivisor = 6.0
 	DefaultJitter     = 2 * time.Minute
 	DefaultBackoff    = 2 * time.Hour
@@ -31,6 +36,8 @@ type Config struct {
 	Grok    Tool    `toml:"grok"`
 	Cursor  Tool    `toml:"cursor"`
 	Devin   Tool    `toml:"devin"`
+	ZCode   Tool    `toml:"zcode"`
+	Kimi    Tool    `toml:"kimi"`
 	Web     Web     `toml:"web"`
 }
 
@@ -72,11 +79,11 @@ func Default() Config {
 			WritebackWindow: "60s",
 		},
 		Quota: Quota{
-			IntervalMin:       "10m",
-			IntervalMax:       "2h",
+			IntervalMin:       "5m",
+			IntervalMax:       "15m",
 			ETAChecks:         DefaultETADivisor,
 			Jitter:            "2m",
-			ProbeIdleAccounts: false,
+			ProbeIdleAccounts: true,
 			HTTPBackoff:       "2h",
 		},
 		Notify: Notify{Enabled: true},
@@ -84,6 +91,8 @@ func Default() Config {
 		Grok:   Tool{Enabled: true},
 		Cursor: Tool{Enabled: true},
 		Devin:  Tool{Enabled: true},
+		ZCode:  Tool{Enabled: true},
+		Kimi:   Tool{Enabled: true},
 		Web:    Web{Enabled: true, Addr: DefaultWebAddr},
 	}
 }
@@ -158,7 +167,7 @@ func (c Config) Save(path string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, b, 0o600)
+	return livefile.AtomicWrite(path, b, 0o600)
 }
 
 func (c Config) ToolEnabled(name string) bool {
@@ -171,6 +180,10 @@ func (c Config) ToolEnabled(name string) bool {
 		return c.Cursor.Enabled
 	case "devin":
 		return c.Devin.Enabled
+	case "zcode":
+		return c.ZCode.Enabled
+	case "kimi":
+		return c.Kimi.Enabled
 	default:
 		return false
 	}
@@ -186,11 +199,17 @@ func (c *Config) SetToolEnabled(name string, on bool) error {
 		c.Cursor.Enabled = on
 	case "devin":
 		c.Devin.Enabled = on
+	case "zcode":
+		c.ZCode.Enabled = on
+	case "kimi":
+		c.Kimi.Enabled = on
 	case "", "all":
 		c.Codex.Enabled = on
 		c.Grok.Enabled = on
 		c.Cursor.Enabled = on
 		c.Devin.Enabled = on
+		c.ZCode.Enabled = on
+		c.Kimi.Enabled = on
 	default:
 		return fmt.Errorf("unknown tool %q", name)
 	}
