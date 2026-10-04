@@ -370,7 +370,7 @@ function render(ov) {
       const badges = [];
       if (ac.live) badges.push(`<span class="badge live">当前</span>`);
       const oldStatus = ac.quota_stale && ["ok", "soft", "exhausted"].includes(ac.class);
-      badges.push(`<span class="badge ${oldStatus ? "" : attr(ac.class)}">${oldStatus ? "上次" : ""}${attr(clsLabel[ac.class] || ac.class)}</span>`);
+      if (!oldStatus) badges.push(`<span class="badge ${attr(ac.class)}">${attr(clsLabel[ac.class] || ac.class)}</span>`);
       if (ac.plan && ac.plan !== "-") badges.push(`<span class="badge">${attr(ac.plan)}</span>`);
       if (ac.stale_cli) badges.push(`<span class="badge">CLI 偏旧</span>`);
       if (ac.desktop) badges.push(`<span class="badge">桌面快照</span>`);
