@@ -1157,14 +1157,13 @@ func (a *App) keepAliveCodexAccounts(ctx context.Context) {
 }
 
 func (a *App) keepAliveGrokAccounts(ctx context.Context) {
-	p, _ := a.State.GetPointer(string(adapter.Grok))
 	accs, err := a.State.ListAccounts(string(adapter.Grok))
 	if err != nil {
 		return
 	}
 	n := 0
 	for _, ac := range accs {
-		if ac.StableID == p.StableID || strings.HasPrefix(ac.StableID, "desktop:") {
+		if strings.HasPrefix(ac.StableID, "desktop:") {
 			continue
 		}
 		if ac.HTTPBackoffUntil > a.now().Unix() {
@@ -1176,10 +1175,6 @@ func (a *App) keepAliveGrokAccounts(ctx context.Context) {
 		}
 		stored, err := grok.ReadAuth(blob)
 		if err != nil || !stored.Refreshable() {
-			continue
-		}
-		liveRaw, _ := os.ReadFile(filepath.Join(a.UserHome, ".grok", "auth.json"))
-		if live, err := grok.ReadAuthBytes(liveRaw); err == nil && grok.SameOIDCUser(stored, live) {
 			continue
 		}
 		force := quota.Class(ac.LastQuotaClass) == quota.Expired
@@ -1320,9 +1315,18 @@ func (a *App) keepAliveGrokLocked(ctx context.Context, blob adapter.Blob, force,
 	if err != nil {
 		return blob, "", err
 	}
-	liveRaw, _ := os.ReadFile(filepath.Join(a.UserHome, ".grok", "auth.json"))
-	if live, err := grok.ReadAuthBytes(liveRaw); err == nil && live.Key != "" && grok.SameOIDCUser(stored, live) {
-		return blob, live.Key, nil
+	liveRaw, liveErr := os.ReadFile(filepath.Join(a.UserHome, ".grok", "auth.json"))
+	if liveErr != nil && !os.IsNotExist(liveErr) {
+		return blob, "", errors.New("grok: cannot read live credentials")
+	}
+	if liveErr == nil {
+		live, err := grok.ReadAuthForIdentity(liveRaw, blob.Identity.StableID)
+		if err != nil {
+			return blob, "", errors.New("grok: cannot establish live identity")
+		}
+		if live.Key != "" && grok.SameOIDCUser(stored, live) {
+			return a.keepAliveLiveGrokLocked(ctx, blob, live, force, bypassBackoff)
+		}
 	}
 	if !force && stored.Key != "" && !stored.NeedsRefresh(a.now()) {
 		return blob, stored.Key, nil

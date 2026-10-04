@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"qswitch/internal/adapter"
+	"qswitch/internal/adapter/grok"
 	"qswitch/internal/clock"
 	"qswitch/internal/quota"
 )
@@ -30,6 +31,8 @@ func TestGrokQuotaSnapshotsReplaceBucketsAndSurviveFailures(t *testing.T) {
 	if err := a.State.SetQuotaDetail("grok", "grok-fixture", `[{"id":"old","used_pct":100}]`); err != nil {
 		t.Fatal(err)
 	}
+	// Isolate quota classification while the official CLI owns renewal.
+	a.Adapters[adapter.Grok] = grok.Adapter{List: func() ([]adapter.Proc, error) { return []adapter.Proc{{PID: 42, Command: "/bin/grok --acp"}}, nil }}
 	body := `{"config":{"isUnifiedBillingUser":true,"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","start":"2026-09-27T14:04:34Z","end":"2026-10-04T14:04:34Z"},"onDemandCap":{"val":0},"onDemandUsed":{"val":0},"prepaidBalance":{"val":0}}}`
 	status := 200
 	a.HTTP.Client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {

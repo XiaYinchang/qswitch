@@ -406,6 +406,8 @@ func ReadAuth(blob adapter.Blob) (AuthFile, error) {
 
 func ReadAuthBytes(raw []byte) (AuthFile, error) { return parseAuthJSON(raw, "") }
 
+func ReadAuthForIdentity(raw []byte, id string) (AuthFile, error) { return parseAuthJSON(raw, id) }
+
 func parseAuthJSON(raw []byte, preferID string) (AuthFile, error) {
 	var root map[string]any
 	if err := json.Unmarshal(raw, &root); err != nil {
@@ -548,10 +550,9 @@ func ApplyRefresh(blob adapter.Blob, tok quota.GrokTokens, now time.Time) (adapt
 	entry["create_time"] = now.UTC().Format(time.RFC3339Nano)
 	auth[stored.Slot] = entry
 	env["auth_json"] = auth
-	if ident, err := identityFromRaw(mustJSONMap(auth)); err == nil {
-		env["identity"] = ident
-		blob.Identity = ident
-	}
+	// Renewal cannot change accounts. The live file may contain unrelated slots;
+	// reselecting an identity from the map could save these tokens under one of them.
+	env["identity"] = blob.Identity
 	payload, err := json.Marshal(env)
 	if err != nil {
 		return blob, err

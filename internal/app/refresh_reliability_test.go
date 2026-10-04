@@ -221,6 +221,9 @@ func TestRefreshDoesNotSpendLiveSessionToken(t *testing.T) {
 			if err := a.Switch(tool, blob.Identity.StableID, adapter.RestoreOpts{}, false); err != nil {
 				t.Fatal(err)
 			}
+			if tool == adapter.Grok {
+				a.Adapters[tool] = grok.Adapter{List: func() ([]adapter.Proc, error) { return []adapter.Proc{{PID: 42, Command: "/bin/grok --acp"}}, nil }}
+			}
 			hits := 0
 			a.HTTP.Client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 				hits++
@@ -345,6 +348,8 @@ func TestSuccessfulQuotaResponseClearsObsoleteAuthFailure(t *testing.T) {
 			if _, _, err := a.Capture(adapter.Grok); err != nil {
 				t.Fatal(err)
 			}
+			// The official CLI owns renewal in this response-classification fixture.
+			a.Adapters[adapter.Grok] = grok.Adapter{List: func() ([]adapter.Proc, error) { return []adapter.Proc{{PID: 42, Command: "/bin/grok --acp"}}, nil }}
 			now := a.now()
 			if err := a.State.UpdateQuotaSnapshot("grok", "grok-live", tc.previous, 21, now.Add(time.Hour).Unix(), now.Unix()); err != nil {
 				t.Fatal(err)

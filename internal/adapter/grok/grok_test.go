@@ -116,6 +116,40 @@ func TestNeedsRefreshAndApply(t *testing.T) {
 	}
 }
 
+func TestRefreshPreservesIdentityAcrossMultipleSlots(t *testing.T) {
+	identity := adapter.Identity{Tool: adapter.Grok, StableID: "current", Email: "current@example.test"}
+	raw := []byte(`{"current-slot":{"principal_id":"current","key":"old","refresh_token":"old-refresh"},"other-slot":{"principal_id":"other","key":"untouched"}}`)
+	payload, err := json.Marshal(map[string]any{"auth_json": json.RawMessage(raw), "identity": identity})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 32 {
+		out, err := ApplyRefresh(adapter.Blob{Tool: adapter.Grok, Identity: identity, Payload: payload}, quota.GrokTokens{AccessToken: "new", RefreshToken: "new-refresh", ExpiresIn: 3600}, time.Now())
+		if err != nil || out.Identity != identity {
+			t.Fatalf("renewal selected another identity: %v", err)
+		}
+		// Loading from the encrypted vault reconstructs identity from the payload.
+		loaded, err := (Adapter{}).IdentityOf(adapter.Blob{Payload: out.Payload})
+		if err != nil || loaded != identity {
+			t.Fatalf("persisted identity changed: %v", err)
+		}
+		selected, err := ReadAuth(out)
+		if err != nil || selected.Key != "new" || selected.Refresh != "new-refresh" {
+			t.Fatalf("selected slot did not receive renewed tokens: %v", err)
+		}
+		var env struct {
+			AuthJSON json.RawMessage `json:"auth_json"`
+		}
+		if err := json.Unmarshal(out.Payload, &env); err != nil {
+			t.Fatal(err)
+		}
+		other, err := ReadAuthForIdentity(env.AuthJSON, "other")
+		if err != nil || other.Key != "untouched" {
+			t.Fatalf("unrelated slot changed: %v", err)
+		}
+	}
+}
+
 func TestBlobFromTokens(t *testing.T) {
 	t.Setenv("QSWITCH_IN_TEST", "1")
 	h := "eyJhbGciOiJub25lIn0"
