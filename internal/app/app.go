@@ -1526,6 +1526,17 @@ func (a *App) probeAccountLocked(ctx context.Context, tool adapter.Tool, id stri
 				res, _ = a.HTTP.Kimi(ctx, next)
 			}
 		}
+		// The coding /usages response carries no monthly window any more;
+		// the desktop app reads it from the membership gateway instead.
+		if !quota.KimiHasBucket(res.Buckets, "monthly") {
+			if s, host, ok := a.kimiWebSessionToken(); ok && s.Sub == id {
+				wctx, cancel := context.WithTimeout(ctx, 6*time.Second)
+				if wres, werr := a.HTTP.KimiWebStats(wctx, host, s); werr == nil {
+					res = quota.MergeKimiWebStats(res, wres)
+				}
+				cancel()
+			}
+		}
 	case adapter.ZCode:
 		c, err := zcode.CredsFromBlob(blob)
 		if err != nil {
