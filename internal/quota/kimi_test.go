@@ -92,6 +92,73 @@ func TestKimiHTTPAndIdentity(t *testing.T) {
 	}
 }
 
+func TestKimiLimitsArray(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		class      Class
+		pct        float64
+		ids        []string
+	}{
+		{
+			// Live contract observed 2026-10-06: usages map plus a limits
+			// array whose only window (300 minutes) duplicates limit_5h.
+			"live_shape_no_duplicate",
+			`{"usage":{"limit":"100","remaining":"100","resetTime":"2026-10-12T12:11:30.337175Z"},"limits":[{"window":{"duration":300,"timeUnit":"TIME_UNIT_MINUTE"},"detail":{"limit":"100","remaining":"100","resetTime":"2026-10-07T11:11:30.337175Z"}}],"usages":{"limit_5h":{"used_ratio":0,"reset_time":"2026-10-07T11:11:30Z"},"limit_7d":{"used_ratio":0,"reset_time":"2026-10-12T12:11:30Z"}}}`,
+			OK, 0, []string{"5h", "weekly"},
+		},
+		{
+			"monthly_from_month_unit",
+			`{"limits":[{"window":{"duration":1,"timeUnit":"TIME_UNIT_MONTH"},"detail":{"limit":"100","remaining":"40","resetTime":"2026-10-31T00:00:00Z"}}]}`,
+			OK, 60, []string{"monthly"},
+		},
+		{
+			"monthly_from_thirty_days",
+			`{"limits":[{"window":{"duration":30,"timeUnit":"TIME_UNIT_DAY"},"detail":{"limit":200,"remaining":150,"resetTime":"2026-10-31T00:00:00Z"}}]}`,
+			OK, 25, []string{"monthly"},
+		},
+		{
+			"monthly_added_to_usages_windows",
+			`{"usages":{"limit_5h":{"used_ratio":0.1},"limit_7d":{"used_ratio":0.2}},"limits":[{"window":{"duration":1,"timeUnit":"TIME_UNIT_MONTH"},"detail":{"limit":"100","remaining":"50","resetTime":"2026-10-31T00:00:00Z"}}]}`,
+			OK, 50, []string{"5h", "weekly", "monthly"},
+		},
+		{
+			"weekly_from_minutes",
+			`{"limits":[{"window":{"duration":10080,"timeUnit":"TIME_UNIT_MINUTE"},"detail":{"limit":"100","remaining":"90","resetTime":"2026-10-12T12:11:30Z"}}]}`,
+			OK, 10, []string{"weekly"},
+		},
+		{
+			"limits_fill_without_usages",
+			`{"limits":[{"window":{"duration":300,"timeUnit":"TIME_UNIT_MINUTE"},"detail":{"limit":"100","remaining":"75","resetTime":"2026-10-07T11:11:30Z"}}]}`,
+			OK, 25, []string{"5h"},
+		},
+		{
+			"malformed_entries_skipped",
+			`{"usages":{"limit_5h":{"used_ratio":0.1}},"limits":[{"window":{"duration":1,"timeUnit":"TIME_UNIT_MONTH"},"detail":{"limit":"0","remaining":"0"}},{"window":{"duration":300,"timeUnit":"TIME_UNIT_MINUTE"},"detail":{"limit":"100","remaining":"120"}},{"detail":{"limit":"100","remaining":"50"}},{"window":{"duration":45,"timeUnit":"TIME_UNIT_SECOND"},"detail":{"limit":"100","remaining":"50"}}]}`,
+			OK, 10, []string{"5h"},
+		},
+		{
+			"exhausted_monthly_sets_reset",
+			`{"usages":{"limit_5h":{"used_ratio":1,"reset_time":"2026-10-07T11:11:30Z"}},"limits":[{"window":{"duration":1,"timeUnit":"TIME_UNIT_MONTH"},"detail":{"limit":"100","remaining":"0","resetTime":"2026-10-31T00:00:00Z"}}]}`,
+			Exhausted, 100, []string{"5h", "monthly"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := ParseKimiUsage(200, []byte(tc.body))
+			if r.Class != tc.class || r.UsedPct != tc.pct || len(r.Buckets) != len(tc.ids) {
+				t.Fatalf("got %+v", r)
+			}
+			for i, id := range tc.ids {
+				if r.Buckets[i].ID != id {
+					t.Fatalf("bucket %d = %q, want %q (%+v)", i, r.Buckets[i].ID, id, r.Buckets)
+				}
+			}
+		})
+	}
+	if r := ParseKimiUsage(200, []byte(`{"limits":[{"window":{"duration":1,"timeUnit":"TIME_UNIT_MONTH"},"detail":{"limit":"100","remaining":"0","resetTime":"2026-10-31T00:00:00Z"}}],"usages":{"limit_5h":{"used_ratio":1,"reset_time":"2026-10-07T11:11:30Z"}}}`)); r.ResetsAt != 1793404800 {
+		t.Fatalf("exhausted reset = %d, want the latest exhausted window", r.ResetsAt)
+	}
+}
+
 func TestKimiRefreshContract(t *testing.T) {
 	for _, tc := range []struct {
 		status         int
