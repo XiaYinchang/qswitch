@@ -2,6 +2,7 @@ package quota
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -79,6 +80,100 @@ type KimiTokens struct {
 	Scope        string `json:"scope"`
 	TokenType    string `json:"token_type"`
 	Permanent    bool   `json:"-"`
+}
+
+// KimiWebSession describes the Kimi desktop app's web session token. It is
+// read from the app's localStorage and used as-is; qswitch never refreshes
+// or rotates the desktop login.
+type KimiWebSession struct {
+	Token     string
+	Sub       string
+	DeviceID  string
+	SessionID string
+	ExpiresAt int64
+}
+
+// ParseKimiWebToken decodes the web session JWT's claims without verifying
+// the signature: the claims only pick request headers, the server validates
+// the token itself.
+func ParseKimiWebToken(token string) (KimiWebSession, error) {
+	parts := strings.Split(strings.TrimSpace(token), ".")
+	if len(parts) != 3 {
+		return KimiWebSession{}, fmt.Errorf("kimi: malformed web token")
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil || len(raw) > 8192 {
+		return KimiWebSession{}, fmt.Errorf("kimi: malformed web token")
+	}
+	var claims struct {
+		Sub      string `json:"sub"`
+		DeviceID string `json:"device_id"`
+		Ssid     string `json:"ssid"`
+		Exp      int64  `json:"exp"`
+	}
+	if json.Unmarshal(raw, &claims) != nil || strings.TrimSpace(claims.Sub) == "" {
+		return KimiWebSession{}, fmt.Errorf("kimi: web token missing identity")
+	}
+	return KimiWebSession{Token: strings.TrimSpace(token), Sub: claims.Sub, DeviceID: claims.DeviceID, SessionID: claims.Ssid, ExpiresAt: claims.Exp}, nil
+}
+
+// KimiWebStats calls the membership gateway the Kimi desktop app uses for
+// its subscription page; host is the origin the web session belongs to.
+func (h HTTP) KimiWebStats(ctx context.Context, host string, s KimiWebSession) (Result, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	endpoint := "https://" + host + "/apiv2/kimi.gateway.membership.v2.MembershipService/GetSubscriptionStats"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(`{"mute_notice":false}`))
+	if err != nil {
+		return Result{Class: Unknown, Source: "web_subscription"}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+s.Token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Connect-Protocol-Version", "1")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("x-msh-platform", "web")
+	req.Header.Set("x-msh-version", "2.3.0")
+	if s.Sub != "" {
+		req.Header.Set("X-Traffic-Id", s.Sub)
+	}
+	if s.DeviceID != "" {
+		req.Header.Set("x-msh-device-id", s.DeviceID)
+	}
+	if s.SessionID != "" {
+		req.Header.Set("x-msh-session-id", s.SessionID)
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36")
+	body, status, err := h.kimiWebRequest(req)
+	if err != nil {
+		return Result{Class: Unknown, Source: "web_subscription"}, err
+	}
+	r, ok := ParseKimiSubscriptionStats(status, body)
+	if !ok {
+		return Result{Class: Unknown, Source: "web_subscription"}, nil
+	}
+	return r, nil
+}
+
+func (h HTTP) kimiWebRequest(req *http.Request) ([]byte, int, error) {
+	if err := checkHost(req.URL); err != nil {
+		return nil, 0, err
+	}
+	client := *h.client()
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	res, err := client.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer res.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(res.Body, (1<<20)+1))
+	if err != nil {
+		return nil, res.StatusCode, err
+	}
+	if len(raw) > 1<<20 {
+		return nil, res.StatusCode, fmt.Errorf("kimi: response too large")
+	}
+	return raw, res.StatusCode, nil
 }
 
 // KimiRefresh only returns rotated credentials. The caller owns vault locking

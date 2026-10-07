@@ -22,6 +22,8 @@ var allowHosts = map[string]bool{
 	"api.devin.ai":            true,
 	"api.kimi.com":            true,
 	"auth.kimi.com":           true,
+	"www.kimi.com":            true,
+	"www.kimi.ai":             true,
 	"bigmodel.cn":             true,
 	"api.z.ai":                true,
 }
