@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -64,7 +65,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/login/grok/cancel", s.postLoginCancel)
 	mux.HandleFunc("GET /", s.static)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !localRequest(r) {
+		if tok := s.token(); tok != "" {
+			if !s.authorized(w, r, tok) {
+				return
+			}
+		} else if !localRequest(r) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
@@ -72,9 +77,58 @@ func (s *Server) Handler() http.Handler {
 	})
 }
 
+// token is the shared secret required when the listener is not loopback-only.
+func (s *Server) token() string {
+	if s.App == nil {
+		return ""
+	}
+	return strings.TrimSpace(s.App.Cfg.Web.Token)
+}
+
+// authorized gates public deployments: every request needs the configured
+// token (cookie, Bearer header, or ?token= on the page URL, which plants the
+// cookie). Same-origin rules for writes still apply on top.
+func (s *Server) authorized(w http.ResponseWriter, r *http.Request, tok string) bool {
+	ok := false
+	if c, err := r.Cookie("qswitch_auth"); err == nil {
+		ok = subtle.ConstantTimeCompare([]byte(c.Value), []byte(tok)) == 1
+	}
+	if !ok {
+		if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
+			ok = subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(h, "Bearer ")), []byte(tok)) == 1
+		}
+	}
+	if !ok {
+		if q := r.URL.Query().Get("token"); q != "" && subtle.ConstantTimeCompare([]byte(q), []byte(tok)) == 1 {
+			ok = true
+			if r.Method == http.MethodGet && r.URL.Path == "/" {
+				http.SetCookie(w, &http.Cookie{
+					Name:     "qswitch_auth",
+					Value:    tok,
+					Path:     "/",
+					HttpOnly: true,
+					SameSite: http.SameSiteLaxMode,
+				})
+			}
+		}
+	}
+	if !ok {
+		w.Header().Set("Cache-Control", "no-store")
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return false
+	}
+	if o := r.Header.Get("Origin"); o != "" && !validOrigin(r, o) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return false
+	}
+	return true
+}
+
 func (s *Server) Run(ctx context.Context) error {
 	if err := CheckLoopback(s.Addr); err != nil {
-		return err
+		if s.token() == "" {
+			return fmt.Errorf("%w (set [web] token in config to bind a public address)", err)
+		}
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -154,17 +208,21 @@ func localRequest(r *http.Request) bool {
 		return false
 	}
 	if o := r.Header.Get("Origin"); o != "" {
-		u, err := url.Parse(o)
-		if err != nil || u.User != nil || u.Path != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
-			return false
-		}
-		scheme := "http"
-		if r.TLS != nil {
-			scheme = "https"
-		}
-		return u.Scheme == scheme && strings.EqualFold(u.Host, r.Host)
+		return validOrigin(r, o)
 	}
 	return true
+}
+
+func validOrigin(r *http.Request, o string) bool {
+	u, err := url.Parse(o)
+	if err != nil || u.User != nil || u.Path != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return false
+	}
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	return u.Scheme == scheme && strings.EqualFold(u.Host, r.Host)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

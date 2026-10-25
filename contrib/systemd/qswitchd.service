@@ -1,0 +1,16 @@
+[Unit]
+Description=qswitch multi-account quota rotator
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=%h/.local/bin/qswitchd
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=read-write
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

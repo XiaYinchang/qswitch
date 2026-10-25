@@ -251,7 +251,7 @@ function usedColor(used) {
 }
 function usedText(used, tool) {
   if (used == null) return "用量未知";
-  return `已用 ${["grok", "kimi", "zcode"].includes(tool) ? Math.floor(used) : used.toFixed(0)}%`;
+  return `已用 ${["grok", "kimi", "zcode", "claude"].includes(tool) ? Math.floor(used) : used.toFixed(0)}%`;
 }
 function barStyle(used) {
   if (used == null) return "";
@@ -280,6 +280,9 @@ function bucketLabel(id) {
   if (id === "monthly_code") return "月度编程";
   if (id === "mcp") return "月度 MCP";
   if (id === "5h") return "5小时";
+  if (id === "weekly_sonnet") return "Sonnet 周额度";
+  if (id === "weekly_opus") return "Opus 周额度";
+  if (id === "extra_usage") return "额外用量";
   if (id === "1d") return "日额度";
   return id;
 }
@@ -300,6 +303,7 @@ function toolTitle(t) {
   if (t === "devin") return "Devin CLI";
   if (t === "zcode") return "ZCode 订阅";
   if (t === "kimi") return "Kimi Code";
+  if (t === "claude") return "Claude Code";
   return t;
 }
 function attr(s) {
@@ -441,12 +445,13 @@ async function onClick(e) {
         cursor: "切换到这个账号？会关掉并重启 Cursor.app；空闲的 cursor-agent 也会结束。只改登录字段，不碰聊天记录。",
         devin: "切换 Devin CLI 到这个账号？空闲 CLI 会结束，新进程使用新账号。Devin.app 使用独立登录。",
         kimi: "切换 Kimi Code 到这个账号？请先结束正在运行的 Kimi 会话，新进程将使用新账号。",
+        claude: "切换 Claude Code 到这个账号？请先结束正在运行的 Claude 会话，新进程将使用新账号。",
       }[tool] || "切换到这个账号？空闲的 CLI 会先结束。";
       if (!confirm(prompt)) return;
       b.disabled = true;
       await api("/api/switch", { method: "POST", body: JSON.stringify({ tool, id, kill_cli: true }) });
       await load();
-      msg(["kimi", "devin"].includes(tool) ? "已切换。新的 CLI 进程将使用新账号。" : "已切换。对应的 App 会用新号打开。");
+      msg(["kimi", "devin", "claude"].includes(tool) ? "已切换。新的 CLI 进程将使用新账号。" : "已切换。对应的 App 会用新号打开。");
     } else if (act === "login-codex" || act === "login-grok") {
       await startLogin(act === "login-grok" ? "grok" : "codex");
     }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"qswitch/internal/adapter"
+	"qswitch/internal/adapter/claude"
 	"qswitch/internal/adapter/codex"
 	"qswitch/internal/adapter/cursoradp"
 	"qswitch/internal/adapter/devin"
@@ -89,8 +91,10 @@ func Open(userHome, dataDir string, keys secutil.KeyProvider, bins []string, n n
 	if keys == nil {
 		if secutil.InTest() {
 			keys = &secutil.Memory{}
-		} else {
+		} else if runtime.GOOS == "darwin" {
 			keys = secutil.Darwin{}
+		} else {
+			keys = secutil.File{Path: filepath.Join(dataDir, "wrap.key")}
 		}
 	}
 	if n == nil {
@@ -121,6 +125,7 @@ func Open(userHome, dataDir string, keys secutil.KeyProvider, bins []string, n n
 		adapter.Devin:  devin.Adapter{List: list},
 		adapter.Kimi:   kimi.Adapter{List: list},
 		adapter.ZCode:  zcode.Adapter{},
+		adapter.Claude: claude.Adapter{List: list},
 	}
 	return a, nil
 }
@@ -147,6 +152,10 @@ func (a *App) Init() error {
 	}
 	if _, err := a.Vault.Keys.GetOrCreate(a.Bins); err != nil {
 		return err
+	}
+	if runtime.GOOS != "darwin" {
+		// launchd is macOS-only; Linux deployments use systemd (contrib/systemd).
+		return nil
 	}
 	bin := filepath.Join(paths.DefaultBinDir(a.UserHome), paths.DefaultBin)
 	for _, b := range a.Bins {
@@ -202,6 +211,9 @@ func (a *App) captureBlobs(tool adapter.Tool) ([]adapter.Blob, []adapter.Warning
 	}
 	if tool == adapter.Kimi {
 		return a.enrichKimiCapture(blobs, warn)
+	}
+	if tool == adapter.Claude {
+		return a.enrichClaudeCapture(blobs, warn)
 	}
 	if tool == adapter.Devin {
 		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
@@ -478,18 +490,20 @@ func (a *App) switchLocked(tool adapter.Tool, ref string, opts adapter.RestoreOp
 	}
 
 	blobs, _, captureErr := a.captureBlobs(tool)
-	if tool == adapter.Kimi && captureErr != nil && !errors.Is(captureErr, os.ErrNotExist) {
-		return fmt.Errorf("save current Kimi account before switch: %w", captureErr)
+	// Claude Code and Kimi rotate refresh tokens; losing the current account's
+	// latest credentials would strand it.
+	if (tool == adapter.Kimi || tool == adapter.Claude) && captureErr != nil && !errors.Is(captureErr, os.ErrNotExist) {
+		return fmt.Errorf("save current %s account before switch: %w", tool, captureErr)
 	}
 	if captureErr == nil {
 		for _, b := range blobs {
 			if err := a.saveBlob(b); err != nil {
 				return fmt.Errorf("save current account before switch: %w", err)
 			}
-			// The official Kimi CLI rotates refresh tokens. Switching to the
-			// current account must use the credentials just captured, not the
-			// older target snapshot loaded before that capture.
-			if tool == adapter.Kimi && b.Identity.StableID == blob.Identity.StableID {
+			// Claude Code and the official Kimi CLI rotate refresh tokens.
+			// Switching to the current account must use the credentials just
+			// captured, not the older target snapshot loaded before that capture.
+			if (tool == adapter.Kimi || tool == adapter.Claude) && b.Identity.StableID == blob.Identity.StableID {
 				blob = b
 			}
 		}
@@ -749,7 +763,7 @@ func (a *App) rememberFP(tool adapter.Tool) {
 }
 
 func (a *App) Ingest(tool adapter.Tool) error {
-	if tool == adapter.Kimi || tool == adapter.Devin {
+	if tool == adapter.Kimi || tool == adapter.Devin || tool == adapter.Claude {
 		a.fpMu.Lock()
 		deferAt := a.captureRetryAt[tool]
 		a.fpMu.Unlock()
@@ -780,7 +794,7 @@ func (a *App) Ingest(tool adapter.Tool) error {
 	}
 	defer lock.Close()
 	blobs, _, err := a.captureBlobs(tool)
-	if tool == adapter.Kimi || tool == adapter.Devin {
+	if tool == adapter.Kimi || tool == adapter.Devin || tool == adapter.Claude {
 		a.fpMu.Lock()
 		if a.captureRetryAt == nil {
 			a.captureRetryAt = make(map[adapter.Tool]time.Time)
@@ -1122,6 +1136,8 @@ func (a *App) KeepAlive(ctx context.Context, tool adapter.Tool) {
 		a.keepAliveGrokAccounts(ctx)
 	case adapter.Kimi:
 		a.keepAliveKimiAccounts(ctx)
+	case adapter.Claude:
+		a.keepAliveClaudeAccounts(ctx)
 	}
 }
 
@@ -1537,6 +1553,22 @@ func (a *App) probeAccountLocked(ctx context.Context, tool adapter.Tool, id stri
 				cancel()
 			}
 		}
+	case adapter.Claude:
+		forced := acc.LastQuotaClass == string(quota.Expired)
+		nb, tok, kerr := a.keepAliveClaudeLocked(ctx, blob, forced, !gateInterval)
+		if kerr != nil {
+			return a.refreshFailureResult(tool, id)
+		}
+		res, _ = a.HTTP.Claude(ctx, tok)
+		if res.Class == quota.Expired && !forced {
+			_, next, err := a.keepAliveClaudeLocked(ctx, nb, true, !gateInterval)
+			if err != nil {
+				return a.refreshFailureResult(tool, id)
+			}
+			if next != "" && next != tok {
+				res, _ = a.HTTP.Claude(ctx, next)
+			}
+		}
 	case adapter.ZCode:
 		c, err := zcode.CredsFromBlob(blob)
 		if err != nil {
@@ -1587,7 +1619,7 @@ func (a *App) probeAccountLocked(ctx context.Context, tool adapter.Tool, id stri
 		_ = a.State.SetRefreshBackoff(string(tool), id, backoff)
 	}
 	_ = a.State.UpdateQuota(string(tool), id, string(res.Class), res.UsedPct, res.ResetsAt, now.Unix(), now.Unix(), backoff)
-	if (tool == adapter.Grok || tool == adapter.Devin || tool == adapter.Kimi || tool == adapter.ZCode) && (res.Class == quota.OK || res.Class == quota.Soft || res.Class == quota.Exhausted) {
+	if (tool == adapter.Grok || tool == adapter.Devin || tool == adapter.Kimi || tool == adapter.ZCode || tool == adapter.Claude) && (res.Class == quota.OK || res.Class == quota.Soft || res.Class == quota.Exhausted) {
 		// These providers return complete snapshots; remove obsolete windows after plan changes.
 		_ = a.State.SetQuotaDetail(string(tool), id, quota.EncodeBuckets(res.Buckets))
 	} else if len(res.Buckets) > 0 {

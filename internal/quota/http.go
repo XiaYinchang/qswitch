@@ -26,6 +26,8 @@ var allowHosts = map[string]bool{
 	"www.kimi.ai":             true,
 	"bigmodel.cn":             true,
 	"api.z.ai":                true,
+	"api.anthropic.com":       true,
+	"platform.claude.com":     true,
 }
 
 type HTTP struct {

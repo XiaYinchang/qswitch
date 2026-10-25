@@ -290,7 +290,7 @@ func usage() {
   qswitch login grok           # Device Code 加号，不登出当前 Grok 会话
   qswitch list [--tool ...]
   qswitch status
-  qswitch probe [--tool codex|grok|cursor|devin|zcode|kimi]
+  qswitch probe [--tool codex|grok|cursor|devin|zcode|kimi|claude]
   qswitch switch <tool> <id|account> [--force-align] [--allow-stale-cli] [--kill-cli]
   qswitch apply [--tool ...] [--kill-cli]
   qswitch enable-auto [--tool ...]
