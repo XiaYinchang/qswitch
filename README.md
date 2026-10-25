@@ -24,7 +24,9 @@
 
 - **ZCode**：读取桌面客户端 `~/.zcode/v2/credentials.json` 中当前 BigModel / Z.ai 个人 Coding Plan，支持官方加密格式。使用官方 `/api/monitor/usage/quota/limit`，显示套餐、5 小时/周模型额度及月度 MCP 额度。MCP 用尽不误判模型额度耗尽；切换套餐后删除旧窗口。当前仅监控订阅，账号在 ZCode 中切换；不修改独立的 ZCode CLI 配置。
 - **Kimi Code**：读取 `~/.kimi-code/credentials/kimi-code.json`（支持 `KIMI_CODE_HOME`），用 `/coding/v1/me` 确认账号身份，优先显示接口返回的手机号，缺省时显示昵称或账号 ID；用 `/coding/v1/usages` 展示 5 小时、7 天、月度总额度及编程分项；`usages` 缺少某窗口时从响应的 `limits` 数组按窗口时长补齐（含月度窗口）。月度总额度另从桌面版 Kimi.app 订阅页同款的会员网关读取：只读复用桌面 App localStorage 里的网页会话（要求会话属于同一账号且未过期），不刷新、不轮换桌面登录，桌面 App 未运行或会话过期时自动跳过。编程分项不作为独立耗尽门限。切号只原子替换凭据文件，保留 config/hooks；有 Kimi 会话运行时阻断切换。闲置账号按官方 OAuth 协议续期写入加密仓库；当前 CLI 运行时由官方客户端续期，退出后由 qswitch 持有官方 OAuth 目录锁续期，并同时更新登录文件和加密仓库。续期门限跟随官方客户端，至少预留 5 分钟。身份无法确认时不收录、不抢用 refresh token。
-- **Claude Code**：管理 `~/.claude/.credentials.json` 中的官方 OAuth 登录（Linux/macOS 文件布局，支持 `CLAUDE_CONFIG_DIR`；macOS Keychain 存储暂不支持）。收录前用官方 `/api/oauth/profile` 确认账号 uuid、邮箱和套餐（Pro/Max/Team），确认失败不收录。用量走官方状态栏同款 `GET /api/oauth/usage`：5 小时与 7 天窗口决定是否耗尽（达到 100% 才切号），Sonnet/Opus 专项周额度和按量付费余额只展示、不作为切换门限。切号原子替换凭据文件并同步 `~/.claude.json` 的 oauthAccount 显示信息；有 Claude 会话运行时阻断切换。refresh token 一次性轮换：闲置账号续期只写加密仓库；当前账号在 CLI 退出后由 qswitch 复核文件内容续期，同时写回登录文件和仓库。加号请在机器上正常 `claude` 登录，qswitchd 会自动收录，或手动 `qswitch capture --tool claude`。
+- **Claude Code**：管理 `~/.claude/.credentials.json` 中的官方 OAuth 登录（Linux/macOS 文件布局，支持 `CLAUDE_CONFIG_DIR`；macOS Keychain 存储暂不支持）。收录前用官方 `/api/oauth/profile` 确认账号 uuid、邮箱和套餐（Pro/Max/Team），确认失败不收录。用量走官方状态栏同款 `GET /api/oauth/usage`：5 小时与 7 天窗口决定是否耗尽（达到 100% 才切号），Sonnet/Opus 专项周额度和按量付费余额只展示、不作为切换门限。切号原子替换凭据文件并同步 `~/.claude.json` 的 oauthAccount 显示信息；有 Claude 会话运行时阻断切换。refresh token 一次性轮换：闲置账号续期只写加密仓库；当前账号在 CLI 退出后由 qswitch 复核文件内容续期，同时写回登录文件和仓库。
+
+  **加号**：`qswitch login claude` 用隔离的 `CLAUDE_CONFIG_DIR` 启动官方 CLI，浏览器授权后凭据直接收录进仓库，**当前登录的账号不会被登出或覆盖**。不要在 CLI 里跑 `claude auth logout`——那会撤销已收录账号的 refresh token。
 - **Devin CLI**：按官方 `billingStrategy` 识别订阅额度，Max 仅显示周额度；总体重置时间跟随实际限制窗口。CLI 与 Devin.app 使用独立凭据，CLI 切号不关闭或改写 Devin.app。
 
 首次收录 Kimi 需要先在官方客户端登录；未安装或未登录时保持空状态。
