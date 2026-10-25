@@ -32,7 +32,22 @@ func (a *App) enrichClaudeCapture(blobs []adapter.Blob, warnings []adapter.Warni
 		}
 		raw, status, err := a.HTTP.ClaudeProfile(ctx, c.AccessToken)
 		if err != nil || status != 200 {
-			return nil, warnings, errors.New("claude: unable to verify account identity; sign in with Claude Code and retry")
+			// Access tokens live ~hours; the one on disk is often stale while the
+			// refresh token (weeks) is still good. Renew instead of rejecting an
+			// otherwise valid login.
+			nb, _, kerr := a.keepAliveClaudeLocked(ctx, b, true, true)
+			if kerr != nil {
+				return nil, warnings, errors.New("claude: unable to verify account identity; sign in with Claude Code and retry")
+			}
+			c, err = claude.CredsFromBlob(nb)
+			if err != nil {
+				return nil, warnings, err
+			}
+			raw, status, err = a.HTTP.ClaudeProfile(ctx, c.AccessToken)
+			if err != nil || status != 200 {
+				return nil, warnings, errors.New("claude: unable to verify account identity; sign in with Claude Code and retry")
+			}
+			b = nb
 		}
 		uuid, _, _, _ := quota.ClaudeIdentity(raw)
 		if uuid == "" {

@@ -9,7 +9,6 @@ Restart=on-failure
 RestartSec=5s
 NoNewPrivileges=true
 ProtectSystem=full
-ProtectHome=read-write
 PrivateTmp=true
 
 [Install]
