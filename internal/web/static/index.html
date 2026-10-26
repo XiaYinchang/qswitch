@@ -100,6 +100,11 @@
   }
   .card.live { border-color: #3d4c7a; }
   .card.desktop { opacity: 0.78; }
+  section.collapsed .sec-body { display: none; }
+  section.collapsed .sec-head { margin-bottom: 0; }
+  section.collapsed .toggle::before { content: "▸ "; }
+  .toggle::before { content: "▾ "; }
+  .toggle { cursor: pointer; user-select: none; }
   .who {
     display: flex;
     justify-content: space-between;
@@ -358,10 +363,14 @@ function render(ov) {
     if (tool.desync) flags.push("桌面/CLI 不一致");
     if (tool.tool === "grokbot") flags.push("随 Cursor 账号");
     if (tool.tool === "zcode") flags.push("桌面订阅 · 在 ZCode 中切换账号");
-    sec.innerHTML = `<div class="sec-head">
-      <h2>${toolTitle(tool.tool)} <span class="meta">${flags.join(" · ") || "空闲"}</span></h2>
-      <div class="actions">${toolActions(tool)}</div>
-    </div>`;
+    const head = document.createElement("div");
+    head.className = "sec-head";
+    head.innerHTML = `<h2 class="toggle" data-toggle="${attr(tool.tool)}">${toolTitle(tool.tool)} <span class="meta">${flags.join(" · ") || "空闲"}</span></h2>
+      <div class="actions">${toolActions(tool)}</div>`;
+    sec.appendChild(head);
+    const body = document.createElement("div");
+    body.className = "sec-body";
+    sec.appendChild(body);
     (tool.accounts || []).forEach(ac => {
       const used = ["unknown", "expired"].includes(ac.class) ? null : clampPct(ac.used_pct);
       const card = document.createElement("div");
@@ -390,13 +399,14 @@ function render(ov) {
           : `<div class="bar${used == null ? " empty" : ""}"><i style="${barStyle(used)}"></i></div>
         <div class="stats"><span>${whenText(ac)}</span><span class="rem">${usedText(used, ac.tool)}</span></div>`}
         ${quotaNote(ac) ? `<p class="quota-note">${attr(quotaNote(ac))}</p>` : ""}`;
-      sec.appendChild(card);
+      body.appendChild(card);
     });
     if (!(tool.accounts || []).length) {
       const p = document.createElement("p");
       p.className = "empty";
       p.textContent = "还没有收录账号。先在官方客户端登录，再点「收录」。";
-      sec.appendChild(p);
+      body.appendChild(p);
+      sec.classList.add("collapsed");
     }
     root.appendChild(sec);
   });
@@ -408,7 +418,14 @@ async function load() {
   } catch (e) { msg(e.message, true); }
 }
 async function onClick(e) {
-  const b = e.target.closest("button");
+  const t = e.target;
+  if (t && t.dataset && t.dataset.toggle) {
+    let sec = t;
+    while (sec && sec.tagName !== "SECTION") sec = sec.parentNode;
+    if (sec) sec.classList.toggle("collapsed");
+    return;
+  }
+  const b = t && t.closest ? t.closest("button") : null;
   if (!b || !b.dataset.act) return;
   const act = b.dataset.act, tool = b.dataset.tool, id = b.dataset.id;
   try {
