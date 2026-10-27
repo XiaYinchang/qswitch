@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"qswitch/internal/adapter"
@@ -139,9 +141,9 @@ func run(args []string) int {
 		return setAuto(a, rest, false)
 	case "login":
 		if len(rest) < 1 {
-			fmt.Fprintln(os.Stderr, "usage: qswitch login codex|grok")
-			fmt.Fprintln(os.Stderr, "  走本机官方 Device Code，不登出当前会话。")
-			fmt.Fprintln(os.Stderr, "  claude: 直接运行官方 claude CLI 登录，qswitchd 会自动收录。")
+			fmt.Fprintln(os.Stderr, "usage: qswitch login codex|grok|claude")
+			fmt.Fprintln(os.Stderr, "  codex/grok: 走官方 Device Code，不登出当前会话。")
+			fmt.Fprintln(os.Stderr, "  claude: 当前终端完成官方 OAuth，隔离登录并自动收录。")
 			return 2
 		}
 		t, err := adapter.ParseTool(rest[0])
@@ -166,15 +168,20 @@ func run(args []string) int {
 			id, lerr = a.LoginGrok(ctx, func(code, url string) {
 				fmt.Printf("\nTo sign in, open this URL in your browser:\n   %s\n\nThen enter this code:\n   %s\n\nContinue only if you started this login in qswitch. If a website or another person gave you this code, cancel.\n", url, code)
 			})
+		case adapter.Claude:
+			loginCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+			defer stop()
+			id, lerr = a.LoginClaude(loginCtx, func(msg string) {
+				fmt.Printf("\n%s\n", msg)
+			})
 		default:
-			fmt.Fprintln(os.Stderr, "only `qswitch login codex` and `qswitch login grok` are implemented")
-			fmt.Fprintln(os.Stderr, "claude: 直接运行官方 claude CLI 登录，qswitchd 会自动收录。")
+			fmt.Fprintln(os.Stderr, "only `qswitch login codex`, `qswitch login grok`, and `qswitch login claude` are implemented")
 			return 2
 		}
 		if lerr != nil {
 			return fail(lerr)
 		}
-		fmt.Printf("enrolled %s %s %s (live auth.json untouched)\n", t, id.Email, id.StableID)
+		fmt.Printf("enrolled %s %s %s (current login unchanged)\n", t, id.Email, id.StableID)
 		return 0
 	case "forget":
 		if len(rest) < 2 {
@@ -290,7 +297,7 @@ func usage() {
   qswitch capture [--tool codex|grok|cursor]
   qswitch login codex          # Device Code 加号，不登出当前 ChatGPT 会话
   qswitch login grok           # Device Code 加号，不登出当前 Grok 会话
-  # claude: 直接运行 claude CLI 登录，qswitchd 自动收录（见 README）
+  qswitch login claude         # 当前终端授权并自动收录，不改变当前登录
   qswitch list [--tool ...]
   qswitch status
   qswitch probe [--tool codex|grok|cursor|devin|zcode|kimi|claude]
