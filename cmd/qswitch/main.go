@@ -139,9 +139,9 @@ func run(args []string) int {
 		return setAuto(a, rest, false)
 	case "login":
 		if len(rest) < 1 {
-			fmt.Fprintln(os.Stderr, "usage: qswitch login codex|grok|claude")
-			fmt.Fprintln(os.Stderr, "  codex/grok: 走官方 Device Code，不登出当前会话。")
-			fmt.Fprintln(os.Stderr, "  claude: 隔离目录启动官方 CLI，不登出当前会话。")
+			fmt.Fprintln(os.Stderr, "usage: qswitch login codex|grok")
+			fmt.Fprintln(os.Stderr, "  走本机官方 Device Code，不登出当前会话。")
+			fmt.Fprintln(os.Stderr, "  claude: 直接运行官方 claude CLI 登录，qswitchd 会自动收录。")
 			return 2
 		}
 		t, err := adapter.ParseTool(rest[0])
@@ -166,13 +166,9 @@ func run(args []string) int {
 			id, lerr = a.LoginGrok(ctx, func(code, url string) {
 				fmt.Printf("\nTo sign in, open this URL in your browser:\n   %s\n\nThen enter this code:\n   %s\n\nContinue only if you started this login in qswitch. If a website or another person gave you this code, cancel.\n", url, code)
 			})
-		case adapter.Claude:
-			fmt.Fprintln(os.Stderr, "加号使用隔离配置目录启动官方 claude CLI。当前登录不会被登出或覆盖。")
-			id, lerr = a.LoginClaude(ctx, func(msg string) {
-				fmt.Printf("\n%s\n", msg)
-			})
 		default:
-			fmt.Fprintln(os.Stderr, "only `qswitch login codex`, `qswitch login grok`, and `qswitch login claude` are implemented")
+			fmt.Fprintln(os.Stderr, "only `qswitch login codex` and `qswitch login grok` are implemented")
+			fmt.Fprintln(os.Stderr, "claude: 直接运行官方 claude CLI 登录，qswitchd 会自动收录。")
 			return 2
 		}
 		if lerr != nil {
@@ -294,7 +290,7 @@ func usage() {
   qswitch capture [--tool codex|grok|cursor]
   qswitch login codex          # Device Code 加号，不登出当前 ChatGPT 会话
   qswitch login grok           # Device Code 加号，不登出当前 Grok 会话
-  qswitch login claude         # 隔离目录启动官方 CLI 加号，不登出当前会话
+  # claude: 直接运行 claude CLI 登录，qswitchd 自动收录（见 README）
   qswitch list [--tool ...]
   qswitch status
   qswitch probe [--tool codex|grok|cursor|devin|zcode|kimi|claude]
