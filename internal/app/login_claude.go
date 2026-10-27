@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -42,6 +43,9 @@ func findClaudeBin() string {
 // dir is removed. The live ~/.claude/.credentials.json is never read
 // or written by this flow.
 func (a *App) LoginClaude(ctx context.Context, announce func(instructions string)) (adapter.Identity, error) {
+	if runtime.GOOS == "darwin" {
+		return adapter.Identity{}, errors.New("claude: macOS 凭据存系统 Keychain，隔离目录无法捕获。请先在官方 claude CLI 登录，再运行 qswitch capture --tool claude")
+	}
 	bin := findClaudeBin()
 	if bin == "" {
 		return adapter.Identity{}, errors.New("claude: CLI not found in PATH")
@@ -76,7 +80,7 @@ func (a *App) LoginClaude(ctx context.Context, announce func(instructions string
 	credPath := filepath.Join(dir, ".credentials.json")
 	raw, err := os.ReadFile(credPath)
 	if err != nil {
-		return adapter.Identity{}, fmt.Errorf("claude login produced no credentials: %w", err)
+		return adapter.Identity{}, fmt.Errorf("claude login produced no credentials (授权未完成或已取消): %w", err)
 	}
 	if _, err := claude.ParseCreds(raw); err != nil {
 		return adapter.Identity{}, err
