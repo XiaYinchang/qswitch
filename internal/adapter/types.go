@@ -16,6 +16,7 @@ const (
 	Devin  Tool = "devin"
 	ZCode  Tool = "zcode"
 	Kimi   Tool = "kimi"
+	Claude Tool = "claude"
 )
 
 func ParseTool(s string) (Tool, error) {
@@ -32,12 +33,14 @@ func ParseTool(s string) (Tool, error) {
 		return ZCode, nil
 	case "kimi":
 		return Kimi, nil
+	case "claude":
+		return Claude, nil
 	default:
 		return "", fmt.Errorf("unknown tool %q", s)
 	}
 }
 
-func AllTools() []Tool { return []Tool{Codex, Grok, Cursor, Devin, ZCode, Kimi} }
+func AllTools() []Tool { return []Tool{Codex, Grok, Cursor, Devin, ZCode, Kimi, Claude} }
 
 type Identity struct {
 	Tool        Tool   `json:"tool"`

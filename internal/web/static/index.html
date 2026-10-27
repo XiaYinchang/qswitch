@@ -100,6 +100,11 @@
   }
   .card.live { border-color: #3d4c7a; }
   .card.desktop { opacity: 0.78; }
+  section.collapsed .sec-body { display: none; }
+  section.collapsed .sec-head { margin-bottom: 0; }
+  section.collapsed .toggle::before { content: "▸ "; }
+  .toggle::before { content: "▾ "; }
+  .toggle { cursor: pointer; user-select: none; }
   .who {
     display: flex;
     justify-content: space-between;
@@ -251,7 +256,7 @@ function usedColor(used) {
 }
 function usedText(used, tool) {
   if (used == null) return "用量未知";
-  return `已用 ${["grok", "kimi", "zcode"].includes(tool) ? Math.floor(used) : used.toFixed(0)}%`;
+  return `已用 ${["grok", "kimi", "zcode", "claude"].includes(tool) ? Math.floor(used) : used.toFixed(0)}%`;
 }
 function barStyle(used) {
   if (used == null) return "";
@@ -280,6 +285,9 @@ function bucketLabel(id) {
   if (id === "monthly_code") return "月度编程";
   if (id === "mcp") return "月度 MCP";
   if (id === "5h") return "5小时";
+  if (id === "weekly_sonnet") return "Sonnet 周额度";
+  if (id === "weekly_opus") return "Opus 周额度";
+  if (id === "extra_usage") return "额外用量";
   if (id === "1d") return "日额度";
   return id;
 }
@@ -300,6 +308,7 @@ function toolTitle(t) {
   if (t === "devin") return "Devin CLI";
   if (t === "zcode") return "ZCode 订阅";
   if (t === "kimi") return "Kimi Code";
+  if (t === "claude") return "Claude Code";
   return t;
 }
 function attr(s) {
@@ -342,7 +351,13 @@ function cardActions(ac, switchable) {
 function render(ov) {
   const root = $("root");
   root.innerHTML = "";
-  (ov.tools || []).forEach(tool => {
+  const tools = (ov.tools || []).slice().sort((a, b) => {
+    const na = (a.accounts || []).length, nb = (b.accounts || []).length;
+    if (na > 0 && nb === 0) return -1;
+    if (na === 0 && nb > 0) return 1;
+    return 0;
+  });
+  tools.forEach(tool => {
     const sec = document.createElement("section");
     const flags = [];
     if (tool.auto) flags.push("自动切换开");
@@ -354,10 +369,14 @@ function render(ov) {
     if (tool.desync) flags.push("桌面/CLI 不一致");
     if (tool.tool === "grokbot") flags.push("随 Cursor 账号");
     if (tool.tool === "zcode") flags.push("桌面订阅 · 在 ZCode 中切换账号");
-    sec.innerHTML = `<div class="sec-head">
-      <h2>${toolTitle(tool.tool)} <span class="meta">${flags.join(" · ") || "空闲"}</span></h2>
-      <div class="actions">${toolActions(tool)}</div>
-    </div>`;
+    const head = document.createElement("div");
+    head.className = "sec-head";
+    head.innerHTML = `<h2 class="toggle" data-toggle="${attr(tool.tool)}">${toolTitle(tool.tool)} <span class="meta">${flags.join(" · ") || "空闲"}</span></h2>
+      <div class="actions">${toolActions(tool)}</div>`;
+    sec.appendChild(head);
+    const body = document.createElement("div");
+    body.className = "sec-body";
+    sec.appendChild(body);
     (tool.accounts || []).forEach(ac => {
       const used = ["unknown", "expired"].includes(ac.class) ? null : clampPct(ac.used_pct);
       const card = document.createElement("div");
@@ -386,13 +405,14 @@ function render(ov) {
           : `<div class="bar${used == null ? " empty" : ""}"><i style="${barStyle(used)}"></i></div>
         <div class="stats"><span>${whenText(ac)}</span><span class="rem">${usedText(used, ac.tool)}</span></div>`}
         ${quotaNote(ac) ? `<p class="quota-note">${attr(quotaNote(ac))}</p>` : ""}`;
-      sec.appendChild(card);
+      body.appendChild(card);
     });
     if (!(tool.accounts || []).length) {
       const p = document.createElement("p");
       p.className = "empty";
       p.textContent = "还没有收录账号。先在官方客户端登录，再点「收录」。";
-      sec.appendChild(p);
+      body.appendChild(p);
+      sec.classList.add("collapsed");
     }
     root.appendChild(sec);
   });
@@ -404,7 +424,14 @@ async function load() {
   } catch (e) { msg(e.message, true); }
 }
 async function onClick(e) {
-  const b = e.target.closest("button");
+  const t = e.target;
+  if (t && t.dataset && t.dataset.toggle) {
+    let sec = t;
+    while (sec && sec.tagName !== "SECTION") sec = sec.parentNode;
+    if (sec) sec.classList.toggle("collapsed");
+    return;
+  }
+  const b = t && t.closest ? t.closest("button") : null;
   if (!b || !b.dataset.act) return;
   const act = b.dataset.act, tool = b.dataset.tool, id = b.dataset.id;
   try {
@@ -441,12 +468,13 @@ async function onClick(e) {
         cursor: "切换到这个账号？会关掉并重启 Cursor.app；空闲的 cursor-agent 也会结束。只改登录字段，不碰聊天记录。",
         devin: "切换 Devin CLI 到这个账号？空闲 CLI 会结束，新进程使用新账号。Devin.app 使用独立登录。",
         kimi: "切换 Kimi Code 到这个账号？请先结束正在运行的 Kimi 会话，新进程将使用新账号。",
+        claude: "切换 Claude Code 到这个账号？请先结束正在运行的 Claude 会话，新进程将使用新账号。",
       }[tool] || "切换到这个账号？空闲的 CLI 会先结束。";
       if (!confirm(prompt)) return;
       b.disabled = true;
       await api("/api/switch", { method: "POST", body: JSON.stringify({ tool, id, kill_cli: true }) });
       await load();
-      msg(["kimi", "devin"].includes(tool) ? "已切换。新的 CLI 进程将使用新账号。" : "已切换。对应的 App 会用新号打开。");
+      msg(["kimi", "devin", "claude"].includes(tool) ? "已切换。新的 CLI 进程将使用新账号。" : "已切换。对应的 App 会用新号打开。");
     } else if (act === "login-codex" || act === "login-grok") {
       await startLogin(act === "login-grok" ? "grok" : "codex");
     }

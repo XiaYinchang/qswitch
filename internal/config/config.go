@@ -38,6 +38,7 @@ type Config struct {
 	Devin   Tool    `toml:"devin"`
 	ZCode   Tool    `toml:"zcode"`
 	Kimi    Tool    `toml:"kimi"`
+	Claude  Tool    `toml:"claude"`
 	Web     Web     `toml:"web"`
 }
 
@@ -67,6 +68,9 @@ type Tool struct {
 type Web struct {
 	Enabled bool   `toml:"enabled"`
 	Addr    string `toml:"addr"`
+	// Token gates every request when the listener is not on loopback.
+	// Required for a public bind; ignored on loopback.
+	Token string `toml:"token"`
 }
 
 const DefaultWebAddr = "127.0.0.1:7432"
@@ -93,6 +97,7 @@ func Default() Config {
 		Devin:  Tool{Enabled: true},
 		ZCode:  Tool{Enabled: true},
 		Kimi:   Tool{Enabled: true},
+		Claude: Tool{Enabled: true},
 		Web:    Web{Enabled: true, Addr: DefaultWebAddr},
 	}
 }
@@ -184,6 +189,8 @@ func (c Config) ToolEnabled(name string) bool {
 		return c.ZCode.Enabled
 	case "kimi":
 		return c.Kimi.Enabled
+	case "claude":
+		return c.Claude.Enabled
 	default:
 		return false
 	}
@@ -203,6 +210,8 @@ func (c *Config) SetToolEnabled(name string, on bool) error {
 		c.ZCode.Enabled = on
 	case "kimi":
 		c.Kimi.Enabled = on
+	case "claude":
+		c.Claude.Enabled = on
 	case "", "all":
 		c.Codex.Enabled = on
 		c.Grok.Enabled = on
@@ -210,6 +219,7 @@ func (c *Config) SetToolEnabled(name string, on bool) error {
 		c.Devin.Enabled = on
 		c.ZCode.Enabled = on
 		c.Kimi.Enabled = on
+		c.Claude.Enabled = on
 	default:
 		return fmt.Errorf("unknown tool %q", name)
 	}

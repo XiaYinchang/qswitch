@@ -24,6 +24,13 @@
 
 - **ZCode**：读取桌面客户端 `~/.zcode/v2/credentials.json` 中当前 BigModel / Z.ai 个人 Coding Plan，支持官方加密格式。使用官方 `/api/monitor/usage/quota/limit`，显示套餐、5 小时/周模型额度及月度 MCP 额度。MCP 用尽不误判模型额度耗尽；切换套餐后删除旧窗口。当前仅监控订阅，账号在 ZCode 中切换；不修改独立的 ZCode CLI 配置。
 - **Kimi Code**：读取 `~/.kimi-code/credentials/kimi-code.json`（支持 `KIMI_CODE_HOME`），用 `/coding/v1/me` 确认账号身份，优先显示接口返回的手机号，缺省时显示昵称或账号 ID；用 `/coding/v1/usages` 展示 5 小时、7 天、月度总额度及编程分项；`usages` 缺少某窗口时从响应的 `limits` 数组按窗口时长补齐（含月度窗口）。月度总额度另从桌面版 Kimi.app 订阅页同款的会员网关读取：只读复用桌面 App localStorage 里的网页会话（要求会话属于同一账号且未过期），不刷新、不轮换桌面登录，桌面 App 未运行或会话过期时自动跳过。编程分项不作为独立耗尽门限。切号只原子替换凭据文件，保留 config/hooks；有 Kimi 会话运行时阻断切换。闲置账号按官方 OAuth 协议续期写入加密仓库；当前 CLI 运行时由官方客户端续期，退出后由 qswitch 持有官方 OAuth 目录锁续期，并同时更新登录文件和加密仓库。续期门限跟随官方客户端，至少预留 5 分钟。身份无法确认时不收录、不抢用 refresh token。
+- **Claude Code**：管理 `~/.claude/.credentials.json` 中的官方 OAuth 登录（Linux/macOS 文件布局，支持 `CLAUDE_CONFIG_DIR`；macOS Keychain 存储暂不支持）。收录前用官方 `/api/oauth/profile` 确认账号 uuid、邮箱和套餐（Pro/Max/Team），确认失败不收录。用量走官方状态栏同款 `GET /api/oauth/usage`：5 小时与 7 天窗口决定是否耗尽（达到 100% 才切号），Sonnet/Opus 专项周额度和按量付费余额只展示、不作为切换门限。切号原子替换凭据文件并同步 `~/.claude.json` 的 oauthAccount 显示信息；有 Claude 会话运行时阻断切换。refresh token 一次性轮换：闲置账号续期只写加密仓库；当前账号在 CLI 退出后由 qswitch 复核文件内容续期，同时写回登录文件和仓库。
+
+  **加号（Linux）**：在同一个终端运行一次 `qswitch login claude`。qswitch 自动创建私有临时目录，设置 `CLAUDE_CONFIG_DIR` 和 `CLAUDE_SECURESTORAGE_CONFIG_DIR`，运行官方 `claude auth login --claudeai`；打开授权链接并把完整 code 粘贴回当前终端、按回车即可。官方登录成功退出后，qswitch 校验账号身份、写入加密仓库并打印 `enrolled claude ...`，不需要另开终端或手动 `capture`。整个过程不清除、覆盖或登出当前登录，不改变当前账号指针，也不调用新账号的 refresh token。成功、失败、Ctrl+C 或超时退出后均清理临时目录；身份校验失败不报收录成功，需要重新执行登录。
+
+  **终端输入**：Claude Code 2.1.311 的 `auth login` 在 TTY 输入下会关闭回显，但其按行读取器不显示输入字符；这与普通 `claude` 登录 TUI 不同。qswitch 保留终端正常回显，通过系统 `cat` 子进程把输入送至官方登录程序的 stdin 管道，官方 OAuth、浏览器回调与换票流程保持由 Claude Code 执行。登录结束或取消时一并结束输入转发进程，不在后台等待用户敲回车。
+
+  **macOS 限制**：macOS 上凭据存系统 Keychain，qswitch 暂不支持直接管理。请在 Linux 服务器（如 novix）上运行 qswitch 管理 Claude 账号。
 - **Devin CLI**：按官方 `billingStrategy` 识别订阅额度，Max 仅显示周额度；总体重置时间跟随实际限制窗口。CLI 与 Devin.app 使用独立凭据，CLI 切号不关闭或改写 Devin.app。
 
 首次收录 Kimi 需要先在官方客户端登录；未安装或未登录时保持空状态。
@@ -38,7 +45,7 @@ Kimi 的网页、命令行列表与状态优先显示手机号，也可用该手
 |---|---|---|
 | 配置、状态库、加密 vault、锁 | `~/.qswitch/` | `QSWITCH_DIR` |
 | 加密账号快照 | `~/.qswitch/vault/<tool>/<id>.enc` | 随 `QSWITCH_DIR` |
-| 包装密钥 | macOS Keychain `qswitch.vault` / `wrap-key-v1` | — |
+| 包装密钥 | macOS Keychain `qswitch.vault` / `wrap-key-v1`；Linux 为 `~/.qswitch/wrap.key`（0600，权限不对会拒绝读取） | — |
 | 日志 | `~/Library/Logs/qswitch.log` | launchd plist |
 | 生成的 launchd | `~/.qswitch/com.qswitch.plist` | `qswitch init` |
 
@@ -58,9 +65,10 @@ qswitch version
 qswitch capture
 qswitch login codex
 qswitch login grok
+qswitch login claude                              # Linux，同终端授权并自动收录
 qswitch list
 qswitch status
-qswitch probe [--tool codex|grok|cursor|devin|zcode|kimi]
+qswitch probe [--tool codex|grok|cursor|devin|zcode|kimi|claude]
 qswitch switch codex <id-or-email>
 qswitch switch cursor <id-or-email>                # 会关掉并重启 Cursor.app
 qswitch doctor
@@ -71,6 +79,8 @@ qswitch serve [--addr 127.0.0.1:7432]
 
 `GET /api/health` 返回服务存活状态和构建版本；配额与账号状态以 `/api/overview` 为准。网页写入要求同源请求，命令行无 Origin 的本地请求仍可使用。
 
+公网暴露（仅服务器部署）：`[web] addr` 设为非 loopback 地址时必须同时设置 `[web] token`，否则拒绝启动。此时所有请求要求 token —— 打开 `http://<addr>/?token=<token>` 一次种下 HttpOnly Cookie，之后同浏览器直接访问；脚本可用 `Authorization: Bearer <token>`。Origin 同源校验在 token 之上仍然生效。明文 HTTP 意味着 token 会经过链路，公网环境建议套一层反向代理 TLS。
+
 Cursor 切号会同时写入 IDE 和 CLI 的登录字段。
 
 ```
@@ -79,3 +89,12 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.qswitch.plist
 ```
 
 launchd 样例见 `contrib/launchd/`（占位符，须用 `qswitch init` 生成带本机路径的 plist）。默认 `KeepAlive=false`，先确认 Keychain 无弹窗。
+
+Linux 服务器（如只跑 Claude Code 的 VPS）用 systemd，样例见 `contrib/systemd/`：
+
+```
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o bin/qswitchd-linux ./cmd/qswitchd
+sudo install -m 0755 bin/qswitchd-linux /usr/local/bin/qswitchd
+install -m 0644 contrib/systemd/qswitchd.service ~/.config/systemd/user/
+systemctl --user daemon-reload && systemctl --user enable --now qswitchd
+```

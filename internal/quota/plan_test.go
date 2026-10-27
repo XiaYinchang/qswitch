@@ -41,12 +41,12 @@ func TestFormatGrokPlan(t *testing.T) {
 
 func TestFormatDevinPlan(t *testing.T) {
 	cases := map[string]string{
-		"Pro":                 "Pro",
-		"Max":                 "Max",
+		"Pro":                  "Pro",
+		"Max":                  "Max",
 		"TEAMS_TIER_DEVIN_PRO": "Pro",
-		"free":                "Free",
-		"Teams":               "Teams",
-		"Enterprise":          "Enterprise",
+		"free":                 "Free",
+		"Teams":                "Teams",
+		"Enterprise":           "Enterprise",
 	}
 	for in, want := range cases {
 		if got := formatDevinPlan(in); got != want {
@@ -86,9 +86,9 @@ func TestMergePlanKeepsSpecific(t *testing.T) {
 
 func TestExtractPlanPriority(t *testing.T) {
 	v := map[string]any{
-		"config":                   map[string]any{"creditUsagePercent": 2},
+		"config":                    map[string]any{"creditUsagePercent": 2},
 		"subscription_tier_display": "SuperGrok Heavy",
-		"subscriptionTier":         "SuperGrokPro",
+		"subscriptionTier":          "SuperGrokPro",
 	}
 	if got := ExtractPlan(v); got != "SuperGrok Heavy" {
 		t.Fatalf("got %q", got)
