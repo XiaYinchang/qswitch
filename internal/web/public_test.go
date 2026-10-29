@@ -107,3 +107,19 @@ func TestPublicBindRequiresToken(t *testing.T) {
 		t.Fatalf("loopback run: %v", err)
 	}
 }
+
+// Moving a public deployment back to loopback must not leave a stale token
+// locking out the local CLI probe or an SSH-tunnelled browser.
+func TestLoopbackIgnoresLeftoverToken(t *testing.T) {
+	s := New(&app.App{Cfg: config.Config{Web: config.Web{Enabled: true, Addr: "127.0.0.1:7432", Token: "leftover"}}}, "127.0.0.1:7432")
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:7432/api/health", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("loopback with leftover token: status=%d want 200", w.Code)
+	}
+	w = httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "http://attacker.example:7432/api/health", nil))
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("loopback with foreign Host: status=%d want 403", w.Code)
+	}
+}

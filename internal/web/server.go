@@ -65,7 +65,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/login/grok/cancel", s.postLoginCancel)
 	mux.HandleFunc("GET /", s.static)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if tok := s.token(); tok != "" {
+		// Loopback listeners rely on the Host check below (DNS rebinding);
+		// the token gates public binds only.
+		if tok := s.token(); tok != "" && CheckLoopback(s.Addr) != nil {
 			if !s.authorized(w, r, tok) {
 				return
 			}
