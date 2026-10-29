@@ -290,3 +290,14 @@ test('a rate limit hit in the running process keeps Claude Code\'s own automatic
   await clock.advance(750);
   expect(submitted).toHaveLength(0);
 });
+
+test('every main-turn rate limit is counted, even when already interrupted', async ($, on) => {
+  setup(on, 'continue');
+  await start($);
+  expect((await status($)).limit_hits).toBe(0);
+  await $.turn.start({ turnId: 'again', text: 'continue' });
+  await $.classic.StopFailure({ error: 'rate_limit' });
+  await complete($, 'again', 'error');
+  await $.classic.StopFailure({ error: 'rate_limit', agent_id: 'child' });
+  expect(await status($)).toMatchObject({ limit_hits: 1, needs_continue: true });
+});

@@ -14,6 +14,9 @@ const CONTINUATION = 'Continue the work interrupted by the account usage limit f
   // own automatic continue was cancelled by that restart; a rate limit hit in
   // this process keeps the official automatic continue instead.
   let restartedInterrupted = false;
+  // Counts main-turn rate-limit failures so the runner can signal each one,
+  // even when needs_continue was already true from an earlier interruption.
+  let limitHits = 0;
   let unknown = '';
   let blockedSubmission = false;
   let revision = 0;
@@ -91,6 +94,7 @@ const CONTINUATION = 'Continue the work interrupted by the account usage limit f
       cwd,
       ready: !reason,
       needs_continue: needsContinue,
+      limit_hits: limitHits,
       reason,
     };
   }
@@ -333,6 +337,7 @@ export function register(on) {
     if (e.agent_id === undefined) {
       mainFailure = e.error;
       needsContinue = e.error === 'rate_limit';
+      if (e.error === 'rate_limit') limitHits += 1;
       restartedInterrupted = false;
       if (unknown === 'model error ended without a known StopFailure outcome') unknown = '';
     }

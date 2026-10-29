@@ -39,6 +39,7 @@ type sessionState struct {
 	CWD           string `json:"cwd"`
 	Ready         bool   `json:"ready"`
 	NeedsContinue bool   `json:"needs_continue"`
+	LimitHits     int    `json:"limit_hits"`
 	Reason        string `json:"reason"`
 	Generation    string `json:"generation,omitempty"`
 }
@@ -63,6 +64,7 @@ type runner struct {
 	committed        bool
 	stopping         bool
 	resumePending    bool
+	limitHits        int // plugin's count for the current child process
 	wake             chan struct{}
 	gate             func() error
 }
@@ -357,11 +359,13 @@ func (r *runner) handleState(w http.ResponseWriter, route string, state sessionS
 			return
 		}
 	}
-	if state.NeedsContinue && !before.NeedsContinue && state.SessionID != "" {
-		// The plugin sets NeedsContinue only on a main-turn rate_limit failure.
-		// Telling the daemon now spares a wait for its next scheduled probe.
+	if state.LimitHits > r.limitHits && state.SessionID != "" {
+		// Each main-turn rate_limit failure counts once, including one hit by a
+		// session that already started interrupted. Telling the daemon now
+		// spares a wait for its next scheduled probe.
 		_ = markLimitHit(r.options.DataDir)
 	}
+	r.limitHits = state.LimitHits
 	writeResponse(w, response)
 }
 
@@ -436,6 +440,7 @@ func (r *runner) startLocked(ctx context.Context, resume bool) (*exec.Cmd, error
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
+	r.limitHits = 0 // the new child's plugin counts from zero
 	r.status.ChildPID = cmd.Process.Pid
 	r.status.Exited = false
 	r.status.Ready = false

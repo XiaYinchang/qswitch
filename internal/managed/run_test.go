@@ -48,22 +48,30 @@ func stateFor(r *runner) sessionState {
 	return sessionState{SessionID: r.status.SessionID, CWD: r.status.CWD, Ready: true, NeedsContinue: r.status.NeedsContinue, Generation: r.status.Generation}
 }
 
-func TestRateLimitTransitionSignalsDaemonOnce(t *testing.T) {
+func TestEachRateLimitHitSignalsDaemonOnce(t *testing.T) {
 	r := testRunner(t)
 	r.options.DataDir = t.TempDir()
+	// A session restarted while interrupted already carries needs_continue.
 	state := stateFor(r)
-	callRunner(t, r, "/state", state)
-	if TakeLimitHit(r.options.DataDir) {
-		t.Fatal("heartbeat without a rate limit signalled the daemon")
-	}
 	state.NeedsContinue = true
 	callRunner(t, r, "/state", state)
+	if TakeLimitHit(r.options.DataDir) {
+		t.Fatal("inherited interruption signalled a new rate limit")
+	}
+	// It hits the limit again; needs_continue does not change, the count does.
+	state.LimitHits = 1
+	callRunner(t, r, "/state", state)
 	if !TakeLimitHit(r.options.DataDir) {
-		t.Fatal("rate-limit transition did not signal the daemon")
+		t.Fatal("rate limit hit by an already interrupted session was not signalled")
 	}
 	callRunner(t, r, "/state", state)
 	if TakeLimitHit(r.options.DataDir) {
 		t.Fatal("repeated heartbeat re-signalled the same rate limit")
+	}
+	state.LimitHits = 2
+	callRunner(t, r, "/state", state)
+	if !TakeLimitHit(r.options.DataDir) {
+		t.Fatal("second rate limit was not signalled")
 	}
 }
 
