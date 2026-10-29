@@ -94,9 +94,9 @@ func TestCandidateRankRequiresRecentSuccessfulObservation(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			rank, pct := a.candidateRank(context.Background(), adapter.Codex, ac)
-			if rank != tc.wantRank || calls != tc.wantCalls || (calls == 1 && tc.status == 200 && pct != 17) {
-				t.Fatalf("rank=%d pct=%v calls=%d; want rank=%d calls=%d", rank, pct, calls, tc.wantRank, tc.wantCalls)
+			c := a.candidateRank(context.Background(), adapter.Codex, ac)
+			if c.rank != tc.wantRank || calls != tc.wantCalls || (calls == 1 && tc.status == 200 && c.usedPct != 17) {
+				t.Fatalf("rank=%d pct=%v calls=%d; want rank=%d calls=%d", c.rank, c.usedPct, calls, tc.wantRank, tc.wantCalls)
 			}
 		})
 	}
@@ -133,8 +133,47 @@ func TestCandidateRankReloadsStateAfterListing(t *testing.T) {
 		t.Fatal("expired candidate must not be refreshed during automatic selection")
 		return nil, nil
 	})}
-	if rank, _ := a.candidateRank(context.Background(), adapter.Codex, listed); rank < 2 {
+	if c := a.candidateRank(context.Background(), adapter.Codex, listed); c.rank < 2 {
 		t.Fatal("account list snapshot overrode newer expired state")
+	}
+}
+
+// Weekly quota left on an account is forfeited at its reset, so the account
+// whose window closes first is used before a less-used account with days left.
+func TestPickNextPrefersQuotaExpiringSoonest(t *testing.T) {
+	a, now := candidateFixture(t)
+	writeCodex(t, a.UserHome, "acc-c", "c@example.test")
+	if _, _, err := a.Capture(adapter.Codex); err != nil {
+		t.Fatal(err)
+	}
+	seedCandidateObservation(t, a, "acc-b", "exhausted", 100, now, now.Add(time.Hour).Unix())
+	window := func(id string, weeklyUsed float64, weeklyReset time.Time) {
+		seedCandidateObservation(t, a, id, "ok", weeklyUsed, now, weeklyReset.Unix())
+		detail := quota.EncodeBuckets([]quota.Bucket{
+			{ID: "5h", UsedPct: 0, ResetsAt: now.Add(5 * time.Hour).Unix()},
+			{ID: "weekly", UsedPct: weeklyUsed, ResetsAt: weeklyReset.Unix()},
+		})
+		if err := a.State.SetQuotaDetail("codex", id, detail); err != nil {
+			t.Fatal(err)
+		}
+	}
+	window("acc-a", 20, now.Add(5*24*time.Hour))
+	window("acc-c", 86, now.Add(6*time.Hour))
+	a.HTTP.Client = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		t.Fatal("fresh observations must be reused")
+		return nil, nil
+	})}
+	if next := a.pickNext(adapter.Codex, "acc-b"); next != "acc-c" {
+		t.Fatalf("picked %q, want the account whose weekly quota expires first", next)
+	}
+	// Without window data, the least-used account still wins.
+	for _, id := range []string{"acc-a", "acc-c"} {
+		if err := a.State.SetQuotaDetail("codex", id, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if next := a.pickNext(adapter.Codex, "acc-b"); next != "acc-a" {
+		t.Fatalf("picked %q without window data, want least used", next)
 	}
 }
 

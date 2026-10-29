@@ -1688,11 +1688,42 @@ func (a *App) considerSwitch(tool adapter.Tool) {
 	a.TryApply(tool, false)
 }
 
+// candidate orders usable accounts: OK before Soft, then the account whose
+// remaining quota is lost soonest, then the least used.
+type candidate struct {
+	rank      int
+	usedPct   float64
+	expiresAt int64 // reset of the longest quota window; 0 if unknown
+}
+
+func (c candidate) better(o candidate) bool {
+	if c.rank != o.rank {
+		return c.rank < o.rank
+	}
+	if c.expiresAt != o.expiresAt {
+		// A known expiry beats an unknown one; otherwise the sooner wins.
+		return o.expiresAt == 0 || (c.expiresAt != 0 && c.expiresAt < o.expiresAt)
+	}
+	return c.usedPct < o.usedPct
+}
+
+// quotaExpiry is the reset time of the longest window still open: unused
+// quota in that window is forfeited when it resets. Short windows (5 hours)
+// refill continually and do not mark quota as expiring.
+func quotaExpiry(buckets []quota.Bucket, now int64) int64 {
+	var latest int64
+	for _, b := range buckets {
+		if b.ResetsAt > now && b.ResetsAt > latest {
+			latest = b.ResetsAt
+		}
+	}
+	return latest
+}
+
 func (a *App) pickNext(tool adapter.Tool, current string) string {
 	accs, _ := a.State.ListAccounts(string(tool))
 	var best string
-	bestPct := 101.0
-	bestClass := 2
+	var bestCandidate candidate
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	now := a.now().Unix()
@@ -1703,39 +1734,42 @@ func (a *App) pickNext(tool adapter.Tool, current string) string {
 		if ac.CoolingUntil > now {
 			continue
 		}
-		r, pct := a.candidateRank(ctx, tool, ac)
-		if r >= 2 {
+		c := a.candidateRank(ctx, tool, ac)
+		if c.rank >= 2 {
 			continue
 		}
-		if r < bestClass || (r == bestClass && pct < bestPct) {
-			bestClass = r
-			bestPct = pct
+		if best == "" || c.better(bestCandidate) {
+			bestCandidate = c
 			best = ac.StableID
 		}
 	}
 	return best
 }
 
-func (a *App) candidateRank(ctx context.Context, tool adapter.Tool, ac state.Account) (int, float64) {
+func (a *App) candidateRank(ctx context.Context, tool adapter.Tool, ac state.Account) candidate {
+	unusable := candidate{rank: 9}
 	lock, err := livefile.Acquire(filepath.Join(a.DataDir, "locks", string(tool)+".lock"))
 	if err != nil {
-		return 9, 0
+		return unusable
 	}
 	defer lock.Close()
 	ac, err = a.State.GetAccount(string(tool), ac.StableID)
 	if err != nil || ac.Incomplete || ac.StaleCLI || ac.CoolingUntil > a.now().Unix() {
-		return 9, 0
+		return unusable
 	}
 	res, err := a.automaticQuotaLocked(ctx, tool, ac.StableID)
-	if err == nil {
-		switch res.Class {
-		case quota.OK:
-			return 0, res.UsedPct
-		case quota.Soft:
-			return 1, res.UsedPct
-		}
+	if err != nil || (res.Class != quota.OK && res.Class != quota.Soft) {
+		return unusable
 	}
-	return 9, 0
+	c := candidate{rank: 1, usedPct: res.UsedPct}
+	if res.Class == quota.OK {
+		c.rank = 0
+	}
+	// The accepted observation and its windows are written together by a probe.
+	if latest, err := a.State.GetAccount(string(tool), ac.StableID); err == nil {
+		c.expiresAt = quotaExpiry(quota.DecodeBuckets(latest.QuotaDetail), a.now().Unix())
+	}
+	return c
 }
 
 func (a *App) TryApply(tool adapter.Tool, killCLI bool) (retErr error) {
