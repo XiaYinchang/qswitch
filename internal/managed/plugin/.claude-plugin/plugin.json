@@ -1,0 +1,5 @@
+{
+  "name": "qswitch-managed",
+  "version": "1.0.0",
+  "description": "Coordinates safe account rotation with the qswitch managed session runner."
+}

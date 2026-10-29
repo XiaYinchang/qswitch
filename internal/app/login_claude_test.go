@@ -129,7 +129,7 @@ set -eu
 			if err != nil || p.StableID != pointer.StableID || p.Gen != pointer.Gen {
 				t.Fatal("login changed the current account pointer")
 			}
-			dirs, err := filepath.Glob(filepath.Join(tmp, "qswitch-claude-login-*"))
+			dirs, err := filepath.Glob(filepath.Join(a.DataDir, "claude-enrollments", "session-*"))
 			if err != nil || len(dirs) != 0 {
 				t.Fatal("login left temporary credentials behind")
 			}

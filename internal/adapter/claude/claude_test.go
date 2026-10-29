@@ -3,6 +3,7 @@ package claude
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -212,5 +213,92 @@ func TestMergeOAuthAccountPreservesOtherKeys(t *testing.T) {
 	}
 	if acct.AccountUUID != "new" || acct.Email != "b@example.com" {
 		t.Fatalf("oauthAccount not replaced: %+v", acct)
+	}
+}
+
+func TestVerifiedIdentityRestoresMatchingMetadata(t *testing.T) {
+	for _, sourceMeta := range []string{"missing", "wrong-account", "saved-before-fix"} {
+		for _, destinationMeta := range []string{"missing", "existing", "null"} {
+			t.Run(sourceMeta+"/"+destinationMeta, func(t *testing.T) {
+				t.Setenv("CLAUDE_CONFIG_DIR", "")
+				home := t.TempDir()
+				writeCreds(t, home, validOAuth())
+				metaPath := filepath.Join(home, ".claude.json")
+				if sourceMeta == "wrong-account" {
+					if err := os.WriteFile(metaPath, []byte(`{"oauthAccount":{"accountUuid":"wrong","emailAddress":"wrong@example.test"}}`), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				a := Adapter{List: func() ([]adapter.Proc, error) { return nil, nil }}
+				blobs, _, err := a.Capture(home)
+				if err != nil {
+					t.Fatal(err)
+				}
+				verified := adapter.Identity{Tool: adapter.Claude, StableID: "verified", Email: "verified@example.test"}
+				blob, err := WriteIdentity(blobs[0], verified)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if sourceMeta == "saved-before-fix" {
+					p, err := readPayload(blob)
+					if err != nil { t.Fatal(err) }
+					p.OAuthAccount = `{"accountUuid":"obsolete","emailAddress":"obsolete@example.test"}`
+					blob.Payload, err = json.Marshal(p)
+					if err != nil { t.Fatal(err) }
+				}
+				dest := t.TempDir()
+				destMeta := filepath.Join(dest, ".claude.json")
+				if destinationMeta != "missing" {
+					data := `{"numStartups":7,"oauthAccount":{"accountUuid":"other"}}`
+					if destinationMeta == "null" {
+						data = "null"
+					}
+					if err := os.WriteFile(destMeta, []byte(data), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := a.Restore(dest, blob, adapter.RestoreOpts{}); err != nil {
+					t.Fatal(err)
+				}
+				acct, err := readLiveAccount(dest)
+				if err != nil || acct.AccountUUID != verified.StableID || acct.Email != verified.Email {
+					t.Fatalf("restored metadata does not match verified credentials: %+v, %v", acct, err)
+				}
+				if destinationMeta == "existing" {
+					raw, _ := os.ReadFile(destMeta)
+					var doc map[string]json.RawMessage
+					if err := json.Unmarshal(raw, &doc); err != nil || string(doc["numStartups"]) != "7" {
+						t.Fatal("restore lost unrelated settings")
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestRestoreCredentialFailureRollsBackMetadata(t *testing.T) {
+	for _, existing := range []bool{false, true} {
+		t.Run(fmt.Sprint(existing), func(t *testing.T) {
+			t.Setenv("CLAUDE_CONFIG_DIR", "")
+			source := t.TempDir()
+			writeCreds(t, source, validOAuth())
+			a := Adapter{List: func() ([]adapter.Proc, error) { return nil, nil }}
+			blobs, _, err := a.Capture(source)
+			if err != nil { t.Fatal(err) }
+			blob, err := WriteIdentity(blobs[0], adapter.Identity{Tool: adapter.Claude, StableID: "verified", Email: "verified@example.test"})
+			if err != nil { t.Fatal(err) }
+			dest := t.TempDir()
+			metaPath := filepath.Join(dest, ".claude.json")
+			original := `{"oauthAccount":{"accountUuid":"original"}}`
+			if existing {
+				if err := os.WriteFile(metaPath, []byte(original), 0o600); err != nil { t.Fatal(err) }
+			}
+			// A directory at the credential destination forces atomic rename failure.
+			if err := os.MkdirAll(credentialsPath(dest), 0o700); err != nil { t.Fatal(err) }
+			if err := a.Restore(dest, blob, adapter.RestoreOpts{}); err == nil { t.Fatal("expected credential write failure") }
+			raw, err := os.ReadFile(metaPath)
+			if existing && (err != nil || string(raw) != original) { t.Fatal("original metadata not restored") }
+			if !existing && !os.IsNotExist(err) { t.Fatal("new metadata not removed after failure") }
+		})
 	}
 }

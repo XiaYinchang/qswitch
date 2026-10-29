@@ -31,29 +31,27 @@ func (a *App) enrichClaudeCapture(blobs []adapter.Blob, warnings []adapter.Warni
 			return nil, warnings, err
 		}
 		raw, status, err := a.HTTP.ClaudeProfile(ctx, c.AccessToken)
-		if err != nil || status != 200 {
-			// Access tokens live ~hours; the one on disk is often stale while the
-			// refresh token (weeks) is still good. Renew instead of rejecting an
-			// otherwise valid login.
-			nb, _, kerr := a.keepAliveClaudeLocked(ctx, b, true, true)
-			if kerr != nil {
-				return nil, warnings, errors.New("claude: unable to verify account identity; sign in with Claude Code and retry")
+		if err == nil && status == 401 {
+			// Only a definitive authentication rejection justifies spending a
+			// one-time refresh token. Transient profile failures never renew.
+			b, err = a.renewClaudeCapture(ctx, b, c)
+			if err != nil {
+				return nil, warnings, err
 			}
-			c, err = claude.CredsFromBlob(nb)
+			c, err = claude.CredsFromBlob(b)
 			if err != nil {
 				return nil, warnings, err
 			}
 			raw, status, err = a.HTTP.ClaudeProfile(ctx, c.AccessToken)
-			if err != nil || status != 200 {
-				return nil, warnings, errors.New("claude: unable to verify account identity; sign in with Claude Code and retry")
-			}
-			b = nb
+		}
+		if err != nil || status != 200 {
+			return nil, warnings, errors.New("claude: unable to verify account identity; retry capture when the service is available")
 		}
 		uuid, _, _, _ := quota.ClaudeIdentity(raw)
 		if uuid == "" {
 			return nil, warnings, errors.New("claude: profile missing account uuid")
 		}
-		ident := claude.EnrichIdentity(b.Identity, raw)
+		ident := claude.EnrichIdentity(adapter.Identity{Tool: adapter.Claude}, raw)
 		live, err := claude.ReadLiveCreds(a.UserHome)
 		if err != nil || !sameClaudeTokens(c, live) {
 			return nil, warnings, errors.New("claude: credentials changed while checking account; retry capture")
@@ -86,6 +84,9 @@ func (a *App) keepAliveClaudeAccounts(ctx context.Context) {
 		// Reload inside the tool lock; each refresh token may be used only once.
 		b, err := a.loadBlob(adapter.Claude, account.StableID)
 		if err == nil {
+			err = a.recoverClaudeLocked(&b)
+		}
+		if err == nil {
 			c, readErr := claude.CredsFromBlob(b)
 			current, _ := a.State.GetAccount("claude", account.StableID)
 			if readErr == nil && c.RefreshToken != "" && (c.NeedsRefresh(a.now()) || current.LastQuotaClass == string(quota.Expired)) {
@@ -103,9 +104,19 @@ func (a *App) keepAliveClaudeAccounts(ctx context.Context) {
 // no official refresh lockfile, so every write is gated on a manual-blocker
 // check and a re-read of the live file.
 func (a *App) keepAliveClaudeLocked(ctx context.Context, b adapter.Blob, force, bypassBackoff bool) (adapter.Blob, string, error) {
+	previous, err := claude.CredsFromBlob(b)
+	if err != nil {
+		return b, "", err
+	}
+	if err := a.recoverClaudeLocked(&b); err != nil {
+		return b, "", err
+	}
 	c, err := claude.CredsFromBlob(b)
 	if err != nil {
 		return b, "", err
+	}
+	if !sameClaudeTokens(previous, c) {
+		force = false // Recovery already replaced the rejected token pair.
 	}
 	live, liveErr := claude.ReadLiveCreds(a.UserHome)
 	if liveErr == nil && sameClaudeTokens(c, live) {
@@ -143,6 +154,10 @@ func (a *App) keepAliveClaudeLocked(ctx context.Context, b adapter.Blob, force, 
 		(os.IsNotExist(liveErr) && !os.IsNotExist(currentErr)) {
 		return b, "", a.recordRefreshResult(adapter.Claude, b.Identity.StableID, false, errors.New("claude: live credentials changed before refresh"))
 	}
+	recovery, err := a.beginClaudeRecovery(b, "")
+	if err != nil {
+		return b, "", err
+	}
 	tok, err := a.HTTP.ClaudeRefresh(ctx, c.RefreshToken)
 	if err != nil {
 		return b, "", a.recordRefreshResult(adapter.Claude, b.Identity.StableID, tok.Permanent, err)
@@ -151,7 +166,11 @@ func (a *App) keepAliveClaudeLocked(ctx context.Context, b adapter.Blob, force, 
 	if err != nil {
 		return b, "", a.recordRefreshResult(adapter.Claude, b.Identity.StableID, false, err)
 	}
-	if err := a.saveBlob(updated); err != nil {
+	recovery.Updated = &updated
+	if err := a.putClaudeRecovery(recovery); err != nil {
+		return updated, "", err
+	}
+	if err := a.recoverClaudeLocked(&updated); err != nil {
 		return updated, "", a.recordRefreshResult(adapter.Claude, b.Identity.StableID, false, err)
 	}
 	if err := a.recordRefreshResult(adapter.Claude, b.Identity.StableID, false, nil); err != nil {
@@ -225,37 +244,39 @@ func (a *App) keepAliveLiveClaudeLocked(ctx context.Context, b adapter.Blob, liv
 	if err != nil || !bytes.Equal(raw, beforeExchange) {
 		return b, "", errors.New("claude: live credentials changed before exchange")
 	}
+	recovery, err := a.beginClaudeRecovery(b, path)
+	if err != nil {
+		return b, "", err
+	}
 	refreshCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	tok, err := a.HTTP.ClaudeRefresh(refreshCtx, current.RefreshToken)
 	if err != nil {
-		return b, "", a.recordRefreshResult(adapter.Claude, b.Identity.StableID, tok.Permanent, err)
+		return b, "", a.claudeRefreshResult(b, tok.Permanent, err)
 	}
 	updated, err := claude.ApplyRefresh(b, tok, a.now())
 	if err != nil {
-		return b, "", a.recordRefreshResult(adapter.Claude, b.Identity.StableID, false, err)
+		return b, "", a.claudeRefreshResult(b, false, err)
 	}
-	// Retain the rotated refresh token even if an unrelated writer changed the
-	// live slot. A consumed token must never replace this newer vault snapshot.
-	if err := a.saveBlob(updated); err != nil {
-		return updated, "", a.recordRefreshResult(adapter.Claude, b.Identity.StableID, false, err)
-	}
-	after, err := os.ReadFile(path)
-	if err != nil || !bytes.Equal(raw, after) {
-		return updated, "", a.recordRefreshResult(adapter.Claude, b.Identity.StableID, false, errors.New("claude: live credentials changed during refresh"))
-	}
-	var refreshed struct {
-		Credentials string `json:"credentials_json"`
-	}
-	if err := json.Unmarshal(updated.Payload, &refreshed); err != nil {
+	// The renewed credentials become durable before profile verification or
+	// either account/live write. A failed writeback cannot resurrect the old
+	// refresh token during the next capture, save, or refresh.
+	recovery.Updated = &updated
+	if err := a.putClaudeRecovery(recovery); err != nil {
 		return updated, "", err
 	}
-	if err := livefile.AtomicWrite(path, []byte(refreshed.Credentials), 0o600); err != nil {
-		return updated, "", a.recordRefreshResult(adapter.Claude, b.Identity.StableID, false, err)
+	if err := a.recoverClaudeLocked(&updated); err != nil {
+		return updated, "", a.claudeRefreshResult(b, false, err)
 	}
-	a.rememberFP(adapter.Claude)
-	if err := a.recordRefreshResult(adapter.Claude, b.Identity.StableID, false, nil); err != nil {
+	if err := a.claudeRefreshResult(b, false, nil); err != nil {
 		return updated, "", err
 	}
 	return updated, tok.AccessToken, nil
+}
+
+func (a *App) claudeRefreshResult(b adapter.Blob, permanent bool, err error) error {
+	if b.Identity.StableID == "" {
+		return err // Unverified captures are never written to the account table.
+	}
+	return a.recordRefreshResult(adapter.Claude, b.Identity.StableID, permanent, err)
 }

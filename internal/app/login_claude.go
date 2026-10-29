@@ -48,17 +48,24 @@ func (a *App) LoginClaude(ctx context.Context, announce func(instructions string
 }
 
 func (a *App) loginClaudeOfficial(ctx context.Context, bin string, announce func(string)) (adapter.Identity, error) {
-	dir, err := os.MkdirTemp("", "qswitch-claude-login-")
+	// Linux parent-death signals follow the thread that creates each child.
+	// Keep that thread alive until both children have been waited for.
+	releaseThread := ownClaudeLoginThread()
+	defer releaseThread()
+	session, err := newClaudeLoginSession(a.DataDir)
 	if err != nil {
 		return adapter.Identity{}, err
 	}
-	defer os.RemoveAll(dir)
+	defer session.Close()
+	dir := session.dir
 	if announce != nil {
 		announce("在当前终端完成 Claude 官方授权；授权成功后自动收录，当前登录保持不变。")
 	}
 	cmd := exec.CommandContext(ctx, bin, "auth", "login", "--claudeai")
 	cmd.Dir = dir
 	cmd.Env = isolatedClaudeEnv(os.Environ(), dir)
+	protectClaudeLoginChild(cmd)
+	cmd.ExtraFiles = []*os.File{session.lease}
 	// Claude 2.1.311 switches a TTY stdin to raw/no-echo mode, but auth
 	// login's line reader does not render typed characters. Keep the terminal
 	// in canonical mode and let cat forward lines to a non-TTY stdin. A child
@@ -76,6 +83,8 @@ func (a *App) loginClaudeOfficial(ctx context.Context, bin string, announce func
 	forward.Stdin = os.Stdin
 	forward.Stdout = output
 	forward.Stderr = os.Stderr
+	protectClaudeLoginChild(forward)
+	forward.ExtraFiles = []*os.File{session.lease}
 	if err := forward.Start(); err != nil {
 		return adapter.Identity{}, fmt.Errorf("claude: start terminal input forwarding: %w", err)
 	}

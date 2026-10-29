@@ -181,6 +181,15 @@ func (a Adapter) Restore(home string, blob adapter.Blob, _ adapter.RestoreOpts) 
 	if err != nil {
 		return err
 	}
+	// Saved snapshots may predate identity/metadata reconciliation. The
+	// verified snapshot identity is authoritative when restoring them too.
+	if p.Identity.StableID != "" {
+		account, err := json.Marshal(OAuthAccount{AccountUUID: p.Identity.StableID, Email: p.Identity.Email})
+		if err != nil {
+			return err
+		}
+		p.OAuthAccount = string(account)
+	}
 	h, err := a.ManualBlockers(home)
 	if err != nil {
 		return err
@@ -198,8 +207,12 @@ func (a Adapter) Restore(home string, blob adapter.Blob, _ adapter.RestoreOpts) 
 	if metaErr != nil && !os.IsNotExist(metaErr) {
 		return metaErr
 	}
-	if p.OAuthAccount != "" && metaOK {
-		newMeta, err := mergeOAuthAccount(oldMeta, p.OAuthAccount)
+	if p.OAuthAccount != "" {
+		baseMeta := oldMeta
+		if !metaOK {
+			baseMeta = []byte("{}")
+		}
+		newMeta, err := mergeOAuthAccount(baseMeta, p.OAuthAccount)
 		if err != nil {
 			return err
 		}
@@ -208,8 +221,16 @@ func (a Adapter) Restore(home string, blob adapter.Blob, _ adapter.RestoreOpts) 
 		}
 	}
 	if err := livefile.AtomicWrite(credPath, []byte(p.Credentials), 0o600); err != nil {
-		if p.OAuthAccount != "" && metaOK {
-			_ = livefile.AtomicWrite(metaPath, oldMeta, 0o600)
+		if p.OAuthAccount != "" {
+			var rollbackErr error
+			if metaOK {
+				rollbackErr = livefile.AtomicWrite(metaPath, oldMeta, 0o600)
+			} else {
+				rollbackErr = os.Remove(metaPath)
+			}
+			if rollbackErr != nil {
+				return errors.Join(err, fmt.Errorf("claude: restore account metadata rollback: %w", rollbackErr))
+			}
 		}
 		return err
 	}
@@ -220,6 +241,9 @@ func mergeOAuthAccount(metaRaw []byte, acctJSON string) ([]byte, error) {
 	var doc map[string]json.RawMessage
 	if err := json.Unmarshal(metaRaw, &doc); err != nil {
 		return nil, fmt.Errorf("claude: invalid ~/.claude.json: %w", err)
+	}
+	if doc == nil {
+		doc = make(map[string]json.RawMessage)
 	}
 	doc["oauthAccount"] = json.RawMessage(acctJSON)
 	return json.Marshal(doc)
@@ -327,6 +351,11 @@ func WriteIdentity(blob adapter.Blob, id adapter.Identity) (adapter.Blob, error)
 	}
 	id.Tool = adapter.Claude
 	p.Identity = id
+	account, err := json.Marshal(OAuthAccount{AccountUUID: id.StableID, Email: id.Email})
+	if err != nil {
+		return blob, err
+	}
+	p.OAuthAccount = string(account)
 	raw, err := json.Marshal(p)
 	if err != nil {
 		return blob, err

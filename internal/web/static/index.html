@@ -182,6 +182,7 @@
   .msg.err { color: var(--bad); }
   .empty { color: var(--muted); font-size: 13px; margin: 0; }
   .quota-note { color: var(--muted); font-size: 12px; margin: 8px 0 0; }
+  .switch-note { color: var(--soft); font-size: 12px; margin: 0 0 10px; overflow-wrap: anywhere; }
   dialog {
     border: 1px solid var(--line);
     background: var(--card);
@@ -208,7 +209,7 @@
 <body>
 <header>
   <div>
-    <h1>qswitch</h1>
+    <h1>qswitch <span class="meta" id="daemonVersion">守护进程版本：读取中…</span></h1>
     <p>本机账号余量。token 不会出现在这个页面上。</p>
   </div>
   <div class="header-right">
@@ -327,6 +328,26 @@ function accountLabel(ac) {
   if (ac.tool === "kimi") return ac.phone || ac.display_name || ac.email || ac.stable_id;
   return ac.email || ac.display_name || ac.phone || ac.stable_id;
 }
+function switchNote(tool) {
+  const pids = (tool.blocked_by_pid || []).filter(pid => Number.isInteger(pid) && pid > 0);
+  const blocked = tool.busy || pids.length > 0;
+  if (!tool.pending_to && !blocked) return "";
+  const parts = [];
+  if (tool.pending_to) {
+    const target = (tool.accounts || []).find(ac => ac.stable_id === tool.pending_to);
+    parts.push(`待切换至 ${target ? accountLabel(target) : tool.pending_to}，当前账号尚未切换。`);
+  }
+  if (pids.length) parts.push(`阻塞进程 PID：${pids.join("、")}。`);
+  if (["claude", "kimi"].includes(tool.tool)) {
+    if (blocked) parts.push("请在对应终端退出所有运行中的会话；仅空闲 30 秒不会解除阻塞。");
+    else parts.push("当前未检测到阻塞会话。");
+  } else if (blocked) {
+    parts.push("请等待 CLI 会话满足空闲条件，或在对应终端退出会话。");
+  }
+  if (tool.pending_to) parts.push("排队切换仍需通过用量和安全检查，请刷新查看结果。");
+  else parts.push("退出后刷新，再选择目标账号切换。");
+  return parts.join(" ");
+}
 function quotaNote(ac) {
   const known = (ac.buckets || []).some(b => clampPct(b.used_pct) != null) ||
     (["ok", "soft", "exhausted"].includes(ac.class) && clampPct(ac.used_pct) != null);
@@ -361,6 +382,7 @@ function render(ov) {
     const sec = document.createElement("section");
     const flags = [];
     if (tool.auto) flags.push("自动切换开");
+    if (tool.pending_to) flags.push("切换排队中");
     if (tool.busy) flags.push("CLI 占用中");
     if (tool.chatgpt_app) flags.push("ChatGPT.app 在跑");
     if (tool.cursor_app) flags.push("Cursor.app 在跑");
@@ -377,6 +399,13 @@ function render(ov) {
     const body = document.createElement("div");
     body.className = "sec-body";
     sec.appendChild(body);
+    const pendingNote = switchNote(tool);
+    if (pendingNote) {
+      const note = document.createElement("p");
+      note.className = "switch-note";
+      note.textContent = pendingNote;
+      body.appendChild(note);
+    }
     (tool.accounts || []).forEach(ac => {
       const used = ["unknown", "expired"].includes(ac.class) ? null : clampPct(ac.used_pct);
       const card = document.createElement("div");
@@ -386,6 +415,7 @@ function render(ov) {
       card.className = kinds.join(" ");
       const badges = [];
       if (ac.live) badges.push(`<span class="badge live">当前</span>`);
+      if (ac.stable_id === tool.pending_to) badges.push(`<span class="badge soft">待切换目标</span>`);
       const oldStatus = ac.quota_stale && ["ok", "soft", "exhausted"].includes(ac.class);
       if (!oldStatus) badges.push(`<span class="badge ${attr(ac.class)}">${attr(clsLabel[ac.class] || ac.class)}</span>`);
       if (ac.plan && ac.plan !== "-") badges.push(`<span class="badge">${attr(ac.plan)}</span>`);
@@ -412,10 +442,22 @@ function render(ov) {
       p.className = "empty";
       p.textContent = "还没有收录账号。先在官方客户端登录，再点「收录」。";
       body.appendChild(p);
-      sec.classList.add("collapsed");
+      if (!pendingNote) sec.classList.add("collapsed");
     }
     root.appendChild(sec);
   });
+}
+async function loadVersion() {
+  const el = $("daemonVersion");
+  try {
+    const health = await api("/api/health");
+    if (typeof health.version !== "string" || !health.version.trim()) throw new Error("接口未返回版本号");
+    el.textContent = "守护进程版本：" + health.version;
+    el.title = "当前连接的 qswitch 守护进程";
+  } catch (e) {
+    el.textContent = "守护进程版本：读取失败";
+    el.title = e.message;
+  }
 }
 async function load() {
   try {
@@ -442,6 +484,7 @@ async function onClick(e) {
       msg("已收录 " + (r.captured || []).map(accountLabel).join(", "));
     } else if (act === "reload-all" || act === "probe" || act === "probe-tool") {
       b.disabled = true;
+      if (act === "reload-all") loadVersion();
       msg("正在查用量…");
       const body = act === "reload-all" ? {} : { tool, id: act === "probe" ? id : "" };
       const ov = await api("/api/probe", { method: "POST", body: JSON.stringify(body) });
@@ -467,8 +510,8 @@ async function onClick(e) {
         grok: "切换到这个账号？会关掉并重启 Grok Bot.app；空闲的 grok CLI 也会结束。",
         cursor: "切换到这个账号？会关掉并重启 Cursor.app；空闲的 cursor-agent 也会结束。只改登录字段，不碰聊天记录。",
         devin: "切换 Devin CLI 到这个账号？空闲 CLI 会结束，新进程使用新账号。Devin.app 使用独立登录。",
-        kimi: "切换 Kimi Code 到这个账号？请先结束正在运行的 Kimi 会话，新进程将使用新账号。",
-        claude: "切换 Claude Code 到这个账号？请先结束正在运行的 Claude 会话，新进程将使用新账号。",
+        kimi: "切换 Kimi Code 到这个账号？请先退出所有运行中的 Kimi 会话，仅空闲 30 秒不会解除阻塞；新进程将使用新账号。",
+        claude: "切换 Claude Code 到这个账号？请先退出所有运行中的 Claude 会话，仅空闲 30 秒不会解除阻塞；新进程将使用新账号。",
       }[tool] || "切换到这个账号？空闲的 CLI 会先结束。";
       if (!confirm(prompt)) return;
       b.disabled = true;
@@ -544,6 +587,7 @@ async function cancelLogin() {
 $("loginCancel").onclick = cancelLogin;
 $("loginDlg").addEventListener("cancel", e => { e.preventDefault(); cancelLogin(); });
 document.addEventListener("click", onClick);
+loadVersion();
 load();
 </script>
 </body>

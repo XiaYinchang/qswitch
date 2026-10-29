@@ -28,6 +28,7 @@ import (
 	"qswitch/internal/config"
 	"qswitch/internal/hostapp"
 	"qswitch/internal/livefile"
+	"qswitch/internal/managed"
 	"qswitch/internal/notify"
 	"qswitch/internal/paths"
 	"qswitch/internal/quota"
@@ -50,14 +51,15 @@ type App struct {
 	ListProcs func() ([]adapter.Proc, error)
 	Host      hostapp.Controller
 
-	cfgMu          sync.RWMutex
-	fpMu           sync.Mutex
-	deskMu         sync.Mutex
-	lastFP         map[adapter.Tool][32]byte
-	deskFP         [32]byte
-	deskFPOk       bool
-	lastDeskAt     time.Time
-	captureRetryAt map[adapter.Tool]time.Time
+	cfgMu           sync.RWMutex
+	fpMu            sync.Mutex
+	deskMu          sync.Mutex
+	lastFP          map[adapter.Tool][32]byte
+	deskFP          [32]byte
+	deskFPOk        bool
+	lastDeskAt      time.Time
+	captureRetryAt  map[adapter.Tool]time.Time
+	claudeWriteLive func(string, []byte, os.FileMode) error
 }
 
 func Open(userHome, dataDir string, keys secutil.KeyProvider, bins []string, n notify.Notifier, list func() ([]adapter.Proc, error)) (*App, error) {
@@ -205,6 +207,11 @@ func (a *App) Capture(tool adapter.Tool) ([]adapter.Blob, []adapter.Warning, err
 }
 
 func (a *App) captureBlobs(tool adapter.Tool) ([]adapter.Blob, []adapter.Warning, error) {
+	if tool == adapter.Claude {
+		if err := a.recoverClaudeLocked(nil); err != nil {
+			return nil, nil, err
+		}
+	}
 	blobs, warn, err := a.Adapters[tool].Capture(a.UserHome)
 	if err != nil {
 		return blobs, warn, err
@@ -281,6 +288,13 @@ func liveCLIIdentity(blobs []adapter.Blob) string {
 }
 
 func (a *App) saveBlob(b adapter.Blob) error {
+	if b.Tool == adapter.Claude {
+		return a.saveClaudeBlob(b)
+	}
+	return a.saveBlobUnchecked(b)
+}
+
+func (a *App) saveBlobUnchecked(b adapter.Blob) error {
 	id, err := a.Adapters[b.Tool].IdentityOf(b)
 	if err != nil {
 		return err
@@ -1718,7 +1732,7 @@ func (a *App) candidateRank(ctx context.Context, tool adapter.Tool, ac state.Acc
 	return 9, 0
 }
 
-func (a *App) TryApply(tool adapter.Tool, killCLI bool) error {
+func (a *App) TryApply(tool adapter.Tool, killCLI bool) (retErr error) {
 	if tool == adapter.ZCode {
 		return a.State.ClearPending(string(tool))
 	}
@@ -1727,6 +1741,17 @@ func (a *App) TryApply(tool adapter.Tool, killCLI bool) error {
 		return err
 	}
 	defer lock.Close()
+	// A pending rotation spans daemon ticks. Cancellation releases admission
+	// gates; only a completed credential switch authorizes task continuation.
+	releaseManaged, committed := true, false
+	managedGeneration := ""
+	if tool == adapter.Claude {
+		defer func() {
+			if releaseManaged {
+				retErr = errors.Join(retErr, managed.Release(a.DataDir, managedGeneration, committed))
+			}
+		}()
+	}
 	cfg := a.cfgSnapshot()
 	pend, err := a.State.GetPending(string(tool))
 	if err != nil || pend.ToID == "" {
@@ -1766,7 +1791,7 @@ func (a *App) TryApply(tool adapter.Tool, killCLI bool) error {
 	if err != nil {
 		return err
 	}
-	if auto.ManualBusy() {
+	if auto.ManualBusy() && tool != adapter.Claude {
 		if !ad.Idle(a.UserHome, cfg.IdleGrace()) {
 			return nil
 		}
@@ -1812,7 +1837,21 @@ func (a *App) TryApply(tool adapter.Tool, killCLI bool) error {
 			}
 		}
 	}
-	return a.switchLocked(tool, pend.ToID, adapter.RestoreOpts{}, killCLI)
+	if tool == adapter.Claude {
+		managedGeneration = fmt.Sprintf("%s:%s:%d", pend.FromID, pend.ToID, pend.QueuedAt)
+		ready, err := managed.Prepare(a.DataDir, managedGeneration, auto.ManualPIDs())
+		if err != nil {
+			return err
+		}
+		if !ready {
+			releaseManaged = false
+			return nil
+		}
+		killCLI = false // Managed sessions exit through Claude's own command.
+	}
+	retErr = a.switchLocked(tool, pend.ToID, adapter.RestoreOpts{}, killCLI)
+	committed = retErr == nil
+	return retErr
 }
 
 func (a *App) Apply(tool adapter.Tool, killCLI bool) error {

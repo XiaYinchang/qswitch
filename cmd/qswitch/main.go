@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -13,6 +15,7 @@ import (
 	"qswitch/internal/adapter"
 	"qswitch/internal/app"
 	"qswitch/internal/buildinfo"
+	"qswitch/internal/managed"
 	"qswitch/internal/web"
 )
 
@@ -41,6 +44,58 @@ func run(args []string) int {
 	cmd := args[0]
 	rest := args[1:]
 	switch cmd {
+	case "run":
+		if len(rest) == 0 || rest[0] != "claude" {
+			fmt.Fprintln(os.Stderr, "usage: qswitch run claude [--resume-continuation=idle|continue] [Claude arguments...]")
+			return 2
+		}
+		bin, err := exec.LookPath("claude")
+		if err != nil {
+			return fail(fmt.Errorf("claude: official CLI not found: %w", err))
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGHUP)
+		defer stop()
+		initial := ""
+		claudeArgs := make([]string, 0, len(rest)-1)
+		for i := 1; i < len(rest); i++ {
+			arg := rest[i]
+			if arg == "--" {
+				claudeArgs = append(claudeArgs, rest[i:]...)
+				break
+			}
+			if arg == "--resume-continuation" || strings.HasPrefix(arg, "--resume-continuation=") {
+				if initial != "" {
+					return fail(fmt.Errorf("--resume-continuation may be specified only once"))
+				}
+				if arg == "--resume-continuation" {
+					i++
+					if i == len(rest) {
+						return fail(fmt.Errorf("--resume-continuation requires idle or continue"))
+					}
+					initial = rest[i]
+				} else {
+					initial = strings.TrimPrefix(arg, "--resume-continuation=")
+				}
+				if initial != "idle" && initial != "continue" {
+					return fail(fmt.Errorf("--resume-continuation requires idle or continue"))
+				}
+				continue
+			}
+			claudeArgs = append(claudeArgs, arg)
+		}
+		return fail(managed.Run(ctx, managed.Options{DataDir: a.DataDir, ClaudeBin: bin, Args: claudeArgs, InitialContinuation: initial}))
+	case "sessions":
+		sessions, err := managed.Status(a.DataDir)
+		if err != nil {
+			return fail(err)
+		}
+		if has(rest, "--json") {
+			return fail(json.NewEncoder(os.Stdout).Encode(sessions))
+		}
+		for _, session := range sessions {
+			fmt.Printf("claude session=%s pid=%d ready=%v continue=%v exited=%v reason=%s recovery=%s\n", session.SessionID, session.ChildPID, session.Ready, session.NeedsContinue, session.Exited, session.Reason, session.Recovery)
+		}
+		return 0
 	case "init":
 		return fail(a.Init())
 	case "capture":
@@ -169,7 +224,7 @@ func run(args []string) int {
 				fmt.Printf("\nTo sign in, open this URL in your browser:\n   %s\n\nThen enter this code:\n   %s\n\nContinue only if you started this login in qswitch. If a website or another person gave you this code, cancel.\n", url, code)
 			})
 		case adapter.Claude:
-			loginCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+			loginCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 			defer stop()
 			id, lerr = a.LoginClaude(loginCtx, func(msg string) {
 				fmt.Printf("\n%s\n", msg)
@@ -298,6 +353,8 @@ func usage() {
   qswitch login codex          # Device Code 加号，不登出当前 ChatGPT 会话
   qswitch login grok           # Device Code 加号，不登出当前 Grok 会话
   qswitch login claude         # 当前终端授权并自动收录，不改变当前登录
+  qswitch run claude [args...] # 受管会话：安全切号后恢复原会话
+  qswitch sessions            # 查看受管会话及切换阻塞原因
   qswitch list [--tool ...]
   qswitch status
   qswitch probe [--tool codex|grok|cursor|devin|zcode|kimi|claude]
