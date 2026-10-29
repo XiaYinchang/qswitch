@@ -65,6 +65,10 @@ type runner struct {
 	stopping         bool
 	resumePending    bool
 	limitHits        int // plugin's count for the current child process
+	upgrading        bool
+	upgradeAt        time.Time
+	self             string // resolved path of the qswitch binary that started this runner
+	selfID           fileID
 	wake             chan struct{}
 	gate             func() error
 }
@@ -218,6 +222,16 @@ func (r *runner) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 	switch req.URL.Path {
 	case "/prepare":
+		if r.upgrading {
+			// The child is exiting for a runner upgrade; report not ready and
+			// let the daemon retry after the replacement registers its child.
+			s := r.snapshotLocked()
+			s.Ready = false
+			s.Generation = ""
+			s.Reason = "runner upgrading"
+			writeResponse(w, s)
+			return
+		}
 		if r.status.Generation != "" && r.status.Generation != ctl.Generation {
 			http.Error(w, "generation mismatch", http.StatusConflict)
 			return
@@ -329,6 +343,13 @@ func (r *runner) handleState(w http.ResponseWriter, route string, state sessionS
 			r.committed = false
 		}
 	}
+	if r.upgrading && !state.Ready {
+		// The session became busy before acknowledging; give up this attempt
+		// and retry on a later idle heartbeat.
+		r.upgrading = false
+		r.exitRequested = false
+		r.status.Generation = ""
+	}
 	r.status.SessionID = state.SessionID
 	r.status.CWD = state.CWD
 	r.status.Ready = state.Ready
@@ -349,6 +370,14 @@ func (r *runner) handleState(w http.ResponseWriter, route string, state sessionS
 		if state.Ready && state.NeedsContinue {
 			response.Action = "resume"
 		}
+	} else if r.upgradeDueLocked() && state.Ready && r.gate() == nil {
+		// The upgrade reuses the rotation exit handshake under its own
+		// generation; the daemon never sees or releases it.
+		r.upgrading = true
+		r.upgradeAt = time.Now()
+		r.status.Generation = upgradeGeneration
+		r.exitRequested = true
+		response = action{Action: "exit", Generation: upgradeGeneration}
 	}
 	// Heartbeats arrive every 750 ms and usually change nothing durable. A
 	// redundant fsync here holds r.mu through disk stalls and times out /status.
@@ -382,7 +411,7 @@ func (r *runner) restart(ctx context.Context, root string) (*exec.Cmd, error) {
 			return nil, err
 		}
 		if txn.Generation == "" {
-			cmd, startErr := r.startLocked(ctx, true)
+			cmd, startErr := r.startLocked(ctx, startRotation)
 			lock.Close()
 			return cmd, startErr
 		}
@@ -397,7 +426,15 @@ func (r *runner) restart(ctx context.Context, root string) (*exec.Cmd, error) {
 	}
 }
 
-func (r *runner) startLocked(ctx context.Context, resume bool) (*exec.Cmd, error) {
+type startMode int
+
+const (
+	startInitial  startMode = iota // first child: arguments as given
+	startRotation                  // after a released account switch
+	startHandoff                   // first child of an upgraded runner binary
+)
+
+func (r *runner) startLocked(ctx context.Context, mode startMode) (*exec.Cmd, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if ctx.Err() != nil || r.stopping {
@@ -406,7 +443,8 @@ func (r *runner) startLocked(ctx context.Context, resume bool) (*exec.Cmd, error
 	id := ""
 	continuationState := r.options.InitialContinuation
 	continuePrompt := false
-	if resume {
+	switch mode {
+	case startRotation:
 		if !r.status.Exited || !r.released || !r.exitAcknowledged {
 			return nil, errors.New("restart was not released")
 		}
@@ -417,6 +455,14 @@ func (r *runner) startLocked(ctx context.Context, resume bool) (*exec.Cmd, error
 		}
 		id = r.status.SessionID
 		continuePrompt = r.committed && r.status.NeedsContinue
+		continuationState = "idle"
+		if r.status.NeedsContinue {
+			continuationState = "continue"
+		}
+	case startHandoff:
+		// Resume the same transcript. No account switch happened, so no
+		// continuation prompt; the interrupted state carries over unchanged.
+		id = r.status.SessionID
 		continuationState = "idle"
 		if r.status.NeedsContinue {
 			continuationState = "continue"
@@ -504,11 +550,7 @@ func Run(ctx context.Context, options Options) error {
 	if err != nil {
 		return err
 	}
-	id, err := randomID()
-	if err != nil {
-		return err
-	}
-	token, err := randomID()
+	inherited, err := takeHandoff()
 	if err != nil {
 		return err
 	}
@@ -521,47 +563,97 @@ func Run(ctx context.Context, options Options) error {
 			_ = startupLock.Close()
 		}
 	}()
-	var pending transaction
-	if err := readJSON(filepath.Join(root, "pending.json"), &pending); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	if pending.Generation != "" {
-		return errors.New("managed Claude rotation is pending; retry after it finishes")
-	}
-	dir := filepath.Join(root, id)
-	if err := privateDir(dir); err != nil {
-		return err
-	}
-	lease, err := privateFile(filepath.Join(dir, "lease"), unix.O_CREAT|unix.O_RDWR)
-	if err != nil {
-		os.RemoveAll(dir)
-		return err
+	var (
+		dir      string
+		reg      registration
+		lease    *os.File
+		lfile    *os.File
+		listener net.Listener
+		cwd      string
+	)
+	if inherited != nil {
+		// Same process, same participant: an in-progress daemon generation is
+		// unaffected, because the upgrade exit only happened with none active.
+		dir, reg, options = inherited.Dir, inherited.Reg, inherited.Options
+		if lease, err = inheritedFile(inherited.LeaseFD, "lease"); err != nil {
+			return err
+		}
+		if lfile, err = inheritedFile(inherited.ListenerFD, "listener"); err != nil {
+			return err
+		}
+		if listener, err = net.FileListener(lfile); err != nil {
+			return err
+		}
+		cwd = inherited.CWD
+	} else {
+		var pending transaction
+		if err := readJSON(filepath.Join(root, "pending.json"), &pending); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		if pending.Generation != "" {
+			return errors.New("managed Claude rotation is pending; retry after it finishes")
+		}
+		id, err := randomID()
+		if err != nil {
+			return err
+		}
+		token, err := randomID()
+		if err != nil {
+			return err
+		}
+		dir = filepath.Join(root, id)
+		if err := privateDir(dir); err != nil {
+			return err
+		}
+		if lease, err = privateFile(filepath.Join(dir, "lease"), unix.O_CREAT|unix.O_RDWR); err != nil {
+			os.RemoveAll(dir)
+			return err
+		}
+		if err := unix.Flock(int(lease.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+			lease.Close()
+			os.RemoveAll(dir)
+			return err
+		}
+		if cwd, err = os.Getwd(); err != nil {
+			lease.Close()
+			os.RemoveAll(dir)
+			return err
+		}
+		if listener, err = net.Listen("tcp4", "127.0.0.1:0"); err != nil {
+			lease.Close()
+			os.RemoveAll(dir)
+			return err
+		}
+		reg = registration{ID: id, PID: os.Getpid(), URL: "http://" + listener.Addr().String(), Token: token}
 	}
 	defer lease.Close()
-	if err := unix.Flock(int(lease.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
-		os.RemoveAll(dir)
-		return err
-	}
 	keep := false
 	defer func() {
 		if !keep {
 			_ = os.RemoveAll(dir)
 		}
 	}()
+	// A new binary may carry a new plugin; always install the embedded copy.
+	if err := os.RemoveAll(filepath.Join(dir, "plugin")); err != nil {
+		return err
+	}
 	if err := extractPlugin(dir); err != nil {
 		return err
 	}
-	cwd, err := os.Getwd()
-	if err != nil {
-		return err
-	}
-	listener, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		return err
-	}
 	r := &runner{dir: dir, options: options, pane: os.Getenv("TMUX_PANE"), tmux: os.Getenv("TMUX"), wake: make(chan struct{}, 1)}
-	r.reg = registration{ID: id, PID: os.Getpid(), URL: "http://" + listener.Addr().String(), Token: token}
-	r.status = StatusInfo{ID: id, RunnerPID: os.Getpid(), CWD: cwd, Live: true, NeedsContinue: options.InitialContinuation == "continue"}
+	r.reg = reg
+	r.status = StatusInfo{ID: reg.ID, RunnerPID: os.Getpid(), CWD: cwd, Live: true, NeedsContinue: options.InitialContinuation == "continue"}
+	if inherited != nil {
+		r.status.SessionID = inherited.SessionID
+		r.status.NeedsContinue = inherited.NeedsContinue
+	}
+	if self, err := os.Executable(); err == nil {
+		if resolved, err := filepath.EvalSymlinks(self); err == nil {
+			if id, err := identify(resolved); err == nil {
+				r.self, r.selfID = resolved, id
+			}
+		}
+	}
 	r.gate = func() error { return verifiedTMUXPane(r.pane, r.tmux) }
 	server := &http.Server{Handler: r, ReadHeaderTimeout: 2 * time.Second, ReadTimeout: 3 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: 5 * time.Second, MaxHeaderBytes: 4096}
 	defer server.Close()
@@ -574,7 +666,11 @@ func Run(ctx context.Context, options Options) error {
 	defer signal.Stop(interrupts)
 	runCtx, cancel := signal.NotifyContext(ctx, syscall.SIGTERM, syscall.SIGHUP)
 	defer cancel()
-	cmd, err := r.startLocked(runCtx, false)
+	mode := startInitial
+	if inherited != nil {
+		mode = startHandoff
+	}
+	cmd, err := r.startLocked(runCtx, mode)
 	if err != nil {
 		return err
 	}
@@ -583,6 +679,8 @@ func Run(ctx context.Context, options Options) error {
 	childDone := make(chan error, 1)
 	go func() { childDone <- cmd.Wait() }()
 	childRunning := true
+	upgradeCheck := time.NewTicker(upgradeGrace)
+	defer upgradeCheck.Stop()
 	for {
 		select {
 		case <-interrupts:
@@ -614,12 +712,53 @@ func Run(ctx context.Context, options Options) error {
 			}
 			restore()
 			return runCtx.Err()
+		case <-upgradeCheck.C:
+			r.mu.Lock()
+			// An acknowledged upgrade exit that never ends would hold the
+			// session in a non-ready state; drop it and keep the old binary.
+			if r.upgrading && !r.status.Exited && time.Since(r.upgradeAt) > upgradeGrace {
+				r.upgrading = false
+				r.exitRequested = false
+				r.exitAcknowledged = false
+				r.status.Generation = ""
+			}
+			r.mu.Unlock()
 		case childErr := <-childDone:
 			childRunning = false
 			restore()
 			r.mu.Lock()
 			r.status.Exited = true
 			r.status.Ready = false
+			if r.upgrading && r.exitAcknowledged && r.status.Generation == upgradeGeneration && childErr == nil {
+				h := handoff{Reg: r.reg, Dir: r.dir, Options: r.options, SessionID: r.status.SessionID, CWD: r.status.CWD, NeedsContinue: r.status.NeedsContinue}
+				self := r.self
+				r.mu.Unlock()
+				execErr := errors.New("listener cannot be handed over")
+				if lf, err := listenerFile(listener, lfile); err == nil {
+					execErr = execUpgrade(self, h, lf, lease)
+				}
+				// Exec failed: stay on this binary and resume the same session
+				// without a continuation prompt.
+				fmt.Fprintln(os.Stderr, "qswitch: runner upgrade failed, keeping current version:", execErr)
+				r.mu.Lock()
+				r.upgrading = false
+				r.exitRequested = false
+				r.exitAcknowledged = false
+				r.status.Generation = ""
+				r.selfID, _ = identify(self) // do not retry the same failing file forever
+				r.mu.Unlock()
+				if cmd, err = r.startLocked(runCtx, startHandoff); err != nil {
+					r.mu.Lock()
+					r.failLocked(err)
+					_ = r.persistLocked()
+					r.mu.Unlock()
+					keep = true
+					return err
+				}
+				childRunning = true
+				go func(child *exec.Cmd) { childDone <- child.Wait() }(cmd)
+				continue
+			}
 			managedExit := r.exitAcknowledged && r.status.Generation != "" && childErr == nil
 			if !managedExit {
 				if r.status.Generation != "" || childErr != nil {

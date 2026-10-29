@@ -163,8 +163,8 @@ func Release(dataDir, generation string, committed bool) error {
 	}
 	var result error
 	for _, p := range live {
-		if p.status.Generation == "" {
-			continue
+		if p.status.Generation == "" || p.status.Generation == upgradeGeneration {
+			continue // a runner upgrade is not a daemon generation
 		}
 		if generation != "" && p.status.Generation != generation {
 			continue

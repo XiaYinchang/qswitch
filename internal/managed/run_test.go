@@ -101,6 +101,108 @@ func TestResumeIsDeliveredOnceToAWaitingSession(t *testing.T) {
 	}
 }
 
+// replaceSelf points the runner at a binary file and then replaces that path
+// with a new file, as an install script's rename does.
+func replaceSelf(t *testing.T, r *runner) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "qswitch")
+	if err := os.WriteFile(path, []byte("old"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	id, err := identify(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.self, r.selfID = path, id
+	next := path + ".new"
+	if err := os.WriteFile(next, []byte("new"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(next, path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func heartbeat(t *testing.T, r *runner, state sessionState) action {
+	t.Helper()
+	var a action
+	if err := json.Unmarshal(callRunner(t, r, "/state", state).Body.Bytes(), &a); err != nil {
+		t.Fatal(err)
+	}
+	return a
+}
+
+func TestReplacedBinaryRequestsUpgradeExitOnlyWhenIdle(t *testing.T) {
+	r := testRunner(t)
+	state := stateFor(r)
+	if a := heartbeat(t, r, state); a.Action != "run" {
+		t.Fatalf("unchanged binary requested %q", a.Action)
+	}
+	replaceSelf(t, r)
+	busy := state
+	busy.Ready = false
+	busy.Reason = "model turn running"
+	if a := heartbeat(t, r, busy); a.Action != "run" {
+		t.Fatalf("busy session asked to exit for upgrade: %q", a.Action)
+	}
+	// freshLocked needs a ready heartbeat before an idle one can qualify.
+	heartbeat(t, r, state)
+	a := heartbeat(t, r, state)
+	if a.Action != "exit" || a.Generation != upgradeGeneration {
+		t.Fatalf("idle session with replaced binary: %+v", a)
+	}
+	// The plugin's acknowledgement uses the normal exit route.
+	ack := state
+	ack.Generation = upgradeGeneration
+	if got := callRunner(t, r, "/exiting", ack); got.Code != 200 {
+		t.Fatalf("upgrade exit not acknowledged: %s", got.Body.String())
+	}
+}
+
+func TestUpgradeIsAbandonedWhenTheSessionBecomesBusy(t *testing.T) {
+	r := testRunner(t)
+	replaceSelf(t, r)
+	state := stateFor(r)
+	heartbeat(t, r, state)
+	if a := heartbeat(t, r, state); a.Action != "exit" {
+		t.Fatalf("upgrade not requested: %q", a.Action)
+	}
+	busy := state
+	busy.Ready = false
+	busy.Reason = "text draft is present"
+	if a := heartbeat(t, r, busy); a.Action != "run" {
+		t.Fatalf("busy session kept the upgrade exit: %q", a.Action)
+	}
+	if r.upgrading || r.status.Generation != "" || r.exitRequested {
+		t.Fatalf("upgrade state not cleared: upgrading=%v generation=%q", r.upgrading, r.status.Generation)
+	}
+}
+
+func TestUpgradeWaitsForDaemonGenerationAndBlocksPrepare(t *testing.T) {
+	r := testRunner(t)
+	replaceSelf(t, r)
+	state := stateFor(r)
+	if got := callRunner(t, r, "/prepare", control{Generation: "g"}); got.Code != 200 {
+		t.Fatal(got.Body.String())
+	}
+	heartbeat(t, r, state)
+	if a := heartbeat(t, r, state); a.Generation != "g" {
+		t.Fatalf("upgrade pre-empted a daemon generation: %+v", a)
+	}
+	callRunner(t, r, "/release", control{Generation: "g"})
+	heartbeat(t, r, state)
+	if a := heartbeat(t, r, state); a.Action != "exit" || a.Generation != upgradeGeneration {
+		t.Fatalf("upgrade not requested after release: %+v", a)
+	}
+	var prepared StatusInfo
+	if err := json.Unmarshal(callRunner(t, r, "/prepare", control{Generation: "h"}).Body.Bytes(), &prepared); err != nil {
+		t.Fatal(err)
+	}
+	if prepared.Ready || prepared.Generation != "" {
+		t.Fatalf("upgrading runner joined a daemon generation: %+v", prepared)
+	}
+}
+
 func TestExitRechecksTmuxAndFreshSession(t *testing.T) {
 	r := testRunner(t)
 	if got := callRunner(t, r, "/prepare", control{Generation: "g"}); got.Code != 200 {
@@ -314,7 +416,7 @@ func TestRestartContinuesOnlyAfterCommittedRelease(t *testing.T) {
 			r.status.Generation = "g"
 			r.status.NeedsContinue = true
 			r.exitAcknowledged, r.released, r.committed = true, true, committed
-			child, err := r.startLocked(context.Background(), true)
+			child, err := r.startLocked(context.Background(), startRotation)
 			if err != nil {
 				t.Fatal(err)
 			}
