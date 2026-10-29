@@ -153,7 +153,9 @@ const EXIT_GRACE_MS = 30000;
   function recordTool(e, value) {
     const key = e.tool_use_id;
     if (value.deny) { uncertainTasks.delete(key); return; }
-    if (value.isError) return;
+    // A failed Bash call (non-zero exit, rejected command) ran in the
+    // foreground; backgrounding is reported as success with a task id.
+    if (value.isError) { if (e.tool === 'Bash') uncertainTasks.delete(key); return; }
     const result = value.result;
     if (!result || typeof result !== 'object') return;
     if (e.tool === 'Bash' && typeof result.stdout === 'string' && typeof result.stderr === 'string') {
@@ -185,6 +187,16 @@ const EXIT_GRACE_MS = 30000;
     'TaskCreate', 'TaskGet', 'TaskList', 'TaskUpdate', 'CronList',
     'EnterPlanMode', 'ExitPlanMode', 'ListAgents', 'GetTask',
   ]);
+
+// Claude Code delivers a finished background task as a task-notification
+// prompt. When that turn ends in a rate limit there is no Stop snapshot, so
+// the notification is the only completion evidence.
+function finishedTaskID(e) {
+  if (e.origin?.kind !== 'task-notification' || typeof e.text !== 'string') return '';
+  const id = /<task-id>([^<]+)<\/task-id>/.exec(e.text)?.[1];
+  const status = /<status>([^<]+)<\/status>/.exec(e.text)?.[1];
+  return id && ['completed', 'failed', 'killed'].includes(status) ? id : '';
+}
 
 export function register(on) {
   on('tool.call', async ($, e, next) => {
@@ -244,6 +256,9 @@ export function register(on) {
       if (result.drop) {
         const index = queued.indexOf(submission);
         if (index !== -1) queued.splice(index, 1);
+      } else {
+        const finished = finishedTaskID(e);
+        if (finished) background = background.filter(task => task.id !== finished);
       }
       return result;
     } catch (error) {

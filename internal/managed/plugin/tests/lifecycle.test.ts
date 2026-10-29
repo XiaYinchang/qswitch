@@ -176,3 +176,44 @@ test('rotation exit keeps its acknowledgement while Claude shuts down', async ($
   await clock.advance(20000);
   expect(await status($)).toMatchObject({ ready: false, reason: 'exit command returned without terminating the session' });
 });
+
+test('a failed foreground Bash call does not leave an uncertain task', async ($, on) => {
+  setup(on);
+  on('tool.call', { tool: 'Bash' }, () => ({ isError: true, result: 'Error: Exit code 1' }));
+  await start($);
+  await $.tool.call({ tool: 'Bash', command: 'false' });
+  await $.classic.StopFailure({ error: 'rate_limit' });
+  expect(await status($)).toMatchObject({ ready: true, needs_continue: true, uncertain_tasks: [] });
+});
+
+test('a completed task notification retires its background task without a Stop', async ($, on) => {
+  setup(on);
+  on('tool.call', { tool: 'Bash' }, () => ({ result: {
+    stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'bg1',
+  } }));
+  on('prompt.submit', ($, e) => ({ text: e.text }));
+  await start($);
+  await $.tool.call({ tool: 'Bash', command: 'release', run_in_background: true });
+  expect((await status($)).ready).toBe(false);
+  const text = '<task-notification>\n<task-id>bg1</task-id>\n<status>completed</status>\n</task-notification>';
+  await $.prompt.submit({ text, wait: true, origin: { kind: 'task-notification', producer: 'session-task' } });
+  await $.turn.start({ turnId: 'notified', text });
+  await $.classic.StopFailure({ error: 'rate_limit' });
+  await complete($, 'notified', 'error');
+  expect(await status($)).toMatchObject({ ready: true, needs_continue: true, background_tasks: [] });
+});
+
+test('a running task notification keeps its background task', async ($, on) => {
+  setup(on);
+  on('tool.call', { tool: 'Bash' }, () => ({ result: {
+    stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'bg1',
+  } }));
+  on('prompt.submit', ($, e) => ({ text: e.text }));
+  await start($);
+  await $.tool.call({ tool: 'Bash', command: 'watch', run_in_background: true });
+  const text = '<task-notification>\n<task-id>bg1</task-id>\n<status>running</status>\n</task-notification>';
+  await $.prompt.submit({ text, wait: true, origin: { kind: 'task-notification', producer: 'session-task' } });
+  await $.turn.start({ turnId: 'notified', text });
+  await complete($, 'notified', 'answer');
+  expect(await status($)).toMatchObject({ ready: false, background_tasks: [{ id: 'bg1', type: 'shell' }] });
+});
