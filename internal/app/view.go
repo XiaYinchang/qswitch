@@ -7,6 +7,7 @@ import (
 
 	"qswitch/internal/adapter"
 	"qswitch/internal/config"
+	"qswitch/internal/managed"
 	"qswitch/internal/quota"
 	"qswitch/internal/state"
 )
@@ -29,7 +30,18 @@ type ToolView struct {
 	DevinApp    bool          `json:"devin_app"`
 	BlockedPIDs []int         `json:"blocked_by_pid"`
 	PendingTo   string        `json:"pending_to,omitempty"`
+	Managed     []ManagedView `json:"managed,omitempty"`
 	Accounts    []AccountView `json:"accounts"`
+}
+
+// ManagedView lets the page tell sessions that rotate on their own apart from
+// plain Claude processes that must be restarted through qswitch run.
+type ManagedView struct {
+	PID           int    `json:"pid"`
+	Ready         bool   `json:"ready"`
+	NeedsContinue bool   `json:"needs_continue"`
+	Reason        string `json:"reason,omitempty"`
+	Recovery      string `json:"recovery,omitempty"`
 }
 
 type AccountView struct {
@@ -99,6 +111,15 @@ func (a *App) Overview() Overview {
 			DevinApp:    aut.DevinApp,
 			BlockedPIDs: man.ManualPIDs(),
 			PendingTo:   pend.ToID,
+		}
+		if t == adapter.Claude {
+			sessions, _ := managed.Status(a.DataDir)
+			for _, s := range sessions {
+				if s.Exited && s.Recovery == "" {
+					continue
+				}
+				tv.Managed = append(tv.Managed, ManagedView{PID: s.ChildPID, Ready: s.Ready, NeedsContinue: s.NeedsContinue, Reason: s.Reason, Recovery: s.Recovery})
+			}
 		}
 		accs, _ := a.State.ListAccounts(string(t))
 		for _, ac := range accs {

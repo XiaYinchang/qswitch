@@ -337,12 +337,25 @@ function switchNote(tool) {
     const target = (tool.accounts || []).find(ac => ac.stable_id === tool.pending_to);
     parts.push(`待切换至 ${target ? accountLabel(target) : tool.pending_to}，当前账号尚未切换。`);
   }
-  if (pids.length) parts.push(`阻塞进程 PID：${pids.join("、")}。`);
-  if (["claude", "kimi"].includes(tool.tool)) {
-    if (blocked) parts.push("请在对应终端退出所有运行中的会话；仅空闲 30 秒不会解除阻塞。");
-    else parts.push("当前未检测到阻塞会话。");
-  } else if (blocked) {
-    parts.push("请等待 CLI 会话满足空闲条件，或在对应终端退出会话。");
+  const managed = (tool.managed || []).filter(s => Number.isInteger(s.pid));
+  const managedPIDs = new Set(managed.map(s => s.pid));
+  const plain = pids.filter(pid => !managedPIDs.has(pid));
+  if (tool.tool === "claude" && managed.length) {
+    if (plain.length) parts.push(`未受管 Claude 进程 PID：${plain.join("、")}，会阻断切换。请在对应终端 /exit，再用 qswitch run claude 恢复该会话。`);
+    const recovery = managed.filter(s => s.recovery);
+    const waiting = managed.filter(s => !s.recovery && !s.ready);
+    const ready = managed.filter(s => !s.recovery && s.ready);
+    if (recovery.length) parts.push(`受管会话需要人工恢复：${recovery.map(s => `PID ${s.pid}（${s.recovery}）`).join("；")}。`);
+    if (waiting.length) parts.push(`受管会话尚未就绪：${waiting.map(s => `PID ${s.pid}${s.reason ? `（${s.reason}）` : ""}`).join("；")}。`);
+    if (ready.length) parts.push(`受管会话已就绪：PID ${ready.map(s => s.pid).join("、")}。tmux 无客户端连接时自动退出、切号并恢复原会话，无需手动退出。`);
+  } else {
+    if (pids.length) parts.push(`阻塞进程 PID：${pids.join("、")}。`);
+    if (["claude", "kimi"].includes(tool.tool)) {
+      if (blocked) parts.push("请在对应终端退出所有运行中的会话；仅空闲 30 秒不会解除阻塞。");
+      else parts.push("当前未检测到阻塞会话。");
+    } else if (blocked) {
+      parts.push("请等待 CLI 会话满足空闲条件，或在对应终端退出会话。");
+    }
   }
   if (tool.pending_to) parts.push("排队切换仍需通过用量和安全检查，请刷新查看结果。");
   else parts.push("退出后刷新，再选择目标账号切换。");
