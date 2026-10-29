@@ -1483,6 +1483,11 @@ func (a *App) probeAccount(ctx context.Context, tool adapter.Tool, id string, ga
 	return a.probeAccountLocked(ctx, tool, id, gateInterval)
 }
 
+func (a *App) serverThrottled(tool adapter.Tool, id string) bool {
+	last, err := a.State.LatestQuota(string(tool), id)
+	return err == nil && last.Source == "http_throttled"
+}
+
 // The caller holds the tool lock through credential refresh and quota storage.
 func (a *App) probeAccountLocked(ctx context.Context, tool adapter.Tool, id string, gateInterval bool) quota.Result {
 	cfg := a.cfgSnapshot()
@@ -1495,7 +1500,9 @@ func (a *App) probeAccountLocked(ctx context.Context, tool adapter.Tool, id stri
 		return quota.Result{Class: quota.Unknown}
 	}
 	now := a.now()
-	if gateInterval && acc.HTTPBackoffUntil > now.Unix() {
+	if acc.HTTPBackoffUntil > now.Unix() && (gateInterval || a.serverThrottled(tool, id)) {
+		// Manual refreshes may retry an ordinary failure at once, but not
+		// before a throttling server's retry deadline: that extends the limit.
 		return quota.Result{Class: quota.Class(acc.LastQuotaClass), UsedPct: acc.LastUsedPct, ResetsAt: acc.LastResetsAt, Source: "backoff"}
 	}
 	if gateInterval && acc.RefreshBackoffUntil > now.Unix() {

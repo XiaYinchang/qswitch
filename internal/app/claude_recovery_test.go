@@ -148,6 +148,40 @@ func TestClaudeExpiredCaptureQuarantinesUnverifiedIdentity(t *testing.T) {
 	}
 }
 
+// A manual refresh may retry an ordinary failure immediately, but it must not
+// keep hitting a server that answered 429: on novix repeated page refreshes
+// sent 12 usage requests in 40 s and extended the throttle.
+func TestManualClaudeProbeWaitsForServerThrottle(t *testing.T) {
+	a := setupClaudeRecovery(t, "", false)
+	a.HTTP.Client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return claudeRecoveryResponse(req, 200, `{"account":{"uuid":"live-account"}}`), nil
+	})}
+	if _, _, err := a.Capture(adapter.Claude); err != nil {
+		t.Fatal(err)
+	}
+	status, usage := http.StatusTooManyRequests, 0
+	a.HTTP.Client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path != "/api/oauth/usage" {
+			return claudeRecoveryResponse(req, 200, `{"account":{"uuid":"live-account"}}`), nil
+		}
+		usage++
+		return claudeRecoveryResponse(req, status, `{"five_hour":{"utilization":40},"seven_day":{"utilization":10}}`), nil
+	})}
+	if res := a.ProbeAccount(context.Background(), adapter.Claude, "live-account"); res.Source != "http_throttled" || usage != 1 {
+		t.Fatalf("first probe: source=%s requests=%d", res.Source, usage)
+	}
+	if res := a.ProbeAccount(context.Background(), adapter.Claude, "live-account"); res.Source != "backoff" || usage != 1 {
+		t.Fatalf("manual probe ignored the server throttle: source=%s requests=%d", res.Source, usage)
+	}
+	status = http.StatusServiceUnavailable + 1 // an ordinary failure, not throttling
+	ac, _ := a.State.GetAccount("claude", "live-account")
+	a.Clock = clock.Fixed{T: time.Unix(ac.HTTPBackoffUntil, 0)}
+	a.ProbeAccount(context.Background(), adapter.Claude, "live-account")
+	if res := a.ProbeAccount(context.Background(), adapter.Claude, "live-account"); usage != 3 || res.Source == "backoff" {
+		t.Fatalf("manual probe should retry an ordinary failure at once: source=%s requests=%d", res.Source, usage)
+	}
+}
+
 func TestClaudeTransientProfileFailureNeverRefreshes(t *testing.T) {
 	for _, status := range []int{0, 403, 429, 500, 503} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
