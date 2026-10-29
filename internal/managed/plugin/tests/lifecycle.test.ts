@@ -217,3 +217,19 @@ test('a running task notification keeps its background task', async ($, on) => {
   await complete($, 'notified', 'answer');
   expect(await status($)).toMatchObject({ ready: false, background_tasks: [{ id: 'bg1', type: 'shell' }] });
 });
+
+test('an automatic delivery during preparation is admitted and only delays readiness', async ($, on) => {
+  const { control } = setup(on, 'continue');
+  on('prompt.submit', ($, e) => ({ text: e.text }));
+  control.action = 'prepare';
+  control.generation = 'generation-1';
+  await start($);
+  const text = '<task-notification>\n<task-id>bg9</task-id>\n<status>completed</status>\n</task-notification>';
+  const result = await $.prompt.submit({ text, wait: true, origin: { kind: 'task-notification', producer: 'session-task' } });
+  expect(result.drop).toBeUndefined();
+  expect((await status($)).ready).toBe(false);
+  await $.turn.start({ turnId: 'notified', text });
+  await $.classic.StopFailure({ error: 'rate_limit' });
+  await complete($, 'notified', 'error');
+  expect(await status($)).toMatchObject({ ready: true, needs_continue: true, phase: 'prepare' });
+});

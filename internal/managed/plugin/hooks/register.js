@@ -230,19 +230,18 @@ export function register(on) {
 
   on('prompt.submit', async ($, e, next) => {
     changed();
-    if (phase !== 'run') {
+    // Typed input is held back and restored to the text box. Automatic
+    // deliveries (task notifications, scheduled prompts) cannot be restored,
+    // so they are admitted: the queued prompt and its turn block readiness
+    // until they finish, and the drain resumes afterwards.
+    if (phase !== 'run' && (e.origin.kind === 'composer' || e.origin.kind === 'bridge')) {
       blockedSubmission = true;
       const message = 'qswitch is preparing an account switch. This submission was not sent. Submit it again after preparation is released.';
-      if (e.origin.kind === 'composer' || e.origin.kind === 'bridge') {
-        try {
-          const filled = await $.prompt.fill({ text: e.text, mode: 'append' });
-          if (!filled.isFilled) unknown = 'blocked submission could not be restored to the text input';
-        } catch {
-          unknown = 'blocked submission could not be restored to the text input';
-        }
-      } else {
-        // Automatic deliveries cannot be silently dropped then forgotten.
-        unknown = 'automatic delivery blocked during preparation; manual attention required';
+      try {
+        const filled = await $.prompt.fill({ text: e.text, mode: 'append' });
+        if (!filled.isFilled) unknown = 'blocked submission could not be restored to the text input';
+      } catch {
+        unknown = 'blocked submission could not be restored to the text input';
       }
       return { drop: message };
     }
