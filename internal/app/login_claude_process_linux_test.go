@@ -51,7 +51,7 @@ func TestClaudeLoginChildLifecycle(t *testing.T) {
 			dirFile := filepath.Join(root, "login.dir")
 			bin := filepath.Join(binDir, "claude")
 			for path, script := range map[string]string{
-				bin: "#!/bin/sh\nprintf '%s' \"$CLAUDE_CONFIG_DIR\" > \"$QSWITCH_LOGIN_TEST_DIR_FILE\"\nprintf '%s' \"$$\" > \"$QSWITCH_LOGIN_TEST_CLAUDE_PID\"\nexec \"$QSWITCH_LOGIN_TEST_SLEEP\" 60\n",
+				bin:                          "#!/bin/sh\nprintf '%s' \"$CLAUDE_CONFIG_DIR\" > \"$QSWITCH_LOGIN_TEST_DIR_FILE\"\nprintf '%s' \"$$\" > \"$QSWITCH_LOGIN_TEST_CLAUDE_PID\"\nexec \"$QSWITCH_LOGIN_TEST_SLEEP\" 60\n",
 				filepath.Join(binDir, "cat"): "#!/bin/sh\nprintf '%s' \"$$\" > \"$QSWITCH_LOGIN_TEST_CAT_PID\"\nexec \"$QSWITCH_LOGIN_TEST_CAT\"\n",
 			} {
 				if err := os.WriteFile(path, []byte(script), 0o700); err != nil {

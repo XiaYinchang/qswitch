@@ -23,11 +23,11 @@ const claudeRecoveryVault = "claude-recovery"
 // pairs, not expiry timestamps, identify credentials consumed by an exchange.
 // A record without Updated fences an exchange whose outcome is unknown.
 type claudeRecovery struct {
-	Version   int           `json:"version"`
+	Version   int            `json:"version"`
 	Old       []claude.Creds `json:"old"`
-	Updated   *adapter.Blob `json:"updated,omitempty"`
-	AccountID string        `json:"account_id,omitempty"`
-	LivePath  string        `json:"live_path,omitempty"`
+	Updated   *adapter.Blob  `json:"updated,omitempty"`
+	AccountID string         `json:"account_id,omitempty"`
+	LivePath  string         `json:"live_path,omitempty"`
 	key       string
 }
 

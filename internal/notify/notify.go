@@ -3,6 +3,7 @@ package notify
 import (
 	"os/exec"
 	"strings"
+	"sync"
 )
 
 type Notifier interface {
@@ -21,9 +22,15 @@ func (o OS) Send(title, body string) {
 	_ = exec.Command("osascript", "-e", script).Run()
 }
 
-type Log struct{ Msgs []string }
+// Log records notifications; daemon workers may send concurrently.
+type Log struct {
+	mu   sync.Mutex
+	Msgs []string
+}
 
 func (l *Log) Send(title, body string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	l.Msgs = append(l.Msgs, title+": "+body)
 }
 

@@ -94,6 +94,46 @@ func TestDaemonReloadsConfigWhileOperationBlocked(t *testing.T) {
 	}
 }
 
+type enteredFingerprintAdapter struct {
+	adapter.Adapter
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (a *enteredFingerprintAdapter) Fingerprint(home string) ([32]byte, error) {
+	a.once.Do(func() { close(a.entered) })
+	return a.Adapter.Fingerprint(home)
+}
+
+func TestDaemonStalledToolDoesNotDelayOtherTools(t *testing.T) {
+	a, _ := setup(t)
+	stalled := &blockedFingerprintAdapter{Adapter: a.Adapters[adapter.Codex], entered: make(chan struct{}), release: make(chan struct{})}
+	a.Adapters[adapter.Codex] = stalled
+	// Claude follows Codex in AllTools, so a single serial loop never reaches it.
+	other := &enteredFingerprintAdapter{Adapter: a.Adapters[adapter.Claude], entered: make(chan struct{})}
+	a.Adapters[adapter.Claude] = other
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- a.RunDaemon(ctx) }()
+	defer func() {
+		close(stalled.release)
+		cancel()
+		if err := <-done; err != nil {
+			t.Error(err)
+		}
+	}()
+	select {
+	case <-stalled.entered:
+	case <-time.After(4 * time.Second):
+		t.Fatal("daemon did not start codex ingest")
+	}
+	select {
+	case <-other.entered:
+	case <-time.After(4 * time.Second):
+		t.Fatal("stalled codex ingest delayed claude ingest")
+	}
+}
+
 func TestOverviewConcurrentConfigChanges(t *testing.T) {
 	a, _ := setup(t)
 	var wg sync.WaitGroup

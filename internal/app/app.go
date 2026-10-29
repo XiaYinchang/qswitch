@@ -1949,6 +1949,19 @@ func (a *App) RunDaemon(ctx context.Context) error {
 		cancelConfig()
 		<-configDone
 	}()
+	a.Notify.Send("qswitch", "daemon started")
+	// One worker per tool: a slow provider request delays only its own tool.
+	// Steps for one tool stay serialized, and each step still takes the tool's
+	// credential lock, so manual web/CLI operations remain mutually exclusive.
+	var workers sync.WaitGroup
+	for _, t := range adapter.AllTools() {
+		workers.Go(func() { a.runToolWorker(ctx, t) })
+	}
+	workers.Wait()
+	return nil
+}
+
+func (a *App) runToolWorker(ctx context.Context, tool adapter.Tool) {
 	tIngest := time.NewTicker(2 * time.Second)
 	tLocal := time.NewTicker(30 * time.Second)
 	tHTTP := time.NewTicker(2 * time.Minute) // actual HTTP still gated by min_http_interval
@@ -1957,32 +1970,23 @@ func (a *App) RunDaemon(ctx context.Context) error {
 	defer tLocal.Stop()
 	defer tHTTP.Stop()
 	defer tApply.Stop()
-	a.Notify.Send("qswitch", "daemon started")
 	for {
 		select {
 		case <-ctx.Done():
-			return nil
+			return
 		case <-tIngest.C:
-			for _, t := range adapter.AllTools() {
-				_ = a.Ingest(t)
-			}
+			_ = a.Ingest(tool)
 		case <-tLocal.C:
-			for _, t := range adapter.AllTools() {
-				a.ProbeLocal(t)
-			}
+			a.ProbeLocal(tool)
 		case <-tHTTP.C:
 			if a.HTTP.Client == nil && secutil.InTest() {
 				continue
 			}
-			for _, t := range adapter.AllTools() {
-				a.KeepAlive(ctx, t)
-				a.ProbeHTTP(ctx, t, false)
-				a.ProbeRecovered(ctx, t, false)
-			}
+			a.KeepAlive(ctx, tool)
+			a.ProbeHTTP(ctx, tool, false)
+			a.ProbeRecovered(ctx, tool, false)
 		case <-tApply.C:
-			for _, t := range adapter.AllTools() {
-				_ = a.TryApply(t, false)
-			}
+			_ = a.TryApply(tool, false)
 		}
 	}
 }

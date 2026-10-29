@@ -241,10 +241,14 @@ func TestVerifiedIdentityRestoresMatchingMetadata(t *testing.T) {
 				}
 				if sourceMeta == "saved-before-fix" {
 					p, err := readPayload(blob)
-					if err != nil { t.Fatal(err) }
+					if err != nil {
+						t.Fatal(err)
+					}
 					p.OAuthAccount = `{"accountUuid":"obsolete","emailAddress":"obsolete@example.test"}`
 					blob.Payload, err = json.Marshal(p)
-					if err != nil { t.Fatal(err) }
+					if err != nil {
+						t.Fatal(err)
+					}
 				}
 				dest := t.TempDir()
 				destMeta := filepath.Join(dest, ".claude.json")
@@ -284,21 +288,35 @@ func TestRestoreCredentialFailureRollsBackMetadata(t *testing.T) {
 			writeCreds(t, source, validOAuth())
 			a := Adapter{List: func() ([]adapter.Proc, error) { return nil, nil }}
 			blobs, _, err := a.Capture(source)
-			if err != nil { t.Fatal(err) }
+			if err != nil {
+				t.Fatal(err)
+			}
 			blob, err := WriteIdentity(blobs[0], adapter.Identity{Tool: adapter.Claude, StableID: "verified", Email: "verified@example.test"})
-			if err != nil { t.Fatal(err) }
+			if err != nil {
+				t.Fatal(err)
+			}
 			dest := t.TempDir()
 			metaPath := filepath.Join(dest, ".claude.json")
 			original := `{"oauthAccount":{"accountUuid":"original"}}`
 			if existing {
-				if err := os.WriteFile(metaPath, []byte(original), 0o600); err != nil { t.Fatal(err) }
+				if err := os.WriteFile(metaPath, []byte(original), 0o600); err != nil {
+					t.Fatal(err)
+				}
 			}
 			// A directory at the credential destination forces atomic rename failure.
-			if err := os.MkdirAll(credentialsPath(dest), 0o700); err != nil { t.Fatal(err) }
-			if err := a.Restore(dest, blob, adapter.RestoreOpts{}); err == nil { t.Fatal("expected credential write failure") }
+			if err := os.MkdirAll(credentialsPath(dest), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := a.Restore(dest, blob, adapter.RestoreOpts{}); err == nil {
+				t.Fatal("expected credential write failure")
+			}
 			raw, err := os.ReadFile(metaPath)
-			if existing && (err != nil || string(raw) != original) { t.Fatal("original metadata not restored") }
-			if !existing && !os.IsNotExist(err) { t.Fatal("new metadata not removed after failure") }
+			if existing && (err != nil || string(raw) != original) {
+				t.Fatal("original metadata not restored")
+			}
+			if !existing && !os.IsNotExist(err) {
+				t.Fatal("new metadata not removed after failure")
+			}
 		})
 	}
 }

@@ -42,7 +42,7 @@ func writeClaudeRecoveryLive(t *testing.T, a *App, access, refresh string, expir
 	t.Helper()
 	raw, err := json.Marshal(map[string]any{
 		"claudeAiOauth": claude.Creds{AccessToken: access, RefreshToken: refresh, ExpiresAt: expires.UnixMilli()},
-		"unrelated": "preserve-me",
+		"unrelated":     "preserve-me",
 	})
 	if err != nil {
 		t.Fatal(err)
