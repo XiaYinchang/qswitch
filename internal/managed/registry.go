@@ -86,6 +86,30 @@ func rootDir(dataDir string) (string, error) {
 	return root, nil
 }
 
+// markLimitHit records that a managed session just hit the account usage
+// limit. It is only a hint: the daemon still confirms exhaustion with the
+// official quota endpoint before queueing a switch.
+func markLimitHit(dataDir string) error {
+	root, err := rootDir(dataDir)
+	if err != nil {
+		return err
+	}
+	f, err := privateFile(filepath.Join(root, "limit-hit"), unix.O_CREAT|unix.O_WRONLY)
+	if err != nil {
+		return err
+	}
+	return f.Close()
+}
+
+// TakeLimitHit reports and clears a pending limit-hit hint.
+func TakeLimitHit(dataDir string) bool {
+	root, err := rootDir(dataDir)
+	if err != nil {
+		return false
+	}
+	return os.Remove(filepath.Join(root, "limit-hit")) == nil
+}
+
 func randomID() (string, error) {
 	var b [32]byte
 	if _, err := rand.Read(b[:]); err != nil {

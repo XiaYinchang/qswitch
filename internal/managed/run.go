@@ -336,6 +336,11 @@ func (r *runner) handleState(w http.ResponseWriter, route string, state sessionS
 			return
 		}
 	}
+	if state.NeedsContinue && !before.NeedsContinue && state.SessionID != "" {
+		// The plugin sets NeedsContinue only on a main-turn rate_limit failure.
+		// Telling the daemon now spares a wait for its next scheduled probe.
+		_ = markLimitHit(r.options.DataDir)
+	}
 	writeResponse(w, response)
 }
 

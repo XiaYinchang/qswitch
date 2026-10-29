@@ -48,6 +48,25 @@ func stateFor(r *runner) sessionState {
 	return sessionState{SessionID: r.status.SessionID, CWD: r.status.CWD, Ready: true, NeedsContinue: r.status.NeedsContinue, Generation: r.status.Generation}
 }
 
+func TestRateLimitTransitionSignalsDaemonOnce(t *testing.T) {
+	r := testRunner(t)
+	r.options.DataDir = t.TempDir()
+	state := stateFor(r)
+	callRunner(t, r, "/state", state)
+	if TakeLimitHit(r.options.DataDir) {
+		t.Fatal("heartbeat without a rate limit signalled the daemon")
+	}
+	state.NeedsContinue = true
+	callRunner(t, r, "/state", state)
+	if !TakeLimitHit(r.options.DataDir) {
+		t.Fatal("rate-limit transition did not signal the daemon")
+	}
+	callRunner(t, r, "/state", state)
+	if TakeLimitHit(r.options.DataDir) {
+		t.Fatal("repeated heartbeat re-signalled the same rate limit")
+	}
+}
+
 func TestExitRechecksTmuxAndFreshSession(t *testing.T) {
 	r := testRunner(t)
 	if got := callRunner(t, r, "/prepare", control{Generation: "g"}); got.Code != 200 {

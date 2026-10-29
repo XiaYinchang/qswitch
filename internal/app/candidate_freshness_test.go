@@ -177,6 +177,30 @@ func TestPickNextPrefersQuotaExpiringSoonest(t *testing.T) {
 	}
 }
 
+// A session's usage-limit failure must not wait for the scheduled probe: the
+// current account is re-checked at once and the switch proceeds.
+func TestLimitHitProbesCurrentAccountBeforeScheduledInterval(t *testing.T) {
+	a, now := candidateFixture(t)
+	seedCandidateObservation(t, a, "acc-b", "ok", 80, now.Add(-time.Minute), 0)
+	seedCandidateObservation(t, a, "acc-a", "ok", 10, now, 0)
+	calls := 0
+	a.HTTP.Client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		calls++
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"rate_limit":{"primary_window":{"used_percent":100}}}`)), Request: req}, nil
+	})}
+	a.ProbeHTTP(context.Background(), adapter.Codex, false)
+	if p, _ := a.State.GetPointer("codex"); calls != 0 || p.StableID != "acc-b" {
+		t.Fatalf("scheduled probe ignored its interval: calls=%d pointer=%s", calls, p.StableID)
+	}
+	a.ProbeLimitHit(context.Background(), adapter.Codex)
+	if calls != 1 {
+		t.Fatalf("limit hit did not re-check the current account: calls=%d", calls)
+	}
+	if p, _ := a.State.GetPointer("codex"); p.StableID != "acc-a" {
+		t.Fatalf("limit hit did not switch: pointer=%s", p.StableID)
+	}
+}
+
 func TestPendingRechecksStaleQuotaBeforeRestoring(t *testing.T) {
 	for _, tc := range []struct {
 		name         string

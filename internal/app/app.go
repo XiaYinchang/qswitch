@@ -1052,6 +1052,27 @@ func (a *App) ProbeHTTP(ctx context.Context, tool adapter.Tool, force bool) {
 	}
 }
 
+// ProbeLimitHit re-checks the current account as soon as a managed session
+// reports a usage-limit failure. It skips the scheduled interval but still
+// honours HTTP and refresh backoff, and exhaustion is confirmed by the
+// official quota endpoint before a switch is queued.
+func (a *App) ProbeLimitHit(ctx context.Context, tool adapter.Tool) {
+	cfg := a.cfgSnapshot()
+	if !cfg.General.AutoSwitch || !cfg.ToolEnabled(string(tool)) {
+		return
+	}
+	p, _ := a.State.GetPointer(string(tool))
+	if p.StableID == "" || strings.HasPrefix(p.StableID, "desktop:") {
+		return
+	}
+	if ac, err := a.State.GetAccount(string(tool), p.StableID); err != nil || ac.HTTPBackoffUntil > a.now().Unix() || ac.RefreshBackoffUntil > a.now().Unix() {
+		return
+	}
+	if res := a.probeAccount(ctx, tool, p.StableID, false); res.Class == quota.Exhausted {
+		a.considerSwitch(tool)
+	}
+}
+
 func (a *App) ProbeRecovered(ctx context.Context, tool adapter.Tool, force bool) {
 	cfg := a.cfgSnapshot()
 	if !force && !cfg.ToolEnabled(string(tool)) {
@@ -2026,6 +2047,9 @@ func (a *App) runToolWorker(ctx context.Context, tool adapter.Tool) {
 			a.ProbeHTTP(ctx, tool, false)
 			a.ProbeRecovered(ctx, tool, false)
 		case <-tApply.C:
+			if tool == adapter.Claude && managed.TakeLimitHit(a.DataDir) {
+				a.ProbeLimitHit(ctx, tool)
+			}
 			_ = a.TryApply(tool, false)
 		}
 	}
