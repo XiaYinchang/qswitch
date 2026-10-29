@@ -1,6 +1,7 @@
 // Claude Code 2.1.312 function hooks. Only submitted transcript state is
 // preserved: prompt.read() does not expose attachments or every temporary UI.
 const EXIT_GRACE_MS = 30000;
+const QUEUE_SETTLE_MS = 5000;
   let url = '';
   let token = '';
   let phase = 'run';
@@ -17,6 +18,7 @@ const EXIT_GRACE_MS = 30000;
   let exitTimer;
   let mainFailure;
   let timer;
+  let queueSettle;
   let lastState = { ready: false, reason: 'initializing' };
   const turns = new Set();
   const tools = new Set();
@@ -278,6 +280,8 @@ export function register(on) {
     if (e.agentId === undefined) {
       queued.shift();
       mainFailure = undefined;
+      queueSettle?.cancel();
+      queueSettle = undefined;
     }
     changed();
     return next(e);
@@ -289,6 +293,20 @@ export function register(on) {
     if (e.agentId === undefined && (e.reason === 'answer' || e.reason === 'aborted')) needsContinue = false;
     if (e.agentId === undefined && e.reason === 'error' && mainFailure === undefined) {
       unknown = 'model error ended without a known StopFailure outcome';
+    }
+    // Text queued while a turn runs is often absorbed into that turn instead
+    // of starting its own. A queued prompt that still has to run starts its
+    // turn right after this one ends; if none starts within the grace period,
+    // every remaining submission was consumed.
+    if (e.agentId === undefined && queued.length) {
+      queueSettle?.cancel();
+      queueSettle = $.clock.after(QUEUE_SETTLE_MS, () => {
+        queueSettle = undefined;
+        if (turns.size === 0) {
+          queued.length = 0;
+          changed();
+        }
+      });
     }
     changed();
     return result;

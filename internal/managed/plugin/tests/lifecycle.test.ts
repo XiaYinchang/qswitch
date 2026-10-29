@@ -233,3 +233,30 @@ test('an automatic delivery during preparation is admitted and only delays readi
   await complete($, 'notified', 'error');
   expect(await status($)).toMatchObject({ ready: true, needs_continue: true, phase: 'prepare' });
 });
+
+test('text queued during a turn and absorbed into it does not block readiness', async ($, on) => {
+  const { clock } = setup(on);
+  on('prompt.submit', ($, e) => ({ text: e.text }));
+  await start($);
+  await $.turn.start({ turnId: 'working', text: 'work' });
+  // Typed while the turn runs; Claude Code feeds it into the running turn.
+  await $.prompt.submit({ text: 'also check this', wait: true, origin: { kind: 'composer' } });
+  await complete($, 'working', 'answer');
+  expect((await status($)).ready).toBe(false);
+  await clock.advance(5000);
+  expect(await status($)).toMatchObject({ ready: true, queued_submissions: 0 });
+});
+
+test('a queued prompt that starts its own turn keeps blocking until it finishes', async ($, on) => {
+  const { clock } = setup(on);
+  on('prompt.submit', ($, e) => ({ text: e.text }));
+  await start($);
+  await $.turn.start({ turnId: 'first', text: 'work' });
+  await $.prompt.submit({ text: 'next task', wait: true, origin: { kind: 'composer' } });
+  await complete($, 'first', 'answer');
+  await $.turn.start({ turnId: 'second', text: 'next task' });
+  await clock.advance(5000);
+  expect((await status($)).ready).toBe(false);
+  await complete($, 'second', 'answer');
+  expect((await status($)).ready).toBe(true);
+});
