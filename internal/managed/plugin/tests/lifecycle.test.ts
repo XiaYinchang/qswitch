@@ -260,3 +260,33 @@ test('a queued prompt that starts its own turn keeps blocking until it finishes'
   await complete($, 'second', 'answer');
   expect((await status($)).ready).toBe(true);
 });
+
+test('a session restarted while interrupted continues once when the account recovers', async ($, on) => {
+  const { clock, control } = setup(on, 'continue');
+  const submitted: string[] = [];
+  on('prompt.submit', ($, e) => { submitted.push(e.text); return { text: e.text }; });
+  await start($);
+  control.action = 'resume';
+  await clock.advance(750);
+  control.action = 'run';
+  expect(submitted).toHaveLength(1);
+  expect(submitted[0]).toContain('Continue the work interrupted by the account usage limit');
+  await $.turn.start({ turnId: 'resumed', text: submitted[0]! });
+  await complete($, 'resumed', 'answer');
+  control.action = 'resume';
+  await clock.advance(750);
+  expect(submitted).toHaveLength(1);
+});
+
+test('a rate limit hit in the running process keeps Claude Code\'s own automatic continue', async ($, on) => {
+  const { clock, control } = setup(on);
+  const submitted: string[] = [];
+  on('prompt.submit', ($, e) => { submitted.push(e.text); return { text: e.text }; });
+  await start($);
+  await $.turn.start({ turnId: 'limited', text: 'work' });
+  await $.classic.StopFailure({ error: 'rate_limit' });
+  await complete($, 'limited', 'error');
+  control.action = 'resume';
+  await clock.advance(750);
+  expect(submitted).toHaveLength(0);
+});

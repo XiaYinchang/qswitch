@@ -67,6 +67,32 @@ func TestRateLimitTransitionSignalsDaemonOnce(t *testing.T) {
 	}
 }
 
+func TestResumeIsDeliveredOnceToAWaitingSession(t *testing.T) {
+	r := testRunner(t)
+	if got := callRunner(t, r, "/resume", struct{}{}); got.Code != http.StatusConflict {
+		t.Fatalf("resume accepted for a session that is not interrupted: %d", got.Code)
+	}
+	r.status.NeedsContinue = true
+	if got := callRunner(t, r, "/resume", struct{}{}); got.Code != http.StatusOK {
+		t.Fatalf("resume refused for an interrupted ready session: %s", got.Body.String())
+	}
+	actions := []string{}
+	for range 2 {
+		var a action
+		if err := json.Unmarshal(callRunner(t, r, "/state", stateFor(r)).Body.Bytes(), &a); err != nil {
+			t.Fatal(err)
+		}
+		actions = append(actions, a.Action)
+	}
+	if actions[0] != "resume" || actions[1] != "run" {
+		t.Fatalf("resume deliveries = %v, want one resume then run", actions)
+	}
+	r.status.Generation = "g"
+	if got := callRunner(t, r, "/resume", struct{}{}); got.Code != http.StatusConflict {
+		t.Fatal("resume accepted during an account switch")
+	}
+}
+
 func TestExitRechecksTmuxAndFreshSession(t *testing.T) {
 	r := testRunner(t)
 	if got := callRunner(t, r, "/prepare", control{Generation: "g"}); got.Code != 200 {

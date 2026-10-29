@@ -1046,9 +1046,16 @@ func (a *App) ProbeHTTP(ctx context.Context, tool adapter.Tool, force bool) {
 	if p.StableID == "" || strings.HasPrefix(p.StableID, "desktop:") {
 		return
 	}
+	before, _ := a.State.GetAccount(string(tool), p.StableID)
 	res := a.probeAccount(ctx, tool, p.StableID, !force)
 	if res.Class == quota.Exhausted && res.Source != "backoff" {
 		a.considerSwitch(tool)
+	}
+	recovered := quota.Class(before.LastQuotaClass) == quota.Exhausted && (res.Class == quota.OK || res.Class == quota.Soft)
+	if tool == adapter.Claude && recovered {
+		// No switch happened, so no restart carries a continuation; sessions
+		// restarted while interrupted would otherwise wait for the user.
+		_, _ = managed.Resume(a.DataDir)
 	}
 }
 
@@ -1516,11 +1523,15 @@ func (a *App) probeAccountLocked(ctx context.Context, tool adapter.Tool, id stri
 			}
 		} else {
 			interval := a.quotaInterval(string(tool), id)
-			if acc.LastHTTPAt > 0 && now.Unix()-acc.LastHTTPAt < int64(interval.Seconds()) {
-				return quota.Result{Class: quota.Class(acc.LastQuotaClass), UsedPct: acc.LastUsedPct, ResetsAt: acc.LastResetsAt, Source: "cached"}
-			}
-			if acc.LastQuotaClass == string(quota.Exhausted) && acc.LastResetsAt > now.Unix() {
+			exhausted := acc.LastQuotaClass == string(quota.Exhausted)
+			if exhausted && acc.LastResetsAt > now.Unix() {
 				return quota.Result{Class: quota.Exhausted, UsedPct: acc.LastUsedPct, ResetsAt: acc.LastResetsAt, Source: "cached"}
+			}
+			// An exhausted account whose advertised reset has passed is re-checked
+			// at once; waiting out the interval would idle every session.
+			resetPassed := exhausted && acc.LastResetsAt > 0 && acc.LastResetsAt > acc.LastHTTPAt
+			if !resetPassed && acc.LastHTTPAt > 0 && now.Unix()-acc.LastHTTPAt < int64(interval.Seconds()) {
+				return quota.Result{Class: quota.Class(acc.LastQuotaClass), UsedPct: acc.LastUsedPct, ResetsAt: acc.LastResetsAt, Source: "cached"}
 			}
 		}
 	}

@@ -2,12 +2,18 @@
 // preserved: prompt.read() does not expose attachments or every temporary UI.
 const EXIT_GRACE_MS = 30000;
 const QUEUE_SETTLE_MS = 5000;
+// Same text the runner passes on restart after an account switch.
+const CONTINUATION = 'Continue the work interrupted by the account usage limit from the last unfinished step. Do not repeat work already completed.';
   let url = '';
   let token = '';
   let phase = 'run';
   let generation = '';
   let initialized = false;
   let needsContinue = false;
+  // True only when this process started already interrupted. Claude Code's
+  // own automatic continue was cancelled by that restart; a rate limit hit in
+  // this process keeps the official automatic continue instead.
+  let restartedInterrupted = false;
   let unknown = '';
   let blockedSubmission = false;
   let revision = 0;
@@ -48,7 +54,8 @@ const QUEUE_SETTLE_MS = 5000;
       ]);
       if (!response.ok) throw new Error(`coordinator returned HTTP ${response.status}`);
       const value = JSON.parse(response.text);
-      if (!['run', 'prepare', 'exit'].includes(value.action)) throw new Error('invalid coordinator action');
+      if (!['run', 'prepare', 'exit', 'resume'].includes(value.action)) throw new Error('invalid coordinator action');
+      if (value.action === 'resume') return value;
       if (value.action !== 'run' && (typeof value.generation !== 'string' || !value.generation)) {
         throw new Error('coordinator omitted generation');
       }
@@ -95,6 +102,16 @@ const QUEUE_SETTLE_MS = 5000;
       lastState = await snapshot($);
       const before = revision;
       const action = await request($, '/state', lastState);
+      if (action.action === 'resume') {
+        // The account recovered without a switch. Continue only a session that
+        // lost Claude Code's own automatic continue, and only if nothing
+        // changed since this heartbeat.
+        if (phase !== 'run' || before !== revision || !lastState.ready || !needsContinue || !restartedInterrupted) return;
+        restartedInterrupted = false;
+        changed();
+        await $.prompt.submit({ text: CONTINUATION, wait: false });
+        return;
+      }
       if (action.action === 'run') {
         if (phase !== 'run') {
           phase = 'run';
@@ -316,6 +333,7 @@ export function register(on) {
     if (e.agent_id === undefined) {
       mainFailure = e.error;
       needsContinue = e.error === 'rate_limit';
+      restartedInterrupted = false;
       if (unknown === 'model error ended without a known StopFailure outcome') unknown = '';
     }
     changed();
@@ -377,7 +395,7 @@ export function register(on) {
     const initial = await $.env.get('QSWITCH_INITIAL_CONTINUATION');
     // SessionMessage and ApiMessage expose no SDK assistant error in 2.1.312.
     // Adoption must explicitly identify idle versus rate-limit interruption.
-    if (initial === 'continue') needsContinue = true;
+    if (initial === 'continue') { needsContinue = true; restartedInterrupted = true; }
     else if (initial !== 'idle') unknown = 'initial continuation state was not explicitly supplied';
     if (!/^http:\/\/127\.0\.0\.1:[0-9]+$/.test(url) || !token) {
       unknown = 'private loopback coordinator credentials unavailable';

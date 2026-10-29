@@ -62,6 +62,7 @@ type runner struct {
 	released         bool
 	committed        bool
 	stopping         bool
+	resumePending    bool
 	wake             chan struct{}
 	gate             func() error
 }
@@ -187,6 +188,19 @@ func (r *runner) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 		r.handleState(w, req.URL.Path, state)
+		return
+	}
+	if req.URL.Path == "/resume" {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		// Only a live, ready session interrupted by the usage limit qualifies;
+		// the plugin re-checks idleness before it submits the continuation.
+		if r.stopping || r.status.Recovery != "" || r.status.Generation != "" || r.status.Exited || !r.freshLocked() || !r.status.NeedsContinue {
+			http.Error(w, "session is not waiting to continue", http.StatusConflict)
+			return
+		}
+		r.resumePending = true
+		writeResponse(w, r.snapshotLocked())
 		return
 	}
 	var ctl control
@@ -325,6 +339,13 @@ func (r *runner) handleState(w http.ResponseWriter, route string, state sessionS
 		response.Action = "prepare"
 		if r.exitRequested && r.freshLocked() {
 			response.Action = "exit"
+		}
+		r.resumePending = false
+	} else if r.resumePending {
+		// One delivery per request; the plugin decides whether it is still safe.
+		r.resumePending = false
+		if state.Ready && state.NeedsContinue {
+			response.Action = "resume"
 		}
 	}
 	// Heartbeats arrive every 750 ms and usually change nothing durable. A

@@ -201,6 +201,41 @@ func TestLimitHitProbesCurrentAccountBeforeScheduledInterval(t *testing.T) {
 	}
 }
 
+// Once an exhausted account's advertised reset has passed, the scheduled probe
+// re-checks it at once instead of waiting for the usage-based interval.
+func TestExhaustedAccountIsRecheckedWhenItsResetPasses(t *testing.T) {
+	a := setupClaudeRecovery(t, "", false)
+	a.HTTP.Client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return claudeRecoveryResponse(req, 200, `{"account":{"uuid":"live-account"}}`), nil
+	})}
+	if _, _, err := a.Capture(adapter.Claude); err != nil {
+		t.Fatal(err)
+	}
+	now := a.now()
+	reset := now.Add(10 * time.Minute)
+	if err := a.State.UpdateQuota("claude", "live-account", "exhausted", 100, reset.Unix(), now.Unix(), now.Unix(), 0); err != nil {
+		t.Fatal(err)
+	}
+	usage := 0
+	a.HTTP.Client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path != "/api/oauth/usage" {
+			return claudeRecoveryResponse(req, 200, `{"account":{"uuid":"live-account"}}`), nil
+		}
+		usage++
+		return claudeRecoveryResponse(req, 200, `{"five_hour":{"utilization":3},"seven_day":{"utilization":20}}`), nil
+	})}
+	a.Clock = clock.Fixed{T: reset.Add(-time.Minute)}
+	a.probeAccount(context.Background(), adapter.Claude, "live-account", true)
+	if usage != 0 {
+		t.Fatalf("probed before the reset: requests=%d", usage)
+	}
+	// One second after the reset is far inside any usage-based interval.
+	a.Clock = clock.Fixed{T: reset.Add(time.Second)}
+	if res := a.probeAccount(context.Background(), adapter.Claude, "live-account", true); usage != 1 || res.Class != quota.OK {
+		t.Fatalf("account past its reset was not re-checked: class=%s requests=%d", res.Class, usage)
+	}
+}
+
 func TestPendingRechecksStaleQuotaBeforeRestoring(t *testing.T) {
 	for _, tc := range []struct {
 		name         string

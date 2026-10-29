@@ -333,3 +333,31 @@ func Status(dataDir string) ([]StatusInfo, error) {
 	}
 	return append(states, stale...), nil
 }
+
+// Resume asks every live session still waiting after a usage-limit failure to
+// continue. It is for an account that recovered without a switch: Claude
+// Code cancels its own automatic continue when a session restarts during the
+// wait. Runners refuse sessions that are busy, preparing, or not interrupted.
+func Resume(dataDir string) (int, error) {
+	root, err := rootDir(dataDir)
+	if err != nil {
+		return 0, err
+	}
+	if _, err := os.Stat(filepath.Join(root, "pending.json")); err == nil {
+		return 0, nil // a switch is in progress; its release continues sessions
+	}
+	live, _, err := scan(root)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, p := range live {
+		if p.status.Exited || !p.status.Ready || !p.status.NeedsContinue || p.status.Generation != "" {
+			continue
+		}
+		if request(p.reg, "/resume", struct{}{}, nil) == nil {
+			n++
+		}
+	}
+	return n, nil
+}
