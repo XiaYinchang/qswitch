@@ -303,6 +303,7 @@ func (r *runner) handleState(w http.ResponseWriter, route string, state sessionS
 		writeResponse(w, action{Action: "exit", Generation: r.status.Generation})
 		return
 	}
+	before := r.status
 	if r.exitAcknowledged {
 		r.exitAcknowledged = false
 		r.exitRequested = false
@@ -326,10 +327,14 @@ func (r *runner) handleState(w http.ResponseWriter, route string, state sessionS
 			response.Action = "exit"
 		}
 	}
-	if err := r.persistLocked(); err != nil {
-		r.failLocked(err)
-		http.Error(w, "cannot persist session state", http.StatusInternalServerError)
-		return
+	// Heartbeats arrive every 750 ms and usually change nothing durable. A
+	// redundant fsync here holds r.mu through disk stalls and times out /status.
+	if r.status != before {
+		if err := r.persistLocked(); err != nil {
+			r.failLocked(err)
+			http.Error(w, "cannot persist session state", http.StatusInternalServerError)
+			return
+		}
 	}
 	writeResponse(w, response)
 }

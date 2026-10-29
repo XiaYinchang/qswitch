@@ -340,6 +340,11 @@ function switchNote(tool) {
   const managed = (tool.managed || []).filter(s => Number.isInteger(s.pid));
   const managedPIDs = new Set(managed.map(s => s.pid));
   const plain = pids.filter(pid => !managedPIDs.has(pid));
+  if (tool.tool === "claude" && tool.managed_unavailable) {
+    if (!tool.pending_to) return "";
+    parts.push("受管会话状态暂时读取失败，稍后刷新查看。");
+    return parts.join(" ");
+  }
   if (tool.tool === "claude" && managed.length) {
     const recovery = managed.filter(s => s.recovery);
     // Healthy managed sessions rotate on their own; with nothing queued there

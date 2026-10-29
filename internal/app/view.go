@@ -31,7 +31,10 @@ type ToolView struct {
 	BlockedPIDs []int         `json:"blocked_by_pid"`
 	PendingTo   string        `json:"pending_to,omitempty"`
 	Managed     []ManagedView `json:"managed,omitempty"`
-	Accounts    []AccountView `json:"accounts"`
+	// ManagedUnavailable means runner state could not be read this time;
+	// blocking PIDs may still be managed sessions.
+	ManagedUnavailable bool          `json:"managed_unavailable,omitempty"`
+	Accounts           []AccountView `json:"accounts"`
 }
 
 // ManagedView lets the page tell sessions that rotate on their own apart from
@@ -113,7 +116,8 @@ func (a *App) Overview() Overview {
 			PendingTo:   pend.ToID,
 		}
 		if t == adapter.Claude {
-			sessions, _ := managed.Status(a.DataDir)
+			sessions, err := managed.Status(a.DataDir)
+			tv.ManagedUnavailable = err != nil
 			for _, s := range sessions {
 				if s.Exited && s.Recovery == "" {
 					continue
