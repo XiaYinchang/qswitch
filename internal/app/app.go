@@ -2009,18 +2009,29 @@ func (a *App) RunDaemon(ctx context.Context) error {
 		}
 	}
 	reload()
+	// Housekeeping shares the config goroutine so no tool worker waits on it.
+	prune := func() {
+		if _, err := a.State.PruneQuotaLog(a.now().Add(-config.QuotaLogRetention)); err != nil {
+			fmt.Fprintln(os.Stderr, "quota log prune failed:", err)
+		}
+	}
+	prune()
 	configCtx, cancelConfig := context.WithCancel(ctx)
 	configDone := make(chan struct{})
 	go func() {
 		defer close(configDone)
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
+		daily := time.NewTicker(24 * time.Hour)
+		defer daily.Stop()
 		for {
 			select {
 			case <-configCtx.Done():
 				return
 			case <-ticker.C:
 				reload()
+			case <-daily.C:
+				prune()
 			}
 		}
 	}()

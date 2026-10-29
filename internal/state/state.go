@@ -388,3 +388,32 @@ func (d *DB) LogQuota(tool, id, class, source string, pct float64, ts time.Time)
 		ts.Unix(), tool, id, class, pct, source)
 	return err
 }
+
+// quotaKeepRecent covers RecentQuota's largest window (16 points).
+const quotaKeepRecent = 16
+
+// PruneQuotaLog deletes observations older than before. Each account keeps
+// its newest quotaKeepRecent rows and its newest confirmed observation even
+// when they are older: usage-rate scheduling and stale-quota display read
+// them, and a parked account may go unprobed for longer than the window.
+func (d *DB) PruneQuotaLog(before time.Time) (int64, error) {
+	res, err := d.sql.Exec(`
+DELETE FROM quota_log
+WHERE ts < ?
+  AND rowid NOT IN (
+    SELECT rowid FROM (
+      SELECT rowid, ROW_NUMBER() OVER (PARTITION BY tool, stable_id ORDER BY ts DESC, rowid DESC) AS n
+      FROM quota_log
+    ) WHERE n <= ?
+  )
+  AND rowid NOT IN (
+    SELECT rowid FROM (
+      SELECT rowid, ROW_NUMBER() OVER (PARTITION BY tool, stable_id ORDER BY ts DESC, rowid DESC) AS n
+      FROM quota_log WHERE class IN ('ok','soft','exhausted')
+    ) WHERE n = 1
+  )`, before.Unix(), quotaKeepRecent)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}

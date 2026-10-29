@@ -18,6 +18,7 @@ const (
 	IdleQuotaInterval = 30 * time.Minute
 	QuotaRetryMin     = 2 * time.Minute
 	QuotaRetryMax     = 15 * time.Minute
+	QuotaLogRetention = 30 * 24 * time.Hour
 	DefaultETADivisor = 6.0
 	DefaultJitter     = 2 * time.Minute
 	DefaultBackoff    = 2 * time.Hour

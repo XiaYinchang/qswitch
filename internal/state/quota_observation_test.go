@@ -67,3 +67,54 @@ func TestLatestQuotaUsesTimeThenInsertionOrder(t *testing.T) {
 		t.Fatal("database errors must not look like an absent confirmed observation")
 	}
 }
+
+func TestPruneQuotaLogKeepsWhatReadersNeed(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	now := time.Unix(1793000000, 0)
+	cutoff := now.Add(-30 * 24 * time.Hour)
+	old := cutoff.Add(-time.Hour)
+	// A busy account: 20 old observations and 20 recent ones.
+	for i := range 20 {
+		if err := db.LogQuota("claude", "busy", "ok", "http", float64(i), old.Add(-time.Duration(i)*time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.LogQuota("claude", "busy", "ok", "http", float64(i), now.Add(-time.Duration(i)*time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A parked account last observed long ago: a confirmed result followed by
+	// 20 failed attempts, all older than the cutoff.
+	if err := db.LogQuota("claude", "parked", "exhausted", "http", 100, old.Add(-48*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 20 {
+		if err := db.LogQuota("claude", "parked", "unknown", "http_throttled", 0, old.Add(-time.Duration(20-i)*time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.PruneQuotaLog(cutoff); err != nil {
+		t.Fatal(err)
+	}
+	count := func(id string) (n int) {
+		if err := db.sql.QueryRow(`SELECT count(*) FROM quota_log WHERE stable_id=?`, id).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	if n := count("busy"); n != 20 {
+		t.Fatalf("busy account kept %d rows, want only the 20 recent ones", n)
+	}
+	if points, err := db.RecentQuota("claude", "parked", 16); err != nil || len(points) != 16 {
+		t.Fatalf("parked account lost recent history: %d points, err=%v", len(points), err)
+	}
+	if c, err := db.LatestConfirmedQuota("claude", "parked"); err != nil || c.Class != "exhausted" {
+		t.Fatalf("parked account lost its confirmed observation: %+v err=%v", c, err)
+	}
+	if n := count("parked"); n != 17 {
+		t.Fatalf("parked account kept %d rows, want 16 recent plus 1 confirmed", n)
+	}
+}
