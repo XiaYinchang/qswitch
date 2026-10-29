@@ -3,7 +3,6 @@ package managed
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"os/exec"
 	"strconv"
@@ -12,11 +11,12 @@ import (
 	"time"
 )
 
-// Every check consults the server again: a client can attach or a pane can be
-// replaced between prepare and the final exit acknowledgement.
-func unattendedTMUX(pane, tmux string) error {
+// Every check consults the server again: a pane can be replaced between
+// prepare and the final exit acknowledgement. Attached clients do not block
+// rotation; the plugin's draft and activity checks protect typed input.
+func verifiedTMUXPane(pane, tmux string) error {
 	if len(pane) < 2 || pane[0] != '%' {
-		return errors.New("automatic rotation requires a verified detached tmux pane")
+		return errors.New("automatic rotation requires a verified tmux pane")
 	}
 	if _, err := strconv.ParseUint(pane[1:], 10, 64); err != nil {
 		return errors.New("invalid tmux pane identity")
@@ -35,7 +35,7 @@ func unattendedTMUX(pane, tmux string) error {
 	query := func(args ...string) (string, error) {
 		out, err := exec.CommandContext(ctx, "tmux", append([]string{"-S", socket}, args...)...).Output()
 		if err != nil {
-			return "", errors.New("cannot verify tmux pane or clients")
+			return "", errors.New("cannot verify tmux pane")
 		}
 		return strings.TrimSpace(string(out)), nil
 	}
@@ -78,15 +78,6 @@ func unattendedTMUX(pane, tmux string) error {
 			return errors.New("invalid tmux pane process ancestry")
 		}
 		pid = parent
-	}
-	// A window can belong to several sessions. Blocking every client on this
-	// server also covers clients attached through any linked session.
-	clients, err := query("list-clients", "-F", "#{client_pid}")
-	if err != nil {
-		return err
-	}
-	if clients != "" {
-		return fmt.Errorf("tmux has attached clients; detach them before automatic rotation")
 	}
 	return nil
 }

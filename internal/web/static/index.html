@@ -356,7 +356,7 @@ function switchNote(tool) {
       const waiting = managed.filter(s => !s.recovery && !s.ready);
       const ready = managed.filter(s => !s.recovery && s.ready);
       if (waiting.length) parts.push(`受管会话尚未就绪：${waiting.map(s => `PID ${s.pid}${s.reason ? `（${s.reason}）` : ""}`).join("；")}。`);
-      if (ready.length) parts.push(`受管会话已就绪：PID ${ready.map(s => s.pid).join("、")}。tmux 无客户端连接时自动退出、切号并恢复原会话。`);
+      if (ready.length) parts.push(`受管会话已就绪：PID ${ready.map(s => s.pid).join("、")}。将自动退出、切号并恢复原会话。`);
       parts.push("排队切换仍需通过用量和安全检查，请刷新查看结果。");
     }
     return parts.join(" ");

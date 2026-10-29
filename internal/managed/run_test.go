@@ -81,9 +81,9 @@ func TestExitRechecksTmuxAndFreshSession(t *testing.T) {
 	}
 }
 
-func TestPrepareBlocksWithoutDetachedTmux(t *testing.T) {
+func TestPrepareBlocksWithoutVerifiedTmuxPane(t *testing.T) {
 	r := testRunner(t)
-	r.gate = func() error { return errors.New("no verified detached tmux pane") }
+	r.gate = func() error { return errors.New("no verified tmux pane") }
 	response := callRunner(t, r, "/prepare", control{Generation: "g"})
 	var state StatusInfo
 	if err := json.Unmarshal(response.Body.Bytes(), &state); err != nil {
@@ -92,10 +92,10 @@ func TestPrepareBlocksWithoutDetachedTmux(t *testing.T) {
 	if response.Code != 200 || state.Ready || state.Generation != "" || state.Reason == "" {
 		t.Fatalf("unsafe prepare: %+v", state)
 	}
-	if err := unattendedTMUX("", ""); err == nil {
+	if err := verifiedTMUXPane("", ""); err == nil {
 		t.Fatal("non-tmux run accepted")
 	}
-	if err := unattendedTMUX("%spoof", "/tmp/tmux,1,0"); err == nil {
+	if err := verifiedTMUXPane("%spoof", "/tmp/tmux,1,0"); err == nil {
 		t.Fatal("spoofed pane accepted")
 	}
 }
