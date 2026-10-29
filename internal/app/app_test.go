@@ -563,6 +563,51 @@ func TestPickNextProbesUnprobedAccount(t *testing.T) {
 	}
 }
 
+// The managed Claude generation is keyed by QueuedAt, so each re-probe of an
+// exhausted account must keep the queued switch instead of restarting it.
+func TestRepeatedExhaustionKeepsQueuedSwitch(t *testing.T) {
+	a, _ := setup(t)
+	if _, _, err := a.Capture(adapter.Codex); err != nil {
+		t.Fatal(err)
+	}
+	writeCodex(t, a.UserHome, "acc-b", "b@x.com")
+	if _, _, err := a.Capture(adapter.Codex); err != nil {
+		t.Fatal(err)
+	}
+	busy, err := Open(a.UserHome, a.DataDir, a.Vault.Keys, nil, &notify.Log{}, func() ([]adapter.Proc, error) {
+		return []adapter.Proc{{PID: 7, Command: "/opt/homebrew/bin/codex"}}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer busy.Close()
+	now := time.Now()
+	for _, id := range []string{"acc-a", "acc-b"} {
+		class, pct := "ok", 10.0
+		if id == "acc-b" {
+			class, pct = "exhausted", 100
+		}
+		if err := busy.State.UpdateQuotaSnapshot("codex", id, class, pct, 0, now.Unix()); err != nil {
+			t.Fatal(err)
+		}
+		if err := busy.State.LogQuota("codex", id, class, "http", pct, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	busy.Clock = clock.Fixed{T: now}
+	busy.considerSwitch(adapter.Codex)
+	first, err := busy.State.GetPending("codex")
+	if err != nil || first.ToID != "acc-a" {
+		t.Fatalf("switch not queued: %+v err=%v", first, err)
+	}
+	busy.Clock = clock.Fixed{T: now.Add(2 * time.Minute)}
+	busy.considerSwitch(adapter.Codex)
+	second, err := busy.State.GetPending("codex")
+	if err != nil || second != first {
+		t.Fatalf("re-probe restarted queued switch: first=%+v second=%+v err=%v", first, second, err)
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

@@ -4,7 +4,7 @@ import type { On } from 'claude-code';
 
 function setup(on: On, initial = 'idle') {
   const clock = mock.clock(on);
-  const control = { action: 'run', generation: '', draft: '', agents: [] as { id: string; description: string; type: string; status: 'running' | 'completed' }[] };
+  const control = { action: 'run', generation: '', draft: '', posted: 0, agents: [] as { id: string; description: string; type: string; status: 'running' | 'completed' }[] };
   mock.env(on, {
     QSWITCH_CONTROL_URL: 'http://127.0.0.1:43210',
     QSWITCH_CONTROL_TOKEN: 'test-only-token',
@@ -20,10 +20,13 @@ function setup(on: On, initial = 'idle') {
     return { isFilled: true, text: control.draft, cursor: control.draft.length };
   });
   on('command.register', ($, e) => ({ value: { command: e.name } }));
-  on('http.fetch', () => ({ value: {
-    status: 200, ok: true, headers: {},
-    text: JSON.stringify({ action: control.action, generation: control.generation }),
-  } }));
+  on('http.fetch', () => {
+    control.posted += 1;
+    return { value: {
+      status: 200, ok: true, headers: {},
+      text: JSON.stringify({ action: control.action, generation: control.generation }),
+    } };
+  });
   on('turn.start', ($, e) => ({ turnId: e.turnId }));
   on('turn.complete', ($, e) => ({ text: e.answer }));
   on('classic.StopFailure', () => ({}));
@@ -155,4 +158,21 @@ test('unknown model failure blocks until its official failure outcome is known',
   expect((await status($)).ready).toBe(false);
   await $.classic.StopFailure({ error: 'rate_limit' });
   expect(await status($)).toMatchObject({ ready: true, needs_continue: true });
+});
+
+test('rotation exit keeps its acknowledgement while Claude shuts down', async ($, on) => {
+  const { clock, control } = setup(on);
+  let exits = 0;
+  on('command.run', { command: 'exit' }, () => { exits += 1; return { text: '' }; });
+  await start($);
+  control.action = 'exit';
+  control.generation = 'generation-1';
+  await clock.advance(750);
+  expect(exits).toBe(1);
+  const afterExit = control.posted;
+  await clock.advance(10000);
+  // Any heartbeat here would revoke the runner's exit acknowledgement.
+  expect(control.posted).toBe(afterExit);
+  await clock.advance(20000);
+  expect(await status($)).toMatchObject({ ready: false, reason: 'exit command returned without terminating the session' });
 });

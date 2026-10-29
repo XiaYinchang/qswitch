@@ -1676,6 +1676,12 @@ func (a *App) considerSwitch(tool adapter.Tool) {
 	}
 	ad := a.Adapters[tool]
 	auto, _ := ad.AutoBlockers(a.UserHome)
+	// Re-probing an exhausted account must not restart a queued switch: the
+	// managed Claude generation is keyed by QueuedAt and spans daemon ticks.
+	if prev, err := a.State.GetPending(string(tool)); err == nil && prev.Reason == "exhausted" && prev.FromID == p.StableID && prev.ToID == next {
+		a.TryApply(tool, false)
+		return
+	}
 	pend := state.Pending{Tool: string(tool), FromID: p.StableID, ToID: next, QueuedAt: a.now().Unix(), Reason: "exhausted", BlockedByPID: joinPIDs(auto.AllPIDs())}
 	_ = a.State.SetPending(pend)
 	a.Notify.Send("qswitch", fmt.Sprintf("%s quota exhausted; will switch to %s", tool, next))

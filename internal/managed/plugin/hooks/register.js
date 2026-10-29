@@ -1,5 +1,6 @@
 // Claude Code 2.1.312 function hooks. Only submitted transcript state is
 // preserved: prompt.read() does not expose attachments or every temporary UI.
+const EXIT_GRACE_MS = 30000;
   let url = '';
   let token = '';
   let phase = 'run';
@@ -12,6 +13,8 @@
   let polling = false;
   let requestPending = false;
   let exiting = false;
+  let awaitingExit = false;
+  let exitTimer;
   let mainFailure;
   let timer;
   let lastState = { ready: false, reason: 'initializing' };
@@ -61,6 +64,7 @@
     const draft = await $.prompt.read();
     let reason = '';
     if (!initialized) reason = 'initializing';
+    else if (awaitingExit) reason = 'waiting for Claude Code to exit';
     else if (unknown) reason = unknown;
     else if (blockedSubmission) reason = 'submission attempted during account switch; submit again after release';
     else if (turns.size) reason = 'model turn running';
@@ -122,11 +126,18 @@
       }
       exiting = true;
       await $.command.run({ command: 'exit' });
-      // A plugin that intercepts /exit must not leave this process eligible.
-      unknown = 'exit command returned without terminating the session';
-      exiting = false;
+      // Claude Code 2.1.312 returns from /exit while shutdown is still running.
+      // Stay silent: a heartbeat now would revoke the runner's acknowledgement
+      // just before the child exits. Only a session still alive after the grace
+      // period is treated as an intercepted exit.
+      awaitingExit = true;
       changed();
-      await request($, '/state', { ...finalState, ready: false, reason: unknown });
+      exitTimer = $.clock.after(EXIT_GRACE_MS, () => {
+        awaitingExit = false;
+        unknown = 'exit command returned without terminating the session';
+        exiting = false;
+        changed();
+      });
     } catch (error) {
       lastState = { ...lastState, ready: false, reason: String(error) };
       exiting = false;
