@@ -41,8 +41,13 @@ func Interval(samples []Sample, min, max time.Duration, etaDiv float64) time.Dur
 	if remaining < 0 {
 		remaining = 0
 	}
-	burn := burnPctPerHour(pts)
+	burn, measured := burnPctPerHour(pts)
 	if burn <= 1e-6 {
+		if measured {
+			// Usage held still across a real span: nothing is consuming this
+			// account, whatever its level (a capped bucket can sit at 100%).
+			return max
+		}
 		return noBurnInterval(remaining, min, max)
 	}
 	etaHours := remaining / burn
@@ -70,10 +75,12 @@ func usable(samples []Sample) []Sample {
 	return out
 }
 
-// burnPctPerHour uses the suffix after the last usage drop (quota window reset).
-func burnPctPerHour(pts []Sample) float64 {
+// burnPctPerHour uses the suffix after the last usage drop (quota window
+// reset). measured is true when at least two samples span a minute or more,
+// so a zero rate means usage really held still rather than being unknown.
+func burnPctPerHour(pts []Sample) (rate float64, measured bool) {
 	if len(pts) < 2 {
-		return 0
+		return 0, false
 	}
 	start := 0
 	for i := 1; i < len(pts); i++ {
@@ -83,18 +90,18 @@ func burnPctPerHour(pts []Sample) float64 {
 	}
 	pts = pts[start:]
 	if len(pts) < 2 {
-		return 0
+		return 0, false
 	}
 	first, last := pts[0], pts[len(pts)-1]
 	dt := last.T.Sub(first.T).Hours()
 	if dt < 1.0/60 {
-		return 0
+		return 0, false
 	}
 	du := last.UsedPct - first.UsedPct
 	if du <= 0 {
-		return 0
+		return 0, true
 	}
-	return du / dt
+	return du / dt, true
 }
 
 // No rate yet: interpolate by remaining only. Not a 90% cliff.

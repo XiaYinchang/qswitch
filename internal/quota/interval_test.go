@@ -69,4 +69,21 @@ func TestIntervalBurnRate(t *testing.T) {
 			t.Fatal("empty")
 		}
 	})
+	t.Run("capped bucket held at 100 percent", func(t *testing.T) {
+		// Cursor's api bucket at 100% while auto has room: soft, flat for hours.
+		s := []Sample{
+			{T: ts(0), UsedPct: 100, Class: Soft},
+			{T: ts(1), UsedPct: 100, Class: Soft},
+			{T: ts(2), UsedPct: 100, Class: Soft},
+		}
+		if d := Interval(s, min, max, 6); d != max {
+			t.Fatalf("flat 100%% polled every %s, want max", d)
+		}
+	})
+	t.Run("single sample near the cap still checks soon", func(t *testing.T) {
+		s := []Sample{{T: ts(0), UsedPct: 98, Class: Soft}}
+		if d := Interval(s, min, max, 6); d >= max/2 {
+			t.Fatalf("unknown rate near the cap waited %s", d)
+		}
+	})
 }
