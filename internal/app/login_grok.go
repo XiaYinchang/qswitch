@@ -164,7 +164,7 @@ func (a *App) enrollGrokBlob(ctx context.Context, blob adapter.Blob) (adapter.Id
 	if closeErr != nil {
 		return adapter.Identity{}, closeErr
 	}
-	_ = a.probeAccount(ctx, adapter.Grok, blob.Identity.StableID, false)
+	a.switchToEnrolled(adapter.Grok, a.probeAccount(ctx, adapter.Grok, blob.Identity.StableID, false))
 	label := blob.Identity.DisplayName
 	if label == "" {
 		label = blob.Identity.Email

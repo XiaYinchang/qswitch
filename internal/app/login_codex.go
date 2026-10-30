@@ -167,7 +167,7 @@ func (a *App) enrollCodexBlob(ctx context.Context, blob adapter.Blob) (adapter.I
 	if closeErr != nil {
 		return adapter.Identity{}, closeErr
 	}
-	_ = a.probeAccount(ctx, adapter.Codex, blob.Identity.StableID, false)
+	a.switchToEnrolled(adapter.Codex, a.probeAccount(ctx, adapter.Codex, blob.Identity.StableID, false))
 	label := blob.Identity.DisplayName
 	if label == "" {
 		label = blob.Identity.Email

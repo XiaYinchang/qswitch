@@ -1727,6 +1727,25 @@ func (a *App) considerSwitch(tool adapter.Tool) {
 	a.TryApply(tool, false)
 }
 
+// switchToEnrolled queues a switch when a just-enrolled account has quota
+// and the current account is exhausted. Without it the switch waits for the
+// next scheduled probe of the current account, which can be 30 minutes for
+// a Codex account parked on its recovery checks.
+func (a *App) switchToEnrolled(tool adapter.Tool, enrolled quota.Result) {
+	if enrolled.Class != quota.OK && enrolled.Class != quota.Soft {
+		return
+	}
+	p, err := a.State.GetPointer(string(tool))
+	if err != nil || p.StableID == "" {
+		return
+	}
+	cur, err := a.State.GetAccount(string(tool), p.StableID)
+	if err != nil || quota.Class(cur.LastQuotaClass) != quota.Exhausted {
+		return
+	}
+	a.considerSwitch(tool)
+}
+
 // candidate orders usable accounts: OK before Soft, then the account whose
 // remaining quota is lost soonest, then the least used.
 type candidate struct {

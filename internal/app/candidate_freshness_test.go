@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"os"
@@ -233,6 +234,33 @@ func TestExhaustedAccountIsRecheckedWhenItsResetPasses(t *testing.T) {
 	a.Clock = clock.Fixed{T: reset.Add(time.Second)}
 	if res := a.probeAccount(context.Background(), adapter.Claude, "live-account", true); usage != 1 || res.Class != quota.OK {
 		t.Fatalf("account past its reset was not re-checked: class=%s requests=%d", res.Class, usage)
+	}
+}
+
+// Re-logging an account while the current one is exhausted must switch at
+// once, not after the current account's next scheduled check (up to 30
+// minutes for Codex recovery probes).
+func TestEnrollingUsableAccountSwitchesFromExhausted(t *testing.T) {
+	a, _ := candidateFixture(t)
+	a.Cfg.General.AutoSwitch = true
+	a.Cfg.Codex.Enabled = true
+	if err := a.State.SetPointer(state.Pointer{Tool: "codex", StableID: "acc-b"}); err != nil {
+		t.Fatal(err)
+	}
+	a.HTTP.Client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"rate_limit":{"primary_window":{"used_percent":51}}}`)), Request: req}, nil
+	})}
+	raw, err := json.Marshal(map[string]any{"auth_mode": "chatgpt", "tokens": map[string]any{
+		"account_id": "acc-new", "access_token": "t-new", "id_token": jwt("new@example.test"), "refresh_token": "r-new",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.enrollCodexAuthJSON(context.Background(), raw); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := a.State.GetPointer("codex"); p.StableID == "acc-b" {
+		t.Fatal("enrolling a usable account left the exhausted one current")
 	}
 }
 

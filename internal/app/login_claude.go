@@ -199,7 +199,7 @@ func (a *App) enrollClaudeBlob(ctx context.Context, blob adapter.Blob) (adapter.
 	if err := lock.Close(); err != nil {
 		return adapter.Identity{}, err
 	}
-	_ = a.probeAccount(ctx, adapter.Claude, nb.Identity.StableID, false)
+	a.switchToEnrolled(adapter.Claude, a.probeAccount(ctx, adapter.Claude, nb.Identity.StableID, false))
 	a.Notify.Send("qswitch", fmt.Sprintf("收录新账号 claude %s", ident.Email))
 	return nb.Identity, nil
 }
