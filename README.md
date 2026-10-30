@@ -21,6 +21,68 @@
 - 同一登录下的多个 workspace 共用当前 live 的 access token 去查用量；不同邮箱的 refresh_token 按官方 OAuth 刷新写回仓库。换号时若仍是同一 Gmail，会把 live token 合并进目标 workspace。
 - Grok 闲置号同样保活：access 大约 6 小时过期，官方 CLI 会在到期前用 `refresh_token` 向 `auth.x.ai` 换票并轮换 refresh。仓库里的闲置号按同一条 OIDC 刷新写回；当前 Grok CLI 运行时由官方客户端续期；CLI 已退出时，qswitch 持有官方 `auth.json.lock` 并重读凭据后续期，轮换结果同时写回登录文件和加密仓库。Grok Bot.app 运行不阻断这项 CLI 保活。Cursor 桌面/CLI 存的是约 60 天的 session JWT，access 与 refresh 是同一张票，没有可安全调用的续期接口，过期或登出作废后只能重新登录。
 
+## Claude Code 多账号自动切换：使用方法
+
+适用于 Linux 服务器（如 novix）上用 tmux 长期运行的 Claude Code 会话：当前号额度用完时，qswitch 自动切到有余量的号，并让被中断的会话接着干活。
+
+### 一次性准备
+
+1. 按下文“命令”一节的 systemd 步骤部署 `qswitch` 和 `qswitchd`，确认 `systemctl --user is-active qswitchd` 为 `active`。
+2. 每个 Claude 账号收录一次（不影响当前登录）：
+
+   ```sh
+   qswitch login claude          # 打开授权链接，把 code 粘贴回当前终端
+   qswitch list --tool claude    # 确认账号都已收录
+   ```
+
+3. 打开自动切换：`qswitch enable-auto --tool claude`。
+
+### 新起一个任务
+
+```sh
+tmux new-session -s task1                          # 名字随意，每个任务一个
+cd ~/workspace                                     # 进入项目目录
+qswitch run claude --dangerously-skip-permissions  # 代替直接运行 claude
+```
+
+启动后照常在 Claude 里下达任务。离开按 `Ctrl+B D`，回来用 `tmux attach -t task1`；连着看也不影响自动切换。
+
+### 接着跑已有的会话
+
+先在原会话里 `/exit`，退出时会显示 `claude --resume <会话ID>`。然后在 tmux 里按会话当时的状态启动：
+
+```sh
+# 已完成阶段任务、在等你输入
+qswitch run claude --resume-continuation=idle --dangerously-skip-permissions --resume <会话ID>
+
+# 因额度用完停下
+qswitch run claude --resume-continuation=continue --dangerously-skip-permissions --resume <会话ID>
+```
+
+启动时不会发送续接指令；状态只用于下一次切号后决定是否让它继续。
+
+### 查看状态
+
+| 想知道 | 命令 |
+|---|---|
+| 各会话是否就绪、被什么挡住 | `qswitch sessions`，或在会话里输入 `/qswitch-status` |
+| 各账号用量与当前号 | `qswitch list --tool claude`、`qswitch status` |
+| 网页总览 | 本机运行 `ssh -N -L 7432:127.0.0.1:7432 <服务器>`，打开 `http://127.0.0.1:7432` |
+
+### 结束与升级
+
+- 任务做完在会话里 `/exit`，正常退出不会被自动拉起。
+- 升级 qswitch 只需按部署步骤替换程序；各会话在空闲时自动换成新版本并恢复原对话，不必手动重启。
+
+### 注意事项
+
+- **所有 Claude 都要通过 `qswitch run claude` 在 tmux 里启动。** 直接运行的 `claude` 会阻止所有会话切号；不在 tmux 里的会话不参与切号。
+- **可用的启动参数**：`--model`、`--fallback-model`、`--effort`、`--permission-mode`、`--dangerously-skip-permissions`、`--allowedTools`/`--disallowedTools`、`--tools`、`--agent`/`--agents`、`--system-prompt` 系列、`--max-budget-usd`、`--name`、`--verbose`、`--resume`/`--continue`。`--print`、`--settings`、`--plugin-dir` 等其他参数和子命令会被拒绝。
+- **不能设置的环境变量**：`ANTHROPIC_API_KEY`、`ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_BASE_URL`、`CLAUDE_CONFIG_DIR`、`CLAUDE_CODE_OAUTH_TOKEN`、`CLAUDE_CODE_USE_BEDROCK`/`VERTEX`/`FOUNDRY` 等，会被拒绝启动。
+- **切号只在会话空闲时进行**：模型在回复、工具或后台任务在跑、输入框里有没发出的文字，都会让切号等待。切号准备期间你提交的消息会退回输入框，切号完成后再发一次即可。
+- **所有号都用完时**会等最早重置的那个号；重置后自动切过去并让中断的会话继续。
+- **出现异常**时，`qswitch sessions` 的 `recovery=` 会给出原因和恢复命令；确认旧进程已退出后按提示手动恢复。
+
 ## 新增订阅
 
 - **ZCode**：读取桌面客户端 `~/.zcode/v2/credentials.json` 中当前 BigModel / Z.ai 个人 Coding Plan，支持官方加密格式。使用官方 `/api/monitor/usage/quota/limit`，显示套餐、5 小时/周模型额度及月度 MCP 额度。MCP 用尽不误判模型额度耗尽；切换套餐后删除旧窗口。当前仅监控订阅，账号在 ZCode 中切换；不修改独立的 ZCode CLI 配置。
@@ -92,8 +154,9 @@ qswitch capture
 qswitch login codex
 qswitch login grok
 qswitch login claude                              # Linux，同终端授权并自动收录
-qswitch run claude [Claude arguments...]           # 受管会话，保留真实终端
+qswitch run claude [--resume-continuation=idle|continue] [Claude arguments...]  # 受管会话，在 tmux 里运行
 qswitch sessions [--json]                         # 会话状态与异常恢复提示
+qswitch enable-auto [--tool ...]                  # 打开自动切换（disable-auto 关闭）
 qswitch list
 qswitch status
 qswitch probe [--tool codex|grok|cursor|devin|zcode|kimi|claude]
@@ -109,7 +172,7 @@ qswitch serve [--addr 127.0.0.1:7432]
 
 普通 Git 工作区构建自动从 Go 嵌入的 VCS 信息读取提交号，未提交改动带 `-dirty`；发布构建可通过 `-ldflags "-X qswitch/internal/buildinfo.Version=<release>"` 显式指定版本。无 VCS 信息且未指定版本时显示 `dev`。CLI 的 `version`、daemon 的 `--version`、健康接口与页面标题使用同一个版本标识。
 
-页面显示阻塞切换的 PID、待切换目标账号及排队状态。Claude/Kimi 有会话运行时必须先退出会话，仅等待 30 秒空闲不会解除阻塞；排队目标仍需在执行前通过最新用量和安全检查。
+页面显示阻塞切换的 PID、待切换目标账号及排队状态。Kimi 和未受管的 Claude 会话运行时必须先退出会话，仅等待 30 秒空闲不会解除阻塞；通过 `qswitch run claude` 启动的受管会话会在空闲时自动退出、切号并恢复。排队目标仍需在执行前通过最新用量和安全检查。
 
 远程服务器（如 novix）建议保持默认 loopback 监听，通过 SSH 隧道访问：`ssh -N -L 7432:127.0.0.1:7432 <host>`，然后本机打开 `http://127.0.0.1:7432`。流量由 SSH 加密，不需要 token。
 
