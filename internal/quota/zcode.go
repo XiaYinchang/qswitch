@@ -59,7 +59,7 @@ func (h HTTP) ZCode(ctx context.Context, key, provider string) (Result, error) {
 	if err != nil {
 		return unknown, err
 	}
-	r := ClassifyZCode(res.StatusCode, body)
+	r := MarkThrottled(ClassifyZCode(res.StatusCode, body), res.StatusCode)
 	r.RetryAfter = responseRetryAfter(res)
 	return r, nil
 }

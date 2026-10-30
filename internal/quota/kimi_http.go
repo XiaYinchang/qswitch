@@ -20,7 +20,7 @@ func (h HTTP) Kimi(ctx context.Context, token string) (Result, error) {
 	if err != nil {
 		return Result{Class: Unknown, Source: "http"}, err
 	}
-	r := ParseKimiUsage(status, body)
+	r := MarkThrottled(ParseKimiUsage(status, body), status)
 	r.RetryAfter = retry
 	return r, nil
 }

@@ -61,8 +61,12 @@ func (h HTTP) Grok(ctx context.Context, bearer string) (Result, error) {
 	}
 	setGrokProxyHeaders(req, bearer)
 	res, err := h.do(KindGrok, req)
-	if plan := h.grokSettingsPlan(ctx, bearer); plan != "" {
-		res.Plan = plan
+	// The plan is cosmetic; skip it when the usage request failed or was
+	// throttled, so a struggling server sees one request per probe.
+	if err == nil && res.Class != Unknown && res.Class != Expired {
+		if plan := h.grokSettingsPlan(ctx, bearer); plan != "" {
+			res.Plan = plan
+		}
 	}
 	return res, err
 }
@@ -102,7 +106,7 @@ func (h HTTP) Devin(ctx context.Context, apiKey, server string) (Result, error) 
 	if err != nil {
 		return Result{Class: Unknown, Source: "http"}, err
 	}
-	res := Classify(KindDevin, status, raw)
+	res := MarkThrottled(Classify(KindDevin, status, raw), status)
 	res.RetryAfter = retry
 	return res, nil
 }
@@ -172,6 +176,11 @@ func (h HTTP) Cursor(ctx context.Context, accessToken string) (Result, error) {
 	req.Header.Set("Connect-Protocol-Version", "1")
 	req.Header.Set("User-Agent", "qswitch/0.1")
 	res, err := h.do(KindCursor, req)
+	// Bot usage and plan are display-only; skip them when the main usage
+	// request failed or was throttled.
+	if err != nil || res.Class == Unknown || res.Class == Expired {
+		return res, err
+	}
 	if bot, ok := h.cursorBot(ctx, accessToken); ok {
 		res.Buckets = append(res.Buckets, bot)
 	}
@@ -243,7 +252,7 @@ func (h HTTP) do(kind Kind, req *http.Request) (Result, error) {
 	}
 	defer res.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
-	r := Classify(kind, res.StatusCode, body)
+	r := MarkThrottled(Classify(kind, res.StatusCode, body), res.StatusCode)
 	r.RetryAfter = responseRetryAfter(res)
 	return r, nil
 }

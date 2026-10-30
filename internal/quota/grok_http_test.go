@@ -65,8 +65,13 @@ func TestGrokHTTPQuotaContract(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if billingCalls != 1 || settingsCalls != 1 {
-				t.Fatalf("calls: billing=%d settings=%d, want one each", billingCalls, settingsCalls)
+			// The plan request is display-only and skipped when billing fails.
+			wantSettings := 1
+			if tt.status != 200 {
+				wantSettings = 0
+			}
+			if billingCalls != 1 || settingsCalls != wantSettings {
+				t.Fatalf("calls: billing=%d settings=%d, want 1 and %d", billingCalls, settingsCalls, wantSettings)
 			}
 			if got.Class != tt.class || got.UsedPct != tt.usedPct {
 				t.Fatalf("quota = %+v, want class=%s used=%v", got, tt.class, tt.usedPct)

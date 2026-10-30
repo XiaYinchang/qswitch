@@ -61,6 +61,14 @@ func TestScheduledQuotaRetryProgressionAndRecovery(t *testing.T) {
 	if ac.HTTPBackoffUntil != now.Add(2*time.Minute).Unix() {
 		t.Fatal("new failure inherited old retry progression")
 	}
+	// A 503 is throttling: even a manual refresh waits for its deadline.
+	before := hits
+	a.ProbeAccount(context.Background(), adapter.Codex, "acc-a")
+	if hits != before {
+		t.Fatal("manual refresh ignored a throttling server's retry deadline")
+	}
+	now = now.Add(2 * time.Minute)
+	a.Clock = clock.Fixed{T: now}
 	serverDelay = "1800"
 	a.ProbeAccount(context.Background(), adapter.Codex, "acc-a")
 	ac, _ = a.State.GetAccount("codex", "acc-a")
@@ -68,7 +76,7 @@ func TestScheduledQuotaRetryProgressionAndRecovery(t *testing.T) {
 		t.Fatal("server retry delay was shortened")
 	}
 	a.Clock = clock.Fixed{T: now.Add(15 * time.Minute)}
-	before := hits
+	before = hits
 	a.ProbeHTTP(context.Background(), adapter.Codex, false)
 	if hits != before {
 		t.Fatal("scheduled probe ignored server Retry-After")

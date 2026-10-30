@@ -30,7 +30,9 @@ func TestAllQuotaProvidersPreserveRetryAfter(t *testing.T) {
 	for _, status := range []int{429, 503} {
 		for _, tool := range []string{"codex", "grok", "cursor", "devin", "kimi", "zcode"} {
 			t.Run(tool+http.StatusText(status), func(t *testing.T) {
+				requests := 0
 				h := HTTP{Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					requests++
 					return &http.Response{StatusCode: status, Header: http.Header{"Retry-After": []string{"1200"}}, Body: io.NopCloser(strings.NewReader(`{}`)), Request: req}, nil
 				})}}
 				var got Result
@@ -52,6 +54,14 @@ func TestAllQuotaProvidersPreserveRetryAfter(t *testing.T) {
 				}
 				if err != nil || got.Class != Unknown || got.RetryAfter != 20*time.Minute {
 					t.Fatalf("throttled response lost retry delay: %+v err=%v", got, err)
+				}
+				// Manual refreshes honour the deadline only for this label.
+				if got.Source != "http_throttled" {
+					t.Fatalf("throttled response labelled %q", got.Source)
+				}
+				// Side requests (plan, bot usage) would only extend a throttle.
+				if requests != 1 {
+					t.Fatalf("throttled probe sent %d requests", requests)
 				}
 			})
 		}

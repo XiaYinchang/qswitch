@@ -77,6 +77,17 @@ func TestPruneQuotaLogKeepsWhatReadersNeed(t *testing.T) {
 	now := time.Unix(1793000000, 0)
 	cutoff := now.Add(-30 * 24 * time.Hour)
 	old := cutoff.Add(-time.Hour)
+	for _, id := range []string{"busy", "parked"} {
+		if err := db.UpsertAccount(Account{Tool: "claude", StableID: id, Email: id + "@example.test"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A deleted account: only old rows, and no account row any more.
+	for i := range 20 {
+		if err := db.LogQuota("claude", "deleted", "ok", "http", 10, old.Add(-time.Duration(i)*time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+	}
 	// A busy account: 20 old observations and 20 recent ones.
 	for i := range 20 {
 		if err := db.LogQuota("claude", "busy", "ok", "http", float64(i), old.Add(-time.Duration(i)*time.Minute)); err != nil {
@@ -116,5 +127,8 @@ func TestPruneQuotaLogKeepsWhatReadersNeed(t *testing.T) {
 	}
 	if n := count("parked"); n != 17 {
 		t.Fatalf("parked account kept %d rows, want 16 recent plus 1 confirmed", n)
+	}
+	if n := count("deleted"); n != 0 {
+		t.Fatalf("deleted account kept %d old rows", n)
 	}
 }
