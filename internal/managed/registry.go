@@ -60,6 +60,10 @@ func privateDir(path string) error {
 	if err := os.MkdirAll(path, 0700); err != nil {
 		return err
 	}
+	return checkPrivateDir(path)
+}
+
+func checkPrivateDir(path string) error {
 	st, err := os.Lstat(path)
 	if err != nil {
 		return err
@@ -268,10 +272,18 @@ func scan(root string) ([]participant, []StatusInfo, error) {
 			continue
 		}
 		dir := filepath.Join(root, entry.Name())
-		if err := privateDir(dir); err != nil {
+		// A runner removes its directory when it ends after its Claude exited.
+		// Skip a directory that is gone or has no lease file left; recreating
+		// it would leave a directory that fails every later scan.
+		if err := checkPrivateDir(dir); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
 			return nil, nil, err
 		}
 		lease, err := privateFile(filepath.Join(dir, "lease"), unix.O_RDWR)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
 		if err != nil {
 			return nil, nil, err
 		}

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -397,6 +398,157 @@ func TestLostRunnerBlocksPrepareAndRelease(t *testing.T) {
 	states, err := Status(dataDir)
 	if err != nil || len(states) != 1 || states[0].Live || states[0].Recovery == "" {
 		t.Fatalf("stale status unavailable: %+v %v", states, err)
+	}
+}
+
+func TestScanSkipsADirectoryBeingRemoved(t *testing.T) {
+	dataDir := t.TempDir()
+	root, err := rootDir(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The ending runner has removed its lease but not yet its status.
+	id := strings.Repeat("a", 64)
+	if err := privateDir(filepath.Join(root, id)); err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicJSON(filepath.Join(root, id, "status.json"), StatusInfo{ID: id, Exited: true}); err != nil {
+		t.Fatal(err)
+	}
+	if states, err := Status(dataDir); err != nil || len(states) != 0 {
+		t.Fatalf("status during removal = %+v, %v", states, err)
+	}
+}
+
+// serveRunner registers r under root the way Run does and serves its control
+// API. The returned function ends the runner process: it frees the lease.
+func serveRunner(t *testing.T, root string, r *runner) func() {
+	t.Helper()
+	r.dir = filepath.Join(root, r.reg.ID)
+	if err := privateDir(r.dir); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := privateFile(filepath.Join(r.dir, "lease"), unix.O_CREAT|unix.O_RDWR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Flock(int(lease.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.persistLocked(); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(r)
+	r.reg.URL = server.URL
+	if err := atomicJSON(filepath.Join(r.dir, "registration.json"), r.reg); err != nil {
+		t.Fatal(err)
+	}
+	var once sync.Once
+	stop := func() { once.Do(func() { server.Close(); lease.Close() }) }
+	t.Cleanup(stop)
+	return stop
+}
+
+func TestRotationOutlivesARunnerThatNeverJoined(t *testing.T) {
+	for _, c := range []struct {
+		ending string
+		blocks bool
+	}{
+		{"exited", false}, // the runner removed its directory
+		{"failed", false}, // Claude failed; the record stays for manual resume
+		{"killed", true},  // the runner died while its Claude may still run
+	} {
+		t.Run(c.ending, func(t *testing.T) {
+			dataDir := t.TempDir()
+			root, err := rootDir(dataDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			joined := testRunner(t)
+			serveRunner(t, root, joined)
+			outside := testRunner(t)
+			outside.reg.ID = strings.Repeat("c", 64)
+			outside.status.ID = outside.reg.ID
+			outside.gate = func() error { return errors.New("automatic rotation requires a verified tmux pane or Rex terminal") }
+			stop := serveRunner(t, root, outside)
+			if ready, err := Prepare(dataDir, "g", nil); err != nil || ready {
+				t.Fatalf("first prepare = %v, %v", ready, err)
+			}
+			joined.mu.Lock()
+			joinedGeneration := joined.status.Generation
+			joined.mu.Unlock()
+			outside.mu.Lock()
+			outsideGeneration := outside.status.Generation
+			if c.ending == "failed" {
+				outside.status.Exited = true
+				outside.failLocked(errors.New("Claude exited without a confirmed successful rotation exit"))
+				err = outside.persistLocked()
+			}
+			outside.mu.Unlock()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if joinedGeneration != "g" || outsideGeneration != "" {
+				t.Fatalf("generations = %q, %q", joinedGeneration, outsideGeneration)
+			}
+			stop()
+			if c.ending == "exited" {
+				if err := os.RemoveAll(outside.dir); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ready, err := Prepare(dataDir, "g", nil)
+			if c.blocks {
+				if err == nil || ready {
+					t.Fatal("participant lost with a running Claude was dropped")
+				}
+				if err := Release(dataDir, "", false); err == nil {
+					t.Fatal("participant lost with a running Claude was released")
+				}
+				if _, err := os.Stat(filepath.Join(root, "pending.json")); err != nil {
+					t.Fatal("recovery transaction was discarded")
+				}
+				return
+			}
+			if err != nil || ready {
+				t.Fatalf("prepare after the session ended = %v, %v", ready, err)
+			}
+			joined.mu.Lock()
+			asked := joined.exitRequested
+			joined.mu.Unlock()
+			if !asked {
+				t.Fatal("remaining participant was not asked to exit")
+			}
+			// The plugin acknowledges the exit, then Claude ends.
+			if got := callRunner(t, joined, "/exiting", stateFor(joined)); got.Code != 200 {
+				t.Fatal(got.Body.String())
+			}
+			joined.mu.Lock()
+			joined.status.Exited = true
+			joined.mu.Unlock()
+			if ready, err := Prepare(dataDir, "g", nil); err != nil || !ready {
+				t.Fatalf("drain did not finish: %v, %v", ready, err)
+			}
+			if err := Release(dataDir, "g", true); err != nil {
+				t.Fatal(err)
+			}
+			joined.mu.Lock()
+			released := joined.released && joined.committed
+			joined.mu.Unlock()
+			if !released {
+				t.Fatal("remaining participant was not released to restart")
+			}
+			if _, err := os.Stat(filepath.Join(root, "pending.json")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("rotation stayed pending: %v", err)
+			}
+			states, err := Status(dataDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.ending == "failed" && (len(states) != 2 || states[1].Live || states[1].Recovery == "") {
+				t.Fatalf("failed session's recovery record missing: %+v", states)
+			}
+		})
 	}
 }
 

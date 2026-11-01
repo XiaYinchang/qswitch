@@ -12,6 +12,32 @@ type control struct {
 	Committed  bool   `json:"committed,omitempty"`
 }
 
+// remainingIDs keeps the participants that are still running. A runner that
+// ended without a generation after its Claude exited has nothing to drain: it
+// never joined this rotation (for example, the user closed a session whose
+// terminal could not be verified) or was released from it. Such a runner
+// removes its directory, or keeps a record if Claude failed. Any other lost
+// participant may still own a session and needs manual recovery.
+func remainingIDs(ids []string, live []participant, stale []StatusInfo) ([]string, error) {
+	running := make(map[string]bool, len(live))
+	for _, p := range live {
+		running[p.reg.ID] = true
+	}
+	lost := make(map[string]bool, len(stale))
+	for _, state := range stale {
+		lost[state.ID] = state.Generation != "" || !state.Exited
+	}
+	var kept []string
+	for _, id := range ids {
+		if running[id] {
+			kept = append(kept, id)
+		} else if lost[id] {
+			return nil, fmt.Errorf("managed Claude runner %s disappeared during rotation; manual recovery required", id)
+		}
+	}
+	return kept, nil
+}
+
 // Prepare is called while holding locks/claude.lock. A false result is a
 // pending drain: callers must retain the generation and poll on later ticks.
 // The durable participant set prevents a crashed runner from looking exited.
@@ -56,10 +82,8 @@ func Prepare(dataDir, generation string, blockers []int) (bool, error) {
 			return false, fmt.Errorf("Claude process %d is not a live managed child", pid)
 		}
 	}
-	for _, id := range txn.IDs {
-		if _, ok := byID[id]; !ok {
-			return false, fmt.Errorf("managed Claude runner %s disappeared during rotation; manual recovery required", id)
-		}
+	if txn.IDs, err = remainingIDs(txn.IDs, live, stale); err != nil {
+		return false, err
 	}
 	if txn.Generation == "" {
 		txn.Generation = generation
@@ -147,14 +171,8 @@ func Release(dataDir, generation string, committed bool) error {
 	if err != nil {
 		return err
 	}
-	byID := make(map[string]bool, len(live))
-	for _, p := range live {
-		byID[p.reg.ID] = true
-	}
-	for _, id := range txn.IDs {
-		if !byID[id] {
-			return fmt.Errorf("managed Claude runner %s disappeared during rotation; manual recovery required", id)
-		}
+	if _, err := remainingIDs(txn.IDs, live, stale); err != nil {
+		return err
 	}
 	for _, state := range stale {
 		if state.Generation != "" && (generation == "" || state.Generation == generation) {

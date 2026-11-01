@@ -57,6 +57,7 @@ type runner struct {
 	options          Options
 	pane             string
 	tmux             string
+	rex              rexTerminal
 	lastState        time.Time
 	exitRequested    bool
 	exitAcknowledged bool
@@ -448,7 +449,7 @@ func (r *runner) startLocked(ctx context.Context, mode startMode) (*exec.Cmd, er
 		if !r.status.Exited || !r.released || !r.exitAcknowledged {
 			return nil, errors.New("restart was not released")
 		}
-		// The pane must still be the one this runner owns before Claude is
+		// The terminal must still be the one this runner owns before Claude is
 		// restarted into it with a continuation prompt.
 		if err := r.gate(); err != nil {
 			return nil, err
@@ -508,7 +509,7 @@ func (r *runner) startLocked(ctx context.Context, mode startMode) (*exec.Cmd, er
 }
 
 // Run keeps Claude attached to the caller's real terminal. Only a verified
-// tmux pane may participate in automatic account rotation.
+// tmux pane or Rex terminal may participate in automatic account rotation.
 func Run(ctx context.Context, options Options) error {
 	if options.ClaudeBin == "" {
 		options.ClaudeBin = "claude"
@@ -641,6 +642,7 @@ func Run(ctx context.Context, options Options) error {
 		return err
 	}
 	r := &runner{dir: dir, options: options, pane: os.Getenv("TMUX_PANE"), tmux: os.Getenv("TMUX"), wake: make(chan struct{}, 1)}
+	r.rex = rexTerminal{session: os.Getenv("REX_SESSION"), block: os.Getenv("REX_BLOCK"), binDir: os.Getenv("REX_BIN_DIR")}
 	r.reg = reg
 	r.status = StatusInfo{ID: reg.ID, RunnerPID: os.Getpid(), CWD: cwd, Live: true, NeedsContinue: options.InitialContinuation == "continue"}
 	if inherited != nil {
@@ -654,7 +656,7 @@ func Run(ctx context.Context, options Options) error {
 			}
 		}
 	}
-	r.gate = func() error { return verifiedTMUXPane(r.pane, r.tmux) }
+	r.gate = func() error { return verifiedTerminal(r.pane, r.tmux, r.rex) }
 	server := &http.Server{Handler: r, ReadHeaderTimeout: 2 * time.Second, ReadTimeout: 3 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: 5 * time.Second, MaxHeaderBytes: 4096}
 	defer server.Close()
 	serverErrors := make(chan error, 1)

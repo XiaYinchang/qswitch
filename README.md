@@ -23,7 +23,7 @@
 
 ## Claude Code 多账号自动切换：使用方法
 
-适用于 Linux 服务器（如 novix）上用 tmux 长期运行的 Claude Code 会话：当前号额度用完时，qswitch 自动切到有余量的号，并让被中断的会话接着干活。
+适用于 Linux 服务器（如 novix）上用 tmux 或 Rex 终端长期运行的 Claude Code 会话：当前号额度用完时，qswitch 自动切到有余量的号，并让被中断的会话接着干活。
 
 ### 一次性准备
 
@@ -47,9 +47,11 @@ qswitch run claude --dangerously-skip-permissions  # 代替直接运行 claude
 
 启动后照常在 Claude 里下达任务。离开按 `Ctrl+B D`，回来用 `tmux attach -t task1`；连着看也不影响自动切换。
 
+用 Rex 时，在 Rex 里新开一个终端（App 里新建标签页，或运行 `rex new task1 -c ~/workspace`），进入项目目录后同样运行 `qswitch run claude --dangerously-skip-permissions`。关掉 App 或断开连接时终端仍留在 Rex 服务器上；App 正显示这个终端也不影响自动切换。
+
 ### 接着跑已有的会话
 
-先在原会话里 `/exit`，退出时会显示 `claude --resume <会话ID>`。然后在 tmux 里按会话当时的状态启动：
+先在原会话里 `/exit`，退出时会显示 `claude --resume <会话ID>`。然后在 tmux 或 Rex 终端里按会话当时的状态启动：
 
 ```sh
 # 已完成阶段任务、在等你输入
@@ -76,7 +78,7 @@ qswitch run claude --resume-continuation=continue --dangerously-skip-permissions
 
 ### 注意事项
 
-- **所有 Claude 都要通过 `qswitch run claude` 在 tmux 里启动。** 直接运行的 `claude` 会阻止所有会话切号；不在 tmux 里的会话不参与切号。
+- **所有 Claude 都要通过 `qswitch run claude` 在 tmux 或 Rex 终端里启动。** 直接运行的 `claude` 会阻止所有会话切号；在其他终端里启动的受管会话不能参与切号，排队的切号会一直等它退出。
 - **可用的启动参数**：`--model`、`--fallback-model`、`--effort`、`--permission-mode`、`--dangerously-skip-permissions`、`--allowedTools`/`--disallowedTools`、`--tools`、`--agent`/`--agents`、`--system-prompt` 系列、`--max-budget-usd`、`--name`、`--verbose`、`--resume`/`--continue`。`--print`、`--settings`、`--plugin-dir` 等其他参数和子命令会被拒绝。
 - **不能设置的环境变量**：`ANTHROPIC_API_KEY`、`ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_BASE_URL`、`CLAUDE_CONFIG_DIR`、`CLAUDE_CODE_OAUTH_TOKEN`、`CLAUDE_CODE_USE_BEDROCK`/`VERTEX`/`FOUNDRY` 等，会被拒绝启动。
 - **切号只在会话空闲时进行**：模型在回复、工具或后台任务在跑、输入框里有没发出的文字，都会让切号等待。切号准备期间你提交的消息会退回输入框，切号完成后再发一次即可。
@@ -99,12 +101,12 @@ qswitch run claude --resume-continuation=continue --dangerously-skip-permissions
 
   **macOS 限制**：macOS 上凭据存系统 Keychain，qswitch 暂不支持直接管理。请在 Linux 服务器（如 novix）上运行 qswitch 管理 Claude 账号。
 
-  **tmux 无人值守续接（Claude Code 2.1.312+）**：在项目目录通过 `qswitch run claude` 启动，启用 `qswitch enable-auto --tool claude`，并保持 `qswitchd` 运行。使用默认 OAuth 配置与同一个 qswitch 数据目录；不接受 API key、云厂商、独立凭据目录、无持久化或会绕过受管插件的启动选项。所有共用账号的 Claude 进程都必须受管；普通 `claude` 进程会阻断切换。
+  **tmux / Rex 无人值守续接（Claude Code 2.1.312+）**：在 tmux 窗格或 Rex 终端的项目目录里通过 `qswitch run claude` 启动，启用 `qswitch enable-auto --tool claude`，并保持 `qswitchd` 运行。使用默认 OAuth 配置与同一个 qswitch 数据目录；不接受 API key、云厂商、独立凭据目录、无持久化或会绕过受管插件的启动选项。所有共用账号的 Claude 进程都必须受管；普通 `claude` 进程会阻断切换。准备切号、确认退出和重启前，runner 都向 tmux 或 Rex 服务器核实自己仍在启动时的窗格或终端里：该终端的进程是 runner 的上级进程，且 runner 读的就是这个终端。核实不了的会话不参与切号。在 Rex 终端里开的 tmux 按 tmux 窗格核实。
 
   ```sh
-  tmux new-session -s work
+  tmux new-session -s work   # 或在 Rex 里新开一个终端
   qswitch run claude
-  # 可以随时 attach 查看；离开时 Ctrl+B D 即可，tmux 仍保留会话
+  # 可以随时 attach 查看；离开时 Ctrl+B D 即可，tmux 仍保留会话。Rex 终端在 App 关掉后也继续运行
   qswitch sessions --json
   ```
 
@@ -112,11 +114,11 @@ qswitch run claude --resume-continuation=continue --dangerously-skip-permissions
 
   受管会话一旦因 `rate_limit` 中断，daemon 在约 5 秒内用官方接口复查当前号，不等下一次定时查询；确认耗尽才排队切号，查询退避仍然生效。耗尽号过了接口给出的重置时间会立即复查。若当前号自己恢复、没有发生切号：会话一直开着时由 Claude Code 自带的自动续接继续；会话在等待期间重启过（Claude Code 会取消自带续接）时，qswitch 在会话空闲且无草稿的前提下补发一次续接指令。
 
-  文本草稿、运行中的工具/代理、待处理输入或已知后台任务都会阻断自动切号；tmux 有客户端连接不阻断，你 attach 着时也可能看到会话自动退出并恢复。会话内 `/qswitch-status` 可查看具体阻断原因。保留的是已提交对话；官方接口不能保证未提交附件和所有临时弹窗状态。草稿检查不是原子输入锁：在会话退出前一刻开始输入的内容可能丢失，使用本模式即接受这项自动重启边界。
+  文本草稿、运行中的工具/代理、待处理输入或已知后台任务都会阻断自动切号；tmux 有客户端连接、Rex App 正显示这个终端都不阻断，你看着时也可能看到会话自动退出并恢复。会话内 `/qswitch-status` 可查看具体阻断原因。保留的是已提交对话；官方接口不能保证未提交附件和所有临时弹窗状态。草稿检查不是原子输入锁：在会话退出前一刻开始输入的内容可能丢失，使用本模式即接受这项自动重启边界。
 
   升级 qswitch 后不必手动重启受管会话。runner 发现自己的程序文件被替换（按部署方式改名覆盖），会等会话空闲且没有切号在进行时，经同一套确认流程 `/exit`，在原进程内换成新版本，并用原会话 ID 恢复。runner 的进程号、ID、控制端口和租约都不变，不发续接指令；会话在此之前被额度中断的状态原样保留。会话一忙起来就放弃本次升级，下次空闲再试；换版失败则留在旧版本继续运行。
 
-  用户正常 `/exit` 不会被重新拉起。运行器中断、参与者消失或退出状态不确定时停止自动恢复，`qswitch sessions` 显示恢复原因和原会话恢复命令；确认旧进程已退出后再手动恢复。若凭据已写入但 daemon 未能确认提交，不自动发送续接指令。
+  用户正常 `/exit` 不会被重新拉起；不能参与切号的会话退出后，排队的切号照常进行。运行器中断、参与者消失或退出状态不确定时停止自动恢复，`qswitch sessions` 显示恢复原因和原会话恢复命令；确认旧进程已退出后再手动恢复。若凭据已写入但 daemon 未能确认提交，不自动发送续接指令。
 - **Devin CLI**：按官方 `billingStrategy` 识别订阅额度，Max 仅显示周额度；总体重置时间跟随实际限制窗口。CLI 与 Devin.app 使用独立凭据，CLI 切号不关闭或改写 Devin.app。
 
 首次收录 Kimi 需要先在官方客户端登录；未安装或未登录时保持空状态。
@@ -154,7 +156,7 @@ qswitch capture
 qswitch login codex
 qswitch login grok
 qswitch login claude                              # Linux，同终端授权并自动收录
-qswitch run claude [--resume-continuation=idle|continue] [Claude arguments...]  # 受管会话，在 tmux 里运行
+qswitch run claude [--resume-continuation=idle|continue] [Claude arguments...]  # 受管会话，在 tmux 或 Rex 终端里运行
 qswitch sessions [--json]                         # 会话状态与异常恢复提示
 qswitch enable-auto [--tool ...]                  # 打开自动切换（disable-auto 关闭）
 qswitch list
