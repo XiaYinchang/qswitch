@@ -461,7 +461,7 @@ func (r *runner) startLocked(ctx context.Context, mode startMode) (*exec.Cmd, er
 			continuationState = "continue"
 		}
 	case startHandoff:
-		// Resume the same transcript. No account switch happened, so no
+		// Continue the same session. No account switch happened, so no
 		// continuation prompt; the interrupted state carries over unchanged.
 		id = r.status.SessionID
 		continuationState = "idle"
@@ -469,7 +469,7 @@ func (r *runner) startLocked(ctx context.Context, mode startMode) (*exec.Cmd, er
 			continuationState = "continue"
 		}
 	}
-	args, err := parseArgs(r.options.Args, id, continuePrompt)
+	args, err := parseArgs(r.options.Args, id, id != "" && savedSession(id), continuePrompt)
 	if err != nil {
 		return nil, err
 	}
@@ -517,7 +517,7 @@ func Run(ctx context.Context, options Options) error {
 	if err := validateEnvironment(); err != nil {
 		return err
 	}
-	if _, err := parseArgs(options.Args, "", false); err != nil {
+	if _, err := parseArgs(options.Args, "", false, false); err != nil {
 		return err
 	}
 	if options.InitialContinuation != "" && options.InitialContinuation != "idle" && options.InitialContinuation != "continue" {

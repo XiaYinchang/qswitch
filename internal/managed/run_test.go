@@ -553,9 +553,30 @@ func TestRotationOutlivesARunnerThatNeverJoined(t *testing.T) {
 }
 
 func TestRestartContinuesOnlyAfterCommittedRelease(t *testing.T) {
-	for _, committed := range []bool{false, true} {
-		t.Run(map[bool]string{false: "abort", true: "commit"}[committed], func(t *testing.T) {
+	const session = "0b7c3f9e-5d1a-4c2b-9e8f-1a2b3c4d5e6f"
+	for _, c := range []struct {
+		name             string
+		saved, committed bool
+	}{
+		{"abort", true, false},
+		{"commit", true, true},
+		// A session that saved nothing starts again under its ID.
+		{"unsaved", false, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			project := filepath.Join(home, ".claude", "projects", "-work")
+			if err := os.MkdirAll(project, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if c.saved {
+				if err := os.WriteFile(filepath.Join(project, session+".jsonl"), nil, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
 			r := testRunner(t)
+			r.status.SessionID = session
 			capture := filepath.Join(r.dir, "child-arguments")
 			binary := filepath.Join(r.dir, "fake-claude")
 			script := "#!/bin/sh\nprintf '%s\\n' \"$QSWITCH_INITIAL_CONTINUATION\" \"$@\" > " + shellQuote(capture) + "\n"
@@ -567,7 +588,7 @@ func TestRestartContinuesOnlyAfterCommittedRelease(t *testing.T) {
 			r.status.Exited = true
 			r.status.Generation = "g"
 			r.status.NeedsContinue = true
-			r.exitAcknowledged, r.released, r.committed = true, true, committed
+			r.exitAcknowledged, r.released, r.committed = true, true, c.committed
 			child, err := r.startLocked(context.Background(), startRotation)
 			if err != nil {
 				t.Fatal(err)
@@ -580,10 +601,14 @@ func TestRestartContinuesOnlyAfterCommittedRelease(t *testing.T) {
 				t.Fatal(err)
 			}
 			args := string(got)
-			if !strings.Contains(args, "--resume\nsession-one\n") || !strings.Contains(args, "--permission-mode\nplan\n") || strings.Contains(args, "original prompt") {
+			want := "--resume\n" + session + "\n"
+			if !c.saved {
+				want = "--session-id\n" + session + "\n"
+			}
+			if !strings.Contains(args, want) || !strings.Contains(args, "--permission-mode\nplan\n") || strings.Contains(args, "original prompt") {
 				t.Fatalf("incorrect restart arguments: %s", args)
 			}
-			if strings.Contains(args, continuation) != committed {
+			if strings.Contains(args, continuation) != (c.saved && c.committed) {
 				t.Fatalf("continuation decision did not match release: %s", args)
 			}
 			if !strings.HasPrefix(args, "continue\n") {

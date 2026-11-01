@@ -25,7 +25,10 @@ var boolFlags = map[string]bool{
 	"--allow-dangerously-skip-permissions": true,
 }
 
-func parseArgs(args []string, resume string, needsContinue bool) ([]string, error) {
+// parseArgs validates the user's arguments and returns Claude's. A restart
+// passes the session to continue: it is resumed when its transcript is saved
+// and otherwise started again under the same ID.
+func parseArgs(args []string, resume string, saved, needsContinue bool) ([]string, error) {
 	var out []string
 	var prompts []string
 	for i := 0; i < len(args); i++ {
@@ -78,7 +81,10 @@ func parseArgs(args []string, resume string, needsContinue bool) ([]string, erro
 			}
 		}
 	}
-	if resume != "" {
+	if resume != "" && !saved {
+		// No message was recorded, so there is no work to continue either.
+		out = append(out, "--session-id", resume)
+	} else if resume != "" {
 		out = append(out, "--resume", resume)
 		if needsContinue {
 			out = append(out, "--", continuation)
