@@ -27,6 +27,12 @@ const (
 	DefaultCursorPoll = 20 * time.Second
 	// ChatGPT/Codex windows can reset before the advertised time.
 	DefaultCodexRecover = 30 * time.Minute
+	// A refresh of every account reuses a result at most this old instead of
+	// asking the provider again.
+	ManualRefreshSpacing = time.Minute
+	// An exhausted account is re-checked this long after its advertised reset,
+	// leaving room for clock skew between the provider and this host.
+	ResetGrace = 10 * time.Second
 )
 
 type Config struct {

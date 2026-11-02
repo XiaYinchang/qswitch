@@ -1047,6 +1047,14 @@ func (a *App) ProbeHTTP(ctx context.Context, tool adapter.Tool, force bool) {
 		return
 	}
 	before, _ := a.State.GetAccount(string(tool), p.StableID)
+	if force {
+		if skip, known := a.refreshSkips(tool, before); skip {
+			if known {
+				a.considerSwitch(tool)
+			}
+			return
+		}
+	}
 	res := a.probeAccount(ctx, tool, p.StableID, !force)
 	exhausted := res.Class == quota.Exhausted && res.Source != "backoff"
 	if res.Source == "backoff" {
@@ -1126,6 +1134,11 @@ func (a *App) ProbeRecovered(ctx context.Context, tool adapter.Tool, force bool)
 		if ac.StableID == p.StableID || ac.Incomplete || ac.StaleCLI || strings.HasPrefix(ac.StableID, "desktop:") {
 			continue
 		}
+		if force {
+			if skip, _ := a.refreshSkips(tool, ac); skip {
+				continue
+			}
+		}
 		recovering := quota.Class(ac.LastQuotaClass) == quota.Exhausted
 		if recovering {
 			if !force && !a.recoverDue(tool, ac) {
@@ -1161,9 +1174,11 @@ func (a *App) recoverDue(tool adapter.Tool, ac state.Account) bool {
 	if ac.HTTPBackoffUntil > 0 {
 		return true
 	}
+	// The re-check interval counts from the last request, but a request made
+	// before the advertised reset says nothing about the window after it.
 	if tool == adapter.Codex {
 		wait := a.codexRecoverInterval(ac)
-		if ac.LastHTTPAt > 0 && now-ac.LastHTTPAt < int64(wait.Seconds()) {
+		if !a.resetDue(ac) && ac.LastHTTPAt > 0 && now-ac.LastHTTPAt < int64(wait.Seconds()) {
 			return false
 		}
 		return true
@@ -1171,10 +1186,60 @@ func (a *App) recoverDue(tool adapter.Tool, ac state.Account) bool {
 	if ac.CoolingUntil > now || ac.LastResetsAt > now {
 		return false
 	}
-	if ac.LastHTTPAt > 0 && now-ac.LastHTTPAt < int64(a.cfgSnapshot().IntervalMin().Seconds()) {
+	if !a.resetDue(ac) && ac.LastHTTPAt > 0 && now-ac.LastHTTPAt < int64(a.cfgSnapshot().IntervalMin().Seconds()) {
 		return false
 	}
 	return true
+}
+
+// resetDue reports an exhausted account whose advertised reset passed, plus a
+// grace for clock skew, with no request since.
+func (a *App) resetDue(ac state.Account) bool {
+	return quota.Class(ac.LastQuotaClass) == quota.Exhausted && ac.LastResetsAt > ac.LastHTTPAt &&
+		ac.LastResetsAt+int64(config.ResetGrace.Seconds()) <= a.now().Unix()
+}
+
+// ProbeReset re-checks an exhausted account as soon as its advertised reset
+// passes rather than at the next scheduled check, so sessions waiting for it
+// resume promptly. Backoff still applies.
+func (a *App) ProbeReset(ctx context.Context, tool adapter.Tool) {
+	if !a.cfgSnapshot().ToolEnabled(string(tool)) {
+		return
+	}
+	p, _ := a.State.GetPointer(string(tool))
+	accs, err := a.State.ListAccounts(string(tool))
+	if err != nil {
+		return
+	}
+	now := a.now().Unix()
+	current, parked := false, false
+	for _, ac := range accs {
+		if ac.Incomplete || ac.StaleCLI || strings.HasPrefix(ac.StableID, "desktop:") || !a.resetDue(ac) {
+			continue
+		}
+		if ac.StableID != p.StableID {
+			parked = parked || a.recoverDue(tool, ac)
+		} else if ac.HTTPBackoffUntil <= now && ac.RefreshBackoffUntil <= now {
+			current = true
+		}
+	}
+	if current {
+		a.ProbeHTTP(ctx, tool, false)
+	}
+	if parked {
+		a.ProbeRecovered(ctx, tool, false)
+	}
+}
+
+// refreshSkips reports whether a refresh of every account can show an
+// account's record without a request: a confirmed exhaustion holds until its
+// reset, and a result from the last minute is current. known reports the
+// former. A refresh of the single account still asks.
+func (a *App) refreshSkips(tool adapter.Tool, ac state.Account) (skip, known bool) {
+	known, _ = a.knownExhausted(tool, ac)
+	age := a.now().Unix() - ac.LastHTTPAt
+	recent := ac.LastHTTPAt > 0 && age >= 0 && age < int64(config.ManualRefreshSpacing.Seconds())
+	return known || recent, known
 }
 
 func (a *App) codexRecoverInterval(ac state.Account) time.Duration {
@@ -2120,6 +2185,9 @@ func (a *App) runToolWorker(ctx context.Context, tool adapter.Tool) {
 		case <-tApply.C:
 			if tool == adapter.Claude && managed.TakeLimitHit(a.DataDir) {
 				a.ProbeLimitHit(ctx, tool)
+			}
+			if a.HTTP.Client != nil || !secutil.InTest() {
+				a.ProbeReset(ctx, tool)
 			}
 			_ = a.TryApply(tool, false)
 		}

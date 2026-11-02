@@ -150,6 +150,11 @@ func (a *App) Overview() Overview {
 			view.QuotaStale = view.QuotaStale || view.LastQuotaAt <= 0 || view.LastQuotaAt > now ||
 				now-view.LastQuotaAt >= int64(maxAge.Seconds()) ||
 				(ac.LastResetsAt > view.LastQuotaAt && ac.LastResetsAt <= now)
+			// A confirmed exhaustion holds until its reset; the daemon does not
+			// ask again before then, and a failed request does not withdraw it.
+			if known, _ := a.knownExhausted(t, ac); known {
+				view.QuotaStale = false
+			}
 			tv.Accounts = append(tv.Accounts, view)
 		}
 		if t == adapter.Cursor {
