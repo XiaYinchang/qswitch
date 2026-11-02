@@ -271,6 +271,7 @@ func TestPendingRechecksStaleQuotaBeforeRestoring(t *testing.T) {
 		targetFailed bool
 		sourceOld    bool
 		sourceReset  bool
+		sourceFailed bool
 		status       int
 		used         int
 		wantCalls    int
@@ -283,6 +284,10 @@ func TestPendingRechecksStaleQuotaBeforeRestoring(t *testing.T) {
 		{name: "source recovery due", sourceOld: true, status: 200, used: 17, wantCalls: 1},
 		{name: "source reset passed", sourceReset: true, status: 200, used: 17, wantCalls: 1},
 		{name: "fresh observations reused", status: 503, wantSwitch: true},
+		// A failed re-check of the source does not cancel the switch while its
+		// exhaustion still stands, and its backoff holds once it no longer does.
+		{name: "source re-check failed", sourceFailed: true, status: 503, wantSwitch: true},
+		{name: "source re-check failed after recovery due", sourceOld: true, sourceFailed: true, status: 200, used: 17},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a, now := candidateFixture(t)
@@ -311,6 +316,18 @@ func TestPendingRechecksStaleQuotaBeforeRestoring(t *testing.T) {
 				}
 				a.Clock = clock.Fixed{T: now.Add(elapsed)}
 				seedCandidateObservation(t, a, "acc-a", "ok", 20, a.now().Add(-time.Minute), 0)
+			}
+			if tc.sourceFailed {
+				ac, err := a.State.GetAccount("codex", "acc-b")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := a.State.UpdateQuota("codex", "acc-b", ac.LastQuotaClass, ac.LastUsedPct, ac.LastResetsAt, a.now().Unix(), a.now().Unix(), a.now().Add(5*time.Minute).Unix()); err != nil {
+					t.Fatal(err)
+				}
+				if err := a.State.LogQuota("codex", "acc-b", "unknown", "http_throttled", 0, a.now()); err != nil {
+					t.Fatal(err)
+				}
 			}
 			if err := a.State.SetPending(state.Pending{Tool: "codex", FromID: "acc-b", ToID: "acc-a", Reason: "exhausted", QueuedAt: now.Unix()}); err != nil {
 				t.Fatal(err)

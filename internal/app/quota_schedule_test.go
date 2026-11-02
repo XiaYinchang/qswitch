@@ -15,6 +15,7 @@ import (
 	"qswitch/internal/adapter"
 	"qswitch/internal/adapter/codex"
 	"qswitch/internal/clock"
+	"qswitch/internal/config"
 	"qswitch/internal/quota"
 )
 
@@ -185,9 +186,15 @@ func TestQuotaBackoffDoesNotBlockRenewalOrGetClearedByIt(t *testing.T) {
 	}
 }
 
+// Backoff leaves the current account's snapshot unconfirmed. Unless a recent
+// successful observation still shows it exhausted, it neither queues a switch
+// nor spends requests on candidates.
 func TestBackoffCurrentQuotaDoesNotProbeSwitchCandidates(t *testing.T) {
 	a, now := candidateFixture(t)
 	seedCandidateObservation(t, a, "acc-a", "unknown", 0, now.Add(-time.Hour), 0)
+	// The exhaustion observed at now is past the Codex recovery check.
+	now = now.Add(config.DefaultCodexRecover + time.Minute)
+	a.Clock = clock.Fixed{T: now}
 	if err := a.State.UpdateQuota("codex", "acc-b", "exhausted", 100, now.Add(time.Hour).Unix(), now.Unix(), now.Unix(), now.Add(2*time.Minute).Unix()); err != nil {
 		t.Fatal(err)
 	}

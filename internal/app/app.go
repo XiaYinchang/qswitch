@@ -1048,7 +1048,15 @@ func (a *App) ProbeHTTP(ctx context.Context, tool adapter.Tool, force bool) {
 	}
 	before, _ := a.State.GetAccount(string(tool), p.StableID)
 	res := a.probeAccount(ctx, tool, p.StableID, !force)
-	if res.Class == quota.Exhausted && res.Source != "backoff" {
+	exhausted := res.Class == quota.Exhausted && res.Source != "backoff"
+	if res.Source == "backoff" {
+		// A failed request does not withdraw a confirmed exhaustion; keep
+		// queueing the switch while the request waits out its backoff.
+		if ac, err := a.State.GetAccount(string(tool), p.StableID); err == nil {
+			exhausted, _ = a.knownExhausted(tool, ac)
+		}
+	}
+	if exhausted {
 		a.considerSwitch(tool)
 	}
 	recovered := quota.Class(before.LastQuotaClass) == quota.Exhausted && (res.Class == quota.OK || res.Class == quota.Soft)
@@ -1062,7 +1070,10 @@ func (a *App) ProbeHTTP(ctx context.Context, tool adapter.Tool, force bool) {
 // ProbeLimitHit re-checks the current account as soon as a managed session
 // reports a usage-limit failure. It skips the scheduled interval but still
 // honours HTTP and refresh backoff, and exhaustion is confirmed by the
-// official quota endpoint before a switch is queued.
+// official quota endpoint before a switch is queued. Sessions sharing an
+// account hit its limit one after another; once a successful observation
+// shows the account exhausted, later hits queue the switch without another
+// request, which would only spend the provider's rate limit.
 func (a *App) ProbeLimitHit(ctx context.Context, tool adapter.Tool) {
 	cfg := a.cfgSnapshot()
 	if !cfg.General.AutoSwitch || !cfg.ToolEnabled(string(tool)) {
@@ -1072,7 +1083,15 @@ func (a *App) ProbeLimitHit(ctx context.Context, tool adapter.Tool) {
 	if p.StableID == "" || strings.HasPrefix(p.StableID, "desktop:") {
 		return
 	}
-	if ac, err := a.State.GetAccount(string(tool), p.StableID); err != nil || ac.HTTPBackoffUntil > a.now().Unix() || ac.RefreshBackoffUntil > a.now().Unix() {
+	ac, err := a.State.GetAccount(string(tool), p.StableID)
+	if err != nil {
+		return
+	}
+	if known, err := a.knownExhausted(tool, ac); err == nil && known {
+		a.considerSwitch(tool)
+		return
+	}
+	if ac.HTTPBackoffUntil > a.now().Unix() || ac.RefreshBackoffUntil > a.now().Unix() {
 		return
 	}
 	if res := a.probeAccount(ctx, tool, p.StableID, false); res.Class == quota.Exhausted {
@@ -1900,11 +1919,11 @@ func (a *App) TryApply(tool adapter.Tool, killCLI bool) (retErr error) {
 		// when it can proceed, before closing an app or terminating a process.
 		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 		defer cancel()
-		from, err := a.automaticQuotaLocked(ctx, tool, pend.FromID)
+		exhausted, err := a.sourceExhaustedLocked(ctx, tool, pend.FromID)
 		if err != nil {
 			return err
 		}
-		if from.Class != quota.Exhausted {
+		if !exhausted {
 			return a.State.ClearPending(string(tool))
 		}
 		to, err := a.automaticQuotaLocked(ctx, tool, pend.ToID)
@@ -1920,19 +1939,23 @@ func (a *App) TryApply(tool adapter.Tool, killCLI bool) (retErr error) {
 		if !cfg.General.AutoSwitch || !cfg.ToolEnabled(string(tool)) {
 			return a.State.ClearPending(string(tool))
 		}
-		for _, id := range []string{pend.FromID, pend.ToID} {
-			ac, err := a.State.GetAccount(string(tool), id)
-			if err != nil {
-				return err
-			}
-			res, fresh, err := a.cachedAutomaticQuota(tool, ac)
-			if err != nil {
-				return err
-			}
-			if !fresh || (id == pend.FromID && res.Class != quota.Exhausted) ||
-				(id == pend.ToID && res.Class != quota.OK && res.Class != quota.Soft) {
-				return a.State.ClearPending(string(tool))
-			}
+		from, err := a.State.GetAccount(string(tool), pend.FromID)
+		if err != nil {
+			return err
+		}
+		if exhausted, err = a.knownExhausted(tool, from); err != nil {
+			return err
+		}
+		target, err := a.State.GetAccount(string(tool), pend.ToID)
+		if err != nil {
+			return err
+		}
+		res, fresh, err := a.cachedAutomaticQuota(tool, target)
+		if err != nil {
+			return err
+		}
+		if !exhausted || !fresh || (res.Class != quota.OK && res.Class != quota.Soft) {
+			return a.State.ClearPending(string(tool))
 		}
 	}
 	if tool == adapter.Claude {
