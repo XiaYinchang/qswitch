@@ -1897,8 +1897,10 @@ func (a *App) switchToEnrolled(tool adapter.Tool, enrolled quota.Result) {
 	a.considerSwitch(tool)
 }
 
-// candidate orders usable accounts: OK before Soft, then the account whose
-// remaining quota is lost soonest, then the least used.
+// candidate orders usable accounts by when their remaining quota is lost:
+// the account whose longest window resets first is used first, even one near
+// its limit, so quota about to be forfeited is spent. Equal or unknown resets
+// fall back to OK before Soft, then the least used.
 type candidate struct {
 	rank      int
 	usedPct   float64
@@ -1906,12 +1908,12 @@ type candidate struct {
 }
 
 func (c candidate) better(o candidate) bool {
-	if c.rank != o.rank {
-		return c.rank < o.rank
-	}
 	if c.expiresAt != o.expiresAt {
 		// A known expiry beats an unknown one; otherwise the sooner wins.
 		return o.expiresAt == 0 || (c.expiresAt != 0 && c.expiresAt < o.expiresAt)
+	}
+	if c.rank != o.rank {
+		return c.rank < o.rank
 	}
 	return c.usedPct < o.usedPct
 }

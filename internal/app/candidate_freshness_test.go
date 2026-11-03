@@ -167,6 +167,17 @@ func TestPickNextPrefersQuotaExpiringSoonest(t *testing.T) {
 	if next := a.pickNext(adapter.Codex, "acc-b"); next != "acc-c" {
 		t.Fatalf("picked %q, want the account whose weekly quota expires first", next)
 	}
+	// Near its limit, the account expiring first still goes first: its
+	// remaining quota is forfeited at the reset otherwise.
+	seedCandidateObservation(t, a, "acc-c", "soft", 96, now, now.Add(6*time.Hour).Unix())
+	if next := a.pickNext(adapter.Codex, "acc-b"); next != "acc-c" {
+		t.Fatalf("picked %q, want the near-limit account whose weekly quota expires first", next)
+	}
+	// With the same reset, the account further from its limit goes first.
+	window("acc-a", 20, now.Add(6*time.Hour))
+	if next := a.pickNext(adapter.Codex, "acc-b"); next != "acc-a" {
+		t.Fatalf("picked %q at equal expiry, want the account not near its limit", next)
+	}
 	// Without window data, the least-used account still wins.
 	for _, id := range []string{"acc-a", "acc-c"} {
 		if err := a.State.SetQuotaDetail("codex", id, ""); err != nil {
