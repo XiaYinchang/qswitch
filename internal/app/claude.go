@@ -280,3 +280,26 @@ func (a *App) claudeRefreshResult(b adapter.Blob, permanent bool, err error) err
 	}
 	return a.recordRefreshResult(adapter.Claude, b.Identity.StableID, permanent, err)
 }
+
+// clearRenewedClaudeExpiry withdraws an expired verdict on the live account
+// once a capture carries a token that has not expired. A running Claude Code
+// renews the live account itself, so a quota request made with the token it
+// left behind while every session sat idle is rejected. That marks the
+// account expired and backs it off for hours, which also stops limit-hit
+// checks and switching after the sessions renew the token and go back to
+// work. The caller holds the Claude tool lock.
+func (a *App) clearRenewedClaudeExpiry(blobs []adapter.Blob, id string) {
+	ac, err := a.State.GetAccount(string(adapter.Claude), id)
+	if err != nil || quota.Class(ac.LastQuotaClass) != quota.Expired {
+		return
+	}
+	for _, b := range blobs {
+		if b.Identity.StableID != id {
+			continue
+		}
+		if c, err := claude.CredsFromBlob(b); err == nil && c.AccessToken != "" && !c.NeedsRefresh(a.now()) {
+			_ = a.recordRefreshResult(adapter.Claude, id, false, nil)
+		}
+		return
+	}
+}

@@ -924,6 +924,9 @@ func (a *App) Ingest(tool adapter.Tool) error {
 			p.Desync = len(blobs) > 1
 		}
 		_ = a.State.SetPointer(p)
+		if tool == adapter.Claude {
+			a.clearRenewedClaudeExpiry(blobs, id)
+		}
 	case p.LastApplyAt > 0 && now-p.LastApplyAt < int64(cfg.Writeback().Seconds()) && p.WritebackRetries == 0:
 		target, err := a.loadBlob(tool, p.LastApplyTo)
 		if err != nil {

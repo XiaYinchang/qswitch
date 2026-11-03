@@ -93,7 +93,7 @@ qswitch run claude --resume-continuation=continue --dangerously-skip-permissions
 
   收录以官方 profile 返回的身份为准，同时修正快照中的账号显示信息；切号也会修正旧快照的显示信息，并在缺少 `.claude.json` 时创建该文件。凭据写入失败会回滚账号元数据，回滚失败单独报错。
 
-  **续期恢复**：OAuth 续期与恢复写回仍会为了 refresh token 安全检查所有 Claude 进程。换票前在加密仓库记录待恢复事务，收到新凭据后先持久化，再验证身份和写回。profile 临时故障不会反复消费 refresh token；身份未确认的凭据隔离保存，不按旧元数据 UUID 收录。文件写回失败可在重启后恢复；若外部已登录另一个账号，不覆盖新登录。换票结果无法确定时停止复用旧 refresh token，明确要求重新登录。
+  **续期恢复**：OAuth 续期与恢复写回仍会为了 refresh token 安全检查所有 Claude 进程。换票前在加密仓库记录待恢复事务，收到新凭据后先持久化，再验证身份和写回。profile 临时故障不会反复消费 refresh token；身份未确认的凭据隔离保存，不按旧元数据 UUID 收录。文件写回失败可在重启后恢复；若外部已登录另一个账号，不覆盖新登录。换票结果无法确定时停止复用旧 refresh token，明确要求重新登录。有 Claude 进程运行时由 Claude Code 自己续期当前账号；会话都空闲、token 过期后的定时查询会被拒并按认证失效长退避，之后一旦收录到 Claude Code 续期出的未过期 token，就撤销这次认证失效判定，恢复正常查询和撞限复查。
 
   **加号（Linux）**：在同一个终端运行一次 `qswitch login claude`。qswitch 在数据目录下创建私有的 `claude-enrollments/session-*` 临时目录，设置 `CLAUDE_CONFIG_DIR` 和 `CLAUDE_SECURESTORAGE_CONFIG_DIR`，运行官方 `claude auth login --claudeai`；打开授权链接并把完整 code 粘贴回当前终端、按回车即可。官方登录成功退出后，qswitch 校验账号身份、写入加密仓库并打印 `enrolled claude ...`，不需要另开终端或手动 `capture`。整个过程不清除、覆盖或登出当前登录，不改变当前账号指针，也不调用新账号的 refresh token。正常退出、Ctrl+C、终端挂断、SIGTERM 或超时会结束直接子进程并清理临时目录；SIGKILL 时由 Linux 结束直接子进程，残留目录在下次使用同一数据目录登录时回收。仅回收带有效标记、属主和权限正确且租约已释放的目录，不扫描旧 `/tmp` 目录，也不结束其他 Claude 会话。身份校验失败不报收录成功，需要重新执行登录。
 
