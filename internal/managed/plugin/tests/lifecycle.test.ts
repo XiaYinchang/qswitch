@@ -159,6 +159,32 @@ test('whitespace-only input does not block rate-limit continuation', async ($, o
   expect(await status($)).toMatchObject({ ready: true, needs_continue: true });
 });
 
+test('a switch waits for an idle session\'s background task at most ten minutes', async ($, on) => {
+  const { clock, control } = setup(on);
+  on('tool.call', { tool: 'Bash' }, () => ({ result: {
+    stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'bg1',
+  } }));
+  await start($);
+  await $.tool.call({ tool: 'Bash', command: 'long-build', run_in_background: true });
+  await $.classic.Stop({ stop_hook_active: false,
+    background_tasks: [{ id: 'bg1', type: 'shell', status: 'running', description: 'wait for the build' }], session_crons: [] });
+  control.action = 'prepare';
+  control.generation = 'generation-1';
+  await clock.advance(750);
+  expect(await status($)).toMatchObject({ ready: false, reason: 'known background tasks remain', phase: 'prepare' });
+  await clock.advance(9 * 60 * 1000);
+  expect((await status($)).ready).toBe(false);
+  await clock.advance(60 * 1000);
+  expect(await status($)).toMatchObject({
+    ready: true, needs_continue: false, stopped: ['background task bg1 (wait for the build)'],
+  });
+  // A released switch restarts the wait for the next one.
+  control.action = 'run';
+  control.generation = '';
+  await clock.advance(750);
+  expect(await status($)).toMatchObject({ ready: false, reason: 'known background tasks remain' });
+});
+
 test('a text draft still blocks rate-limit continuation', async ($, on) => {
   const { control } = setup(on);
   await start($);

@@ -42,6 +42,8 @@ type sessionState struct {
 	LimitHits     int    `json:"limit_hits"`
 	Reason        string `json:"reason"`
 	Generation    string `json:"generation,omitempty"`
+	// Stopped lists the asynchronous work an exit now would stop.
+	Stopped []string `json:"stopped,omitempty"`
 }
 
 type action struct {
@@ -68,6 +70,7 @@ type runner struct {
 	limitHits        int       // plugin's count for the current child process
 	exitAckAt        time.Time // when the plugin acknowledged the current exit
 	forcedExit       bool      // the runner is ending a child whose acknowledged exit is overdue
+	stopped          []string  // asynchronous work the child still had when it acknowledged its exit
 	forcedAt         time.Time
 	upgrading        bool
 	upgradeAt        time.Time
@@ -315,7 +318,7 @@ func (r *runner) handleState(w http.ResponseWriter, route string, state sessionS
 		http.Error(w, "child unavailable", http.StatusConflict)
 		return
 	}
-	if len(state.SessionID) > 256 || len(state.CWD) > 4096 || len(state.Reason) > 4096 || (state.Ready && (state.SessionID == "" || !filepath.IsAbs(state.CWD))) {
+	if len(state.SessionID) > 256 || len(state.CWD) > 4096 || len(state.Reason) > 4096 || !validStopped(state.Stopped) || (state.Ready && (state.SessionID == "" || !filepath.IsAbs(state.CWD))) {
 		http.Error(w, "invalid session identity", http.StatusBadRequest)
 		return
 	}
@@ -331,6 +334,7 @@ func (r *runner) handleState(w http.ResponseWriter, route string, state sessionS
 			return
 		}
 		r.status.NeedsContinue = state.NeedsContinue
+		r.stopped = append([]string(nil), state.Stopped...)
 		r.exitAcknowledged = true
 		r.exitAckAt = time.Now()
 		if err := r.persistLocked(); err != nil {
@@ -346,6 +350,7 @@ func (r *runner) handleState(w http.ResponseWriter, route string, state sessionS
 	if r.exitAcknowledged && !r.forcedExit {
 		r.exitAcknowledged = false
 		r.exitRequested = false
+		r.stopped = nil
 		if r.released {
 			r.status.Generation = ""
 			r.released = false
@@ -482,7 +487,7 @@ func (r *runner) startLocked(ctx context.Context, mode startMode) (*exec.Cmd, er
 	}
 	id := ""
 	continuationState := r.options.InitialContinuation
-	continuePrompt := false
+	prompt := ""
 	switch mode {
 	case startRotation:
 		if !r.status.Exited || !r.released || !r.exitAcknowledged {
@@ -494,7 +499,14 @@ func (r *runner) startLocked(ctx context.Context, mode startMode) (*exec.Cmd, er
 			return nil, err
 		}
 		id = r.status.SessionID
-		continuePrompt = r.committed && r.status.NeedsContinue
+		if r.committed && r.status.NeedsContinue {
+			prompt = continuation
+		}
+		// The exit stopped this work whether or not the switch committed, and
+		// none of it reports back to the restarted session.
+		if len(r.stopped) > 0 {
+			prompt = strings.TrimSpace(prompt + " " + stoppedNote(r.stopped))
+		}
 		continuationState = "idle"
 		if r.status.NeedsContinue {
 			continuationState = "continue"
@@ -509,11 +521,11 @@ func (r *runner) startLocked(ctx context.Context, mode startMode) (*exec.Cmd, er
 		}
 	}
 	saved := id != "" && savedSession(id)
-	if continuePrompt && saved {
+	if prompt != "" && saved {
 		// The prompt below is the continuation; a later resume must not add one.
 		continuationState = "prompted"
 	}
-	args, err := parseArgs(r.options.Args, id, saved, continuePrompt)
+	args, err := parseArgs(r.options.Args, id, saved, prompt)
 	if err != nil {
 		return nil, err
 	}
@@ -540,6 +552,7 @@ func (r *runner) startLocked(ctx context.Context, mode startMode) (*exec.Cmd, er
 	r.lastState = time.Time{}
 	r.exitRequested, r.exitAcknowledged, r.released, r.committed = false, false, false, false
 	r.exitAckAt, r.forcedExit, r.forcedAt = time.Time{}, false, time.Time{}
+	r.stopped = nil
 	if err := r.persistLocked(); err != nil {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
@@ -562,7 +575,7 @@ func Run(ctx context.Context, options Options) error {
 	if err := validateEnvironment(); err != nil {
 		return err
 	}
-	if _, err := parseArgs(options.Args, "", false, false); err != nil {
+	if _, err := parseArgs(options.Args, "", false, ""); err != nil {
 		return err
 	}
 	if options.InitialContinuation != "" && options.InitialContinuation != "idle" && options.InitialContinuation != "continue" {

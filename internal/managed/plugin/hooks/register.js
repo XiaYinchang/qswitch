@@ -2,6 +2,10 @@
 // preserved: prompt.read() does not expose attachments or every temporary UI.
 const EXIT_GRACE_MS = 30000;
 const QUEUE_SETTLE_MS = 5000;
+// A switch waits this long for an idle session's background tasks, agents and
+// scheduled tasks to finish; then the session exits with them unfinished and
+// its continuation lists them.
+const ASYNC_WAIT_MS = 10 * 60 * 1000;
 // Same text the runner passes on restart after an account switch.
 const CONTINUATION = 'Continue the work interrupted by the account usage limit from the last unfinished step. Do not repeat work already completed.';
   let url = '';
@@ -25,6 +29,8 @@ const CONTINUATION = 'Continue the work interrupted by the account usage limit f
   let exiting = false;
   let awaitingExit = false;
   let exitOverdue = false;
+  let asyncWaitOver = false;
+  let asyncTimer;
   let exitTimer;
   let mainFailure;
   let timer;
@@ -77,7 +83,9 @@ const CONTINUATION = 'Continue the work interrupted by the account usage limit f
     const draft = await $.prompt.read();
     let reason = '';
     // Asynchronous work blocks an ordinary session. A pending continuation may
-    // need to run to retire that work, so keep reporting it without blocking.
+    // need to run to retire that work, and a switch waits for it only so long;
+    // keep reporting it without blocking in either case.
+    const asyncWaived = needsContinue || asyncWaitOver;
     if (!initialized) reason = 'initializing';
     else if (awaitingExit || exitOverdue) reason = 'waiting for Claude Code to exit';
     else if (unknown) reason = unknown;
@@ -85,10 +93,10 @@ const CONTINUATION = 'Continue the work interrupted by the account usage limit f
     else if (turns.size) reason = 'model turn running';
     else if (tools.size) reason = 'tool call running';
     else if (queued.length) reason = 'submitted prompt has not started a known turn';
-    else if (!needsContinue && uncertainTasks.size) reason = 'background task lifecycle not confirmed by Stop';
-    else if (!needsContinue && background.length) reason = 'known background tasks remain';
-    else if (!needsContinue && crons.length) reason = 'scheduled session tasks remain';
-    else if (!needsContinue && agents.some(agent => !terminal(agent.status))) reason = 'known agent is not finished';
+    else if (!asyncWaived && uncertainTasks.size) reason = 'background task lifecycle not confirmed by Stop';
+    else if (!asyncWaived && background.length) reason = 'known background tasks remain';
+    else if (!asyncWaived && crons.length) reason = 'scheduled session tasks remain';
+    else if (!asyncWaived && agents.some(agent => !terminal(agent.status))) reason = 'known agent is not finished';
     else if (draft.text.trim().length) reason = 'text draft is present';
     else if (before !== revision) reason = 'session changed while checking readiness';
     else if (!sessionId || !cwd) reason = 'session identity unavailable';
@@ -99,7 +107,24 @@ const CONTINUATION = 'Continue the work interrupted by the account usage limit f
       needs_continue: needsContinue,
       limit_hits: limitHits,
       reason,
+      stopped: unfinishedWork(agents),
     };
+  }
+
+  // What an exit now would stop. The continuation after the restart lists it,
+  // since none of it reports back to the new process.
+  function unfinishedWork(agents) {
+    const items = [];
+    for (const task of background) {
+      items.push(task.description ? `background task ${task.id} (${task.description})` : `background task ${task.id}`);
+    }
+    for (const agent of agents) {
+      if (terminal(agent.status)) continue;
+      items.push(agent.description ? `agent ${agent.id} (${agent.description})` : `agent ${agent.id}`);
+    }
+    for (const cron of crons) items.push(`scheduled task ${cron.id}`);
+    if (uncertainTasks.size) items.push(`${uncertainTasks.size} tool call(s) whose background work was not confirmed`);
+    return items.slice(0, 20).map(item => String(item).slice(0, 200));
   }
 
   async function poll($) {
@@ -124,6 +149,9 @@ const CONTINUATION = 'Continue the work interrupted by the account usage limit f
           phase = 'run';
           generation = '';
           blockedSubmission = false;
+          asyncTimer?.cancel();
+          asyncTimer = undefined;
+          asyncWaitOver = false;
           changed();
         }
         return;
@@ -132,6 +160,11 @@ const CONTINUATION = 'Continue the work interrupted by the account usage limit f
         unknown = 'coordinator changed generation without releasing preparation';
         changed();
         return;
+      }
+      if (phase !== 'prepare') {
+        asyncTimer?.cancel();
+        asyncWaitOver = false;
+        asyncTimer = $.clock.after(ASYNC_WAIT_MS, () => { asyncWaitOver = true; changed(); });
       }
       phase = 'prepare';
       generation = action.generation;

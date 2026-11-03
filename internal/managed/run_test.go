@@ -424,6 +424,34 @@ func TestOverdueAcknowledgedExitIsEnded(t *testing.T) {
 	}
 }
 
+// The acknowledgement records the work an exit stops, for the continuation
+// after the restart. A revoked acknowledgement stopped nothing.
+func TestExitAcknowledgementRecordsStoppedWork(t *testing.T) {
+	r := testRunner(t)
+	r.status.Generation = "g"
+	r.exitRequested = true
+	state := stateFor(r)
+	state.Stopped = []string{"background task bg1 (wait for the build)", "agent a1"}
+	if got := callRunner(t, r, "/exiting", state); got.Code != 200 {
+		t.Fatal(got.Body.String())
+	}
+	if len(r.stopped) != 2 || r.stopped[0] != state.Stopped[0] {
+		t.Fatalf("stopped work = %q", r.stopped)
+	}
+	revoked := stateFor(r)
+	revoked.Ready = false
+	revoked.Reason = "exit acknowledgement cancelled: session changed"
+	callRunner(t, r, "/state", revoked)
+	if r.stopped != nil {
+		t.Fatalf("revoked exit kept stopped work: %q", r.stopped)
+	}
+	bad := stateFor(r)
+	bad.Stopped = []string{"line\nbreak"}
+	if got := callRunner(t, r, "/state", bad); got.Code != 400 {
+		t.Fatalf("control characters in stopped work accepted: %d", got.Code)
+	}
+}
+
 func TestAbortBeforeAcknowledgementKeepsChild(t *testing.T) {
 	r := testRunner(t)
 	r.status.Generation = "g"
@@ -668,14 +696,21 @@ func TestRotationOutlivesARunnerThatNeverJoined(t *testing.T) {
 
 func TestRestartContinuesOnlyAfterCommittedRelease(t *testing.T) {
 	const session = "0b7c3f9e-5d1a-4c2b-9e8f-1a2b3c4d5e6f"
+	stopped := []string{"background task bg1 (wait for the build)"}
 	for _, c := range []struct {
 		name             string
 		saved, committed bool
+		stopped          []string
 	}{
-		{"abort", true, false},
-		{"commit", true, true},
+		{"abort", true, false, nil},
+		{"commit", true, true, nil},
 		// A session that saved nothing starts again under its ID.
-		{"unsaved", false, true},
+		{"unsaved", false, true, nil},
+		// The exit stopped background work either way; the restarted session
+		// is told what, though only a committed switch continues the work
+		// interrupted by the usage limit.
+		{"abort with stopped work", true, false, stopped},
+		{"commit with stopped work", true, true, stopped},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			home := t.TempDir()
@@ -703,6 +738,7 @@ func TestRestartContinuesOnlyAfterCommittedRelease(t *testing.T) {
 			r.status.Generation = "g"
 			r.status.NeedsContinue = true
 			r.exitAcknowledged, r.released, r.committed = true, true, c.committed
+			r.stopped = c.stopped
 			child, err := r.startLocked(context.Background(), startRotation)
 			if err != nil {
 				t.Fatal(err)
@@ -725,10 +761,16 @@ func TestRestartContinuesOnlyAfterCommittedRelease(t *testing.T) {
 			if strings.Contains(args, continuation) != (c.saved && c.committed) {
 				t.Fatalf("continuation decision did not match release: %s", args)
 			}
+			if strings.Contains(args, "bg1 (wait for the build)") != (c.saved && c.stopped != nil) {
+				t.Fatalf("stopped work not reported to the restarted session: %s", args)
+			}
+			if r.stopped != nil {
+				t.Fatal("stopped work kept for a later restart")
+			}
 			// A continuation on the command line is marked so that a later
 			// resume does not send a second one.
 			want = "continue\n"
-			if c.saved && c.committed {
+			if c.saved && (c.committed || c.stopped != nil) {
 				want = "prompted\n"
 			}
 			if !strings.HasPrefix(args, want) {

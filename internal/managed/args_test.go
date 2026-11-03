@@ -9,7 +9,11 @@ import (
 func TestResumePreservesPermissionsWithoutReplayingPrompt(t *testing.T) {
 	original := []string{"--permission-mode", "plan", "--model=sonnet", "--resume", "old", "--", "original work request"}
 	for _, needsContinue := range []bool{false, true} {
-		got, err := parseArgs(original, "exact-session", true, needsContinue)
+		prompt := ""
+		if needsContinue {
+			prompt = continuation
+		}
+		got, err := parseArgs(original, "exact-session", true, prompt)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -22,7 +26,7 @@ func TestResumePreservesPermissionsWithoutReplayingPrompt(t *testing.T) {
 		}
 		// A session that saved nothing cannot be resumed; it starts again
 		// under its ID with nothing to continue.
-		got, err = parseArgs(original, "exact-session", false, needsContinue)
+		got, err = parseArgs(original, "exact-session", false, prompt)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -31,7 +35,7 @@ func TestResumePreservesPermissionsWithoutReplayingPrompt(t *testing.T) {
 			t.Fatalf("unsaved session arguments: %q, want %q", got, want)
 		}
 	}
-	initial, err := parseArgs(original, "", false, false)
+	initial, err := parseArgs(original, "", false, "")
 	if err != nil || !reflect.DeepEqual(initial, original) {
 		t.Fatalf("initial arguments changed: %q %v", initial, err)
 	}
@@ -39,11 +43,11 @@ func TestResumePreservesPermissionsWithoutReplayingPrompt(t *testing.T) {
 
 func TestUnsafeModesCannotDisableManagedProtocol(t *testing.T) {
 	for _, flag := range []string{"--print", "--bare", "--safe-mode", "--settings", "--plugin-dir", "--no-session-persistence", "--disable-slash-commands", "--fork-session", "--output-format", "--remote", "--unknown"} {
-		if _, err := parseArgs([]string{flag}, "", false, false); err == nil {
+		if _, err := parseArgs([]string{flag}, "", false, ""); err == nil {
 			t.Errorf("accepted %s", flag)
 		}
 	}
-	if _, err := parseArgs([]string{"auth"}, "", false, false); err == nil {
+	if _, err := parseArgs([]string{"auth"}, "", false, ""); err == nil {
 		t.Fatal("accepted auth subcommand")
 	}
 }

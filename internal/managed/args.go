@@ -28,7 +28,7 @@ var boolFlags = map[string]bool{
 // parseArgs validates the user's arguments and returns Claude's. A restart
 // passes the session to continue: it is resumed when its transcript is saved
 // and otherwise started again under the same ID.
-func parseArgs(args []string, resume string, saved, needsContinue bool) ([]string, error) {
+func parseArgs(args []string, resume string, saved bool, prompt string) ([]string, error) {
 	var out []string
 	var prompts []string
 	for i := 0; i < len(args); i++ {
@@ -86,8 +86,8 @@ func parseArgs(args []string, resume string, saved, needsContinue bool) ([]strin
 		out = append(out, "--session-id", resume)
 	} else if resume != "" {
 		out = append(out, "--resume", resume)
-		if needsContinue {
-			out = append(out, "--", continuation)
+		if prompt != "" {
+			out = append(out, "--", prompt)
 		}
 	} else if len(prompts) != 0 {
 		if len(prompts) == 1 {
@@ -100,6 +100,26 @@ func parseArgs(args []string, resume string, saved, needsContinue bool) ([]strin
 		out = append(out, prompts...)
 	}
 	return out, nil
+}
+
+// stoppedNote tells a restarted session which asynchronous work its exit
+// stopped. Their results and notifications never reach the new process.
+func stoppedNote(items []string) string {
+	return "Switching accounts restarted this session and stopped unfinished background work, which will not report back: " +
+		strings.Join(items, "; ") + ". Check what each left behind, including anything it started on other hosts, before starting it again, then continue the work."
+}
+
+// validStopped bounds the plugin's list of unfinished work.
+func validStopped(items []string) bool {
+	if len(items) > 32 {
+		return false
+	}
+	for _, item := range items {
+		if item == "" || len(item) > 512 || strings.ContainsFunc(item, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+			return false
+		}
+	}
+	return true
 }
 
 func supportedVersion(output string) bool {
