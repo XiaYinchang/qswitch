@@ -204,6 +204,43 @@ func TestUpgradeWaitsForDaemonGenerationAndBlocksPrepare(t *testing.T) {
 	}
 }
 
+// A binary replaced during a switch must not upgrade a session restarted with
+// the continuation before that prompt runs: the plugin reports the session
+// idle before Claude Code submits a command-line prompt, and the handoff that
+// follows an upgrade exit restarts without one.
+func TestUpgradeWaitsForCommandLineContinuation(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		end  func(*sessionState)
+	}{
+		{"answered", func(s *sessionState) { s.NeedsContinue = false }},
+		{"limited again", func(s *sessionState) { s.LimitHits = 1 }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := testRunner(t)
+			r.options.DataDir = t.TempDir()
+			r.status.NeedsContinue = true
+			r.continuing = true
+			replaceSelf(t, r)
+			state := stateFor(r)
+			for range 3 {
+				if a := heartbeat(t, r, state); a.Action != "run" {
+					t.Fatalf("upgrade requested before the continuation ran: %+v", a)
+				}
+			}
+			busy := state
+			busy.Ready = false
+			busy.Reason = "model turn running"
+			heartbeat(t, r, busy)
+			c.end(&state)
+			heartbeat(t, r, state)
+			if a := heartbeat(t, r, state); a.Action != "exit" || a.Generation != upgradeGeneration {
+				t.Fatalf("upgrade not requested after the continuation ended: %+v", a)
+			}
+		})
+	}
+}
+
 func TestExitRechecksTmuxAndFreshSession(t *testing.T) {
 	r := testRunner(t)
 	if got := callRunner(t, r, "/prepare", control{Generation: "g"}); got.Code != 200 {
@@ -610,6 +647,9 @@ func TestRestartContinuesOnlyAfterCommittedRelease(t *testing.T) {
 			}
 			if strings.Contains(args, continuation) != (c.saved && c.committed) {
 				t.Fatalf("continuation decision did not match release: %s", args)
+			}
+			if r.continuing != (c.saved && c.committed) {
+				t.Fatalf("continuation prompt pending = %v, want %v", r.continuing, c.saved && c.committed)
 			}
 			if !strings.HasPrefix(args, "continue\n") {
 				t.Fatalf("pending work state not preserved: %s", args)

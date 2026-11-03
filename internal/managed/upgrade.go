@@ -56,12 +56,14 @@ func (r *runner) replacedBinary() bool {
 
 // upgradeDue decides whether to ask the plugin for an upgrade exit. Only a
 // ready, fresh, unstarted session qualifies: no daemon generation, no exit
-// already requested, and no pending continuation that the upgrade would lose.
+// already requested, and no pending continuation that the upgrade would lose,
+// whether a resume or the prompt a committed switch passed on the command
+// line. The handoff restarts without a prompt, so either would be dropped.
 func (r *runner) upgradeDueLocked() bool {
 	if r.upgrading || r.stopping || r.status.Recovery != "" || r.status.Exited {
 		return false
 	}
-	if r.status.Generation != "" || r.exitRequested || r.resumePending {
+	if r.status.Generation != "" || r.exitRequested || r.resumePending || r.continuing {
 		return false
 	}
 	if !r.freshLocked() {

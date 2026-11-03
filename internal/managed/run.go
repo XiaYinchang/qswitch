@@ -65,7 +65,8 @@ type runner struct {
 	committed        bool
 	stopping         bool
 	resumePending    bool
-	limitHits        int // plugin's count for the current child process
+	continuing       bool // the child got a continuation prompt whose turn has not ended
+	limitHits        int  // plugin's count for the current child process
 	upgrading        bool
 	upgradeAt        time.Time
 	self             string // resolved path of the qswitch binary that started this runner
@@ -357,6 +358,12 @@ func (r *runner) handleState(w http.ResponseWriter, route string, state sessionS
 	r.status.NeedsContinue = state.NeedsContinue
 	r.status.Reason = state.Reason
 	r.lastState = time.Now()
+	// Claude Code reports the session idle before it submits a command-line
+	// prompt. The continuation is consumed only when its turn ends: answered
+	// or aborted clears needs_continue, and a usage-limit failure counts a hit.
+	if r.continuing && (!state.NeedsContinue || state.LimitHits > r.limitHits) {
+		r.continuing = false
+	}
 	response := action{Action: "run"}
 	if r.status.Generation != "" {
 		response.Generation = r.status.Generation
@@ -469,7 +476,8 @@ func (r *runner) startLocked(ctx context.Context, mode startMode) (*exec.Cmd, er
 			continuationState = "continue"
 		}
 	}
-	args, err := parseArgs(r.options.Args, id, id != "" && savedSession(id), continuePrompt)
+	saved := id != "" && savedSession(id)
+	args, err := parseArgs(r.options.Args, id, saved, continuePrompt)
 	if err != nil {
 		return nil, err
 	}
@@ -488,6 +496,8 @@ func (r *runner) startLocked(ctx context.Context, mode startMode) (*exec.Cmd, er
 		return nil, err
 	}
 	r.limitHits = 0 // the new child's plugin counts from zero
+	// Only a resumed transcript gets the continuation on its command line.
+	r.continuing = continuePrompt && saved
 	r.status.ChildPID = cmd.Process.Pid
 	r.status.Exited = false
 	r.status.Ready = false
