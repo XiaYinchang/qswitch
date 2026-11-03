@@ -218,6 +218,11 @@ func validateEndpoint(raw string) error {
 	return nil
 }
 
+// ErrRunnerUnavailable marks a runner that did not answer a control request.
+// It says nothing about the switch itself, so callers retry instead of
+// cancelling it.
+var ErrRunnerUnavailable = errors.New("runner did not answer")
+
 var controlClient = &http.Client{
 	Timeout:       3 * time.Second,
 	Transport:     &http.Transport{Proxy: nil, DialContext: (&net.Dialer{Timeout: time.Second}).DialContext, DisableKeepAlives: true},
@@ -246,7 +251,7 @@ func request(reg registration, route string, body any, out any) error {
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := controlClient.Do(req)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: %v", ErrRunnerUnavailable, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {

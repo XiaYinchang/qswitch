@@ -24,6 +24,7 @@ const CONTINUATION = 'Continue the work interrupted by the account usage limit f
   let requestPending = false;
   let exiting = false;
   let awaitingExit = false;
+  let exitOverdue = false;
   let exitTimer;
   let mainFailure;
   let timer;
@@ -78,7 +79,7 @@ const CONTINUATION = 'Continue the work interrupted by the account usage limit f
     // Asynchronous work blocks an ordinary session. A pending continuation may
     // need to run to retire that work, so keep reporting it without blocking.
     if (!initialized) reason = 'initializing';
-    else if (awaitingExit) reason = 'waiting for Claude Code to exit';
+    else if (awaitingExit || exitOverdue) reason = 'waiting for Claude Code to exit';
     else if (unknown) reason = unknown;
     else if (blockedSubmission) reason = 'submission attempted during account switch; submit again after release';
     else if (turns.size) reason = 'model turn running';
@@ -151,16 +152,15 @@ const CONTINUATION = 'Continue the work interrupted by the account usage limit f
       }
       exiting = true;
       await $.command.run({ command: 'exit' });
-      // Claude Code 2.1.312 returns from /exit while shutdown is still running.
-      // Stay silent: a heartbeat now would revoke the runner's acknowledgement
-      // just before the child exits. Only a session still alive after the grace
-      // period is treated as an intercepted exit.
+      // Claude Code 2.1.312 returns from /exit while shutdown is still running,
+      // and can also hold /exit in its input queue. Stay silent either way: a
+      // heartbeat would revoke the runner's acknowledgement. The runner ends a
+      // session whose acknowledged exit is overdue.
       awaitingExit = true;
       changed();
       exitTimer = $.clock.after(EXIT_GRACE_MS, () => {
         awaitingExit = false;
-        unknown = 'exit command returned without terminating the session';
-        exiting = false;
+        exitOverdue = true;
         changed();
       });
     } catch (error) {
@@ -375,6 +375,11 @@ export function register(on) {
 
   on('command.run', { command: 'exit' }, async ($, e, next) => {
     if (!exiting) return next(e);
+    // The acknowledged exit runs now, possibly after Claude Code queued it;
+    // waiting for it is no reason to cancel it.
+    awaitingExit = false;
+    exitOverdue = false;
+    exitTimer?.cancel();
     const before = revision;
     const state = await snapshot($);
     if (!state.ready || before !== revision || phase !== 'prepare' || !generation) {
@@ -402,7 +407,10 @@ export function register(on) {
     const initial = await $.env.get('QSWITCH_INITIAL_CONTINUATION');
     // SessionMessage and ApiMessage expose no SDK assistant error in 2.1.312.
     // Adoption must explicitly identify idle versus rate-limit interruption.
+    // "prompted": the runner put the continuation on the command line, so a
+    // later resume must not send a second one.
     if (initial === 'continue') { needsContinue = true; restartedInterrupted = true; }
+    else if (initial === 'prompted') needsContinue = true;
     else if (initial !== 'idle') unknown = 'initial continuation state was not explicitly supplied';
     if (!/^http:\/\/127\.0\.0\.1:[0-9]+$/.test(url) || !token) {
       unknown = 'private loopback coordinator credentials unavailable';
@@ -421,7 +429,7 @@ export function register(on) {
     try { lastState = await snapshot($); }
     catch (error) { lastState = { ...lastState, ready: false, reason: String(error) }; }
     return { text: JSON.stringify({
-      ...lastState, phase, generation, active_turns: turns.size, active_tools: tools.size,
+      ...lastState, phase, generation, exit_overdue: exitOverdue, active_turns: turns.size, active_tools: tools.size,
       queued_submissions: queued.length, uncertain_tasks: [...uncertainTasks],
       background_tasks: background, session_crons: crons,
       ui_contract: 'submitted transcript preserved; unsubmitted attachments and temporary UI are not guaranteed',

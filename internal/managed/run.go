@@ -65,8 +65,10 @@ type runner struct {
 	committed        bool
 	stopping         bool
 	resumePending    bool
-	continuing       bool // the child got a continuation prompt whose turn has not ended
-	limitHits        int  // plugin's count for the current child process
+	limitHits        int       // plugin's count for the current child process
+	exitAckAt        time.Time // when the plugin acknowledged the current exit
+	forcedExit       bool      // the runner is ending a child whose acknowledged exit is overdue
+	forcedAt         time.Time
 	upgrading        bool
 	upgradeAt        time.Time
 	self             string // resolved path of the qswitch binary that started this runner
@@ -254,7 +256,11 @@ func (r *runner) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			http.Error(w, "generation mismatch", http.StatusConflict)
 			return
 		}
-		if !r.status.Exited {
+		// The coordinator repeats /exit on every tick until each child is gone.
+		// An acknowledged session goes quiet while Claude shuts down and is no
+		// longer fresh; refusing the repeat would fail the switch and restart
+		// every session that already exited, without its continuation.
+		if !r.status.Exited && !r.exitAcknowledged {
 			if !r.freshLocked() {
 				http.Error(w, "session no longer ready", http.StatusConflict)
 				return
@@ -326,6 +332,7 @@ func (r *runner) handleState(w http.ResponseWriter, route string, state sessionS
 		}
 		r.status.NeedsContinue = state.NeedsContinue
 		r.exitAcknowledged = true
+		r.exitAckAt = time.Now()
 		if err := r.persistLocked(); err != nil {
 			r.exitAcknowledged = false
 			r.failLocked(err)
@@ -336,7 +343,7 @@ func (r *runner) handleState(w http.ResponseWriter, route string, state sessionS
 		return
 	}
 	before := r.status
-	if r.exitAcknowledged {
+	if r.exitAcknowledged && !r.forcedExit {
 		r.exitAcknowledged = false
 		r.exitRequested = false
 		if r.released {
@@ -358,12 +365,6 @@ func (r *runner) handleState(w http.ResponseWriter, route string, state sessionS
 	r.status.NeedsContinue = state.NeedsContinue
 	r.status.Reason = state.Reason
 	r.lastState = time.Now()
-	// Claude Code reports the session idle before it submits a command-line
-	// prompt. The continuation is consumed only when its turn ends: answered
-	// or aborted clears needs_continue, and a usage-limit failure counts a hit.
-	if r.continuing && (!state.NeedsContinue || state.LimitHits > r.limitHits) {
-		r.continuing = false
-	}
 	response := action{Action: "run"}
 	if r.status.Generation != "" {
 		response.Generation = r.status.Generation
@@ -404,6 +405,37 @@ func (r *runner) handleState(w http.ResponseWriter, route string, state sessionS
 	}
 	r.limitHits = state.LimitHits
 	writeResponse(w, response)
+}
+
+// exitDeadline bounds how long an acknowledged exit may take. Claude Code can
+// hold /exit in its input queue: on novix a session restarted for an upgrade
+// kept the switch's /exit queued from 05:46 to 09:03 while every other
+// session waited. The session was idle when it acknowledged, so ending the
+// process loses nothing the exit itself would have kept.
+const exitDeadline = 60 * time.Second
+
+// exitKillGrace is how long a child may take to end after SIGTERM.
+const exitKillGrace = 10 * time.Second
+
+// overdueExitSignalLocked returns the signal for a child whose acknowledged
+// exit is overdue: SIGTERM once exitDeadline has passed, then SIGKILL each
+// exitKillGrace while it still runs. It returns 0 otherwise.
+func (r *runner) overdueExitSignalLocked(now time.Time) syscall.Signal {
+	if !r.exitAcknowledged || r.status.Exited || r.exitAckAt.IsZero() {
+		return 0
+	}
+	if !r.forcedExit {
+		if now.Sub(r.exitAckAt) < exitDeadline {
+			return 0
+		}
+		r.forcedExit, r.forcedAt = true, now
+		return syscall.SIGTERM
+	}
+	if now.Sub(r.forcedAt) < exitKillGrace {
+		return 0
+	}
+	r.forcedAt = now
+	return syscall.SIGKILL
 }
 
 func (r *runner) restart(ctx context.Context, root string) (*exec.Cmd, error) {
@@ -477,6 +509,10 @@ func (r *runner) startLocked(ctx context.Context, mode startMode) (*exec.Cmd, er
 		}
 	}
 	saved := id != "" && savedSession(id)
+	if continuePrompt && saved {
+		// The prompt below is the continuation; a later resume must not add one.
+		continuationState = "prompted"
+	}
 	args, err := parseArgs(r.options.Args, id, saved, continuePrompt)
 	if err != nil {
 		return nil, err
@@ -496,8 +532,6 @@ func (r *runner) startLocked(ctx context.Context, mode startMode) (*exec.Cmd, er
 		return nil, err
 	}
 	r.limitHits = 0 // the new child's plugin counts from zero
-	// Only a resumed transcript gets the continuation on its command line.
-	r.continuing = continuePrompt && saved
 	r.status.ChildPID = cmd.Process.Pid
 	r.status.Exited = false
 	r.status.Ready = false
@@ -505,6 +539,7 @@ func (r *runner) startLocked(ctx context.Context, mode startMode) (*exec.Cmd, er
 	r.status.Reason = "waiting for Claude session safety state"
 	r.lastState = time.Time{}
 	r.exitRequested, r.exitAcknowledged, r.released, r.committed = false, false, false, false
+	r.exitAckAt, r.forcedExit, r.forcedAt = time.Time{}, false, time.Time{}
 	if err := r.persistLocked(); err != nil {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
@@ -691,8 +726,8 @@ func Run(ctx context.Context, options Options) error {
 	childDone := make(chan error, 1)
 	go func() { childDone <- cmd.Wait() }()
 	childRunning := true
-	upgradeCheck := time.NewTicker(upgradeGrace)
-	defer upgradeCheck.Stop()
+	watchdog := time.NewTicker(5 * time.Second)
+	defer watchdog.Stop()
 	for {
 		select {
 		case <-interrupts:
@@ -724,24 +759,33 @@ func Run(ctx context.Context, options Options) error {
 			}
 			restore()
 			return runCtx.Err()
-		case <-upgradeCheck.C:
+		case <-watchdog.C:
 			r.mu.Lock()
-			// An acknowledged upgrade exit that never ends would hold the
-			// session in a non-ready state; drop it and keep the old binary.
-			if r.upgrading && !r.status.Exited && time.Since(r.upgradeAt) > upgradeGrace {
+			// An upgrade exit the session never acknowledged would hold it in
+			// a non-ready state; drop it and keep the old binary. An
+			// acknowledged exit is ended below instead.
+			if r.upgrading && !r.exitAcknowledged && !r.status.Exited && time.Since(r.upgradeAt) > upgradeGrace {
 				r.upgrading = false
 				r.exitRequested = false
-				r.exitAcknowledged = false
 				r.status.Generation = ""
 			}
+			var sig syscall.Signal
+			if childRunning {
+				sig = r.overdueExitSignalLocked(time.Now())
+			}
 			r.mu.Unlock()
+			if sig != 0 {
+				_ = cmd.Process.Signal(sig)
+			}
 		case childErr := <-childDone:
 			childRunning = false
 			restore()
 			r.mu.Lock()
 			r.status.Exited = true
 			r.status.Ready = false
-			if r.upgrading && r.exitAcknowledged && r.status.Generation == upgradeGeneration && childErr == nil {
+			// A child the runner ended for an overdue exit reports the signal.
+			exitOK := childErr == nil || r.forcedExit
+			if r.upgrading && r.exitAcknowledged && r.status.Generation == upgradeGeneration && exitOK {
 				h := handoff{Reg: r.reg, Dir: r.dir, Options: r.options, SessionID: r.status.SessionID, CWD: r.status.CWD, NeedsContinue: r.status.NeedsContinue}
 				self := r.self
 				r.mu.Unlock()
@@ -771,9 +815,9 @@ func Run(ctx context.Context, options Options) error {
 				go func(child *exec.Cmd) { childDone <- child.Wait() }(cmd)
 				continue
 			}
-			managedExit := r.exitAcknowledged && r.status.Generation != "" && childErr == nil
+			managedExit := r.exitAcknowledged && r.status.Generation != "" && exitOK
 			if !managedExit {
-				if r.status.Generation != "" || childErr != nil {
+				if r.status.Generation != "" || (childErr != nil && !r.forcedExit) {
 					r.failLocked(errors.New("Claude exited without a confirmed successful rotation exit"))
 					keep = true
 				}

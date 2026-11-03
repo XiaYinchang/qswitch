@@ -27,7 +27,8 @@ const upgradeGeneration = "self-upgrade"
 // handoffEnv carries runner state to the replacement binary.
 const handoffEnv = "QSWITCH_RUNNER_HANDOFF"
 
-// upgradeGrace bounds how long an acknowledged upgrade exit may take.
+// upgradeGrace bounds how long a requested upgrade exit may wait for the
+// session to acknowledge it.
 const upgradeGrace = 30 * time.Second
 
 type fileID struct{ dev, ino uint64 }
@@ -56,14 +57,17 @@ func (r *runner) replacedBinary() bool {
 
 // upgradeDue decides whether to ask the plugin for an upgrade exit. Only a
 // ready, fresh, unstarted session qualifies: no daemon generation, no exit
-// already requested, and no pending continuation that the upgrade would lose,
-// whether a resume or the prompt a committed switch passed on the command
-// line. The handoff restarts without a prompt, so either would be dropped.
+// already requested, no resume being delivered, and no interruption still
+// waiting for its continuation. A session stopped by the usage limit is about
+// to take part in a switch, which restarts it with the continuation; an
+// upgrade first would restart it without one, cancel Claude Code's own
+// automatic continue, and stop background work the switch lets it keep until
+// then. A session restarted with the continuation waits until that turn ends.
 func (r *runner) upgradeDueLocked() bool {
 	if r.upgrading || r.stopping || r.status.Recovery != "" || r.status.Exited {
 		return false
 	}
-	if r.status.Generation != "" || r.exitRequested || r.resumePending || r.continuing {
+	if r.status.Generation != "" || r.exitRequested || r.resumePending || r.status.NeedsContinue {
 		return false
 	}
 	if !r.freshLocked() {

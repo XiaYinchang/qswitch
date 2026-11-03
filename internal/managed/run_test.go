@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -204,40 +205,39 @@ func TestUpgradeWaitsForDaemonGenerationAndBlocksPrepare(t *testing.T) {
 	}
 }
 
-// A binary replaced during a switch must not upgrade a session restarted with
-// the continuation before that prompt runs: the plugin reports the session
-// idle before Claude Code submits a command-line prompt, and the handoff that
-// follows an upgrade exit restarts without one.
-func TestUpgradeWaitsForCommandLineContinuation(t *testing.T) {
-	for _, c := range []struct {
-		name string
-		end  func(*sessionState)
-	}{
-		{"answered", func(s *sessionState) { s.NeedsContinue = false }},
-		{"limited again", func(s *sessionState) { s.LimitHits = 1 }},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			r := testRunner(t)
-			r.options.DataDir = t.TempDir()
-			r.status.NeedsContinue = true
-			r.continuing = true
-			replaceSelf(t, r)
-			state := stateFor(r)
-			for range 3 {
-				if a := heartbeat(t, r, state); a.Action != "run" {
-					t.Fatalf("upgrade requested before the continuation ran: %+v", a)
-				}
-			}
-			busy := state
-			busy.Ready = false
-			busy.Reason = "model turn running"
-			heartbeat(t, r, busy)
-			c.end(&state)
-			heartbeat(t, r, state)
-			if a := heartbeat(t, r, state); a.Action != "exit" || a.Generation != upgradeGeneration {
-				t.Fatalf("upgrade not requested after the continuation ended: %+v", a)
-			}
-		})
+// A session stopped by the usage limit, or restarted with the continuation,
+// is not upgraded until its continuation has run. On novix a session hit the
+// limit at 05:45:32 and its runner upgraded it two seconds later; the switch
+// that followed found a freshly restarted Claude that never ran its /exit,
+// and every session waited until the account recovered at 09:10.
+func TestUpgradeWaitsWhileSessionNeedsContinuation(t *testing.T) {
+	r := testRunner(t)
+	r.options.DataDir = t.TempDir()
+	r.status.NeedsContinue = true
+	replaceSelf(t, r)
+	state := stateFor(r)
+	for range 3 {
+		if a := heartbeat(t, r, state); a.Action != "run" {
+			t.Fatalf("upgrade requested while the session waits for its continuation: %+v", a)
+		}
+	}
+	// The continuation hits the limit again: still interrupted, still waiting.
+	busy := state
+	busy.Ready = false
+	busy.Reason = "model turn running"
+	heartbeat(t, r, busy)
+	state.LimitHits = 1
+	for range 2 {
+		if a := heartbeat(t, r, state); a.Action != "run" {
+			t.Fatalf("upgrade requested after another usage-limit failure: %+v", a)
+		}
+	}
+	TakeLimitHit(r.options.DataDir)
+	// Once a continuation is answered, the next idle heartbeat may upgrade.
+	state.NeedsContinue = false
+	heartbeat(t, r, state)
+	if a := heartbeat(t, r, state); a.Action != "exit" || a.Generation != upgradeGeneration {
+		t.Fatalf("upgrade not requested after the continuation ended: %+v", a)
 	}
 }
 
@@ -344,6 +344,83 @@ func TestExitAcknowledgementCanBeRevoked(t *testing.T) {
 	}
 	if got := callRunner(t, r, "/exiting", stateFor(r)); got.Code != 409 {
 		t.Fatal("exit rearmed without coordinator")
+	}
+}
+
+// The coordinator repeats /exit each tick until every child has exited. On
+// novix one Claude took longer than the heartbeat freshness window, the
+// repeat was refused, and the failed switch restarted the six sessions that
+// had already exited, without their continuation.
+func TestRepeatedExitAfterAcknowledgementSucceeds(t *testing.T) {
+	r := testRunner(t)
+	if got := callRunner(t, r, "/prepare", control{Generation: "g"}); got.Code != 200 {
+		t.Fatal(got.Body.String())
+	}
+	if got := callRunner(t, r, "/exit", control{Generation: "g"}); got.Code != 200 {
+		t.Fatal(got.Body.String())
+	}
+	if got := callRunner(t, r, "/exiting", stateFor(r)); got.Code != 200 {
+		t.Fatal(got.Body.String())
+	}
+	// Claude shuts down; the plugin stays quiet and the session goes stale.
+	r.lastState = time.Now().Add(-10 * time.Second)
+	r.gate = func() error { return errors.New("terminal check is slow") }
+	if got := callRunner(t, r, "/exit", control{Generation: "g"}); got.Code != 200 {
+		t.Fatalf("repeated /exit after the acknowledgement was refused: %d %s", got.Code, got.Body.String())
+	}
+	// Before the acknowledgement, a stale session is still refused.
+	other := testRunner(t)
+	callRunner(t, other, "/prepare", control{Generation: "g"})
+	other.lastState = time.Now().Add(-10 * time.Second)
+	if got := callRunner(t, other, "/exit", control{Generation: "g"}); got.Code != 409 {
+		t.Fatalf("stale unacknowledged session accepted /exit: %d", got.Code)
+	}
+}
+
+// An acknowledged exit that Claude never carries out is ended by the runner:
+// SIGTERM after exitDeadline, then SIGKILL while it still runs.
+func TestOverdueAcknowledgedExitIsEnded(t *testing.T) {
+	r := testRunner(t)
+	r.status.Generation = "g"
+	r.exitRequested = true
+	if got := callRunner(t, r, "/exiting", stateFor(r)); got.Code != 200 {
+		t.Fatal(got.Body.String())
+	}
+	at := r.exitAckAt
+	for _, step := range []struct {
+		after time.Duration
+		want  syscall.Signal
+	}{
+		{exitDeadline - time.Second, 0},
+		{exitDeadline, syscall.SIGTERM},
+		{exitDeadline + time.Second, 0},
+		{exitDeadline + exitKillGrace, syscall.SIGKILL},
+		{exitDeadline + exitKillGrace + time.Second, 0},
+	} {
+		if got := r.overdueExitSignalLocked(at.Add(step.after)); got != step.want {
+			t.Fatalf("after %s: signal %v, want %v", step.after, got, step.want)
+		}
+	}
+	// Once the runner is ending the child, a late heartbeat keeps the
+	// acknowledgement, so the exit still counts for the switch.
+	state := stateFor(r)
+	state.Ready = false
+	state.Reason = "waiting for Claude Code to exit"
+	callRunner(t, r, "/state", state)
+	if !r.exitAcknowledged {
+		t.Fatal("a heartbeat revoked an exit the runner is ending")
+	}
+	// A revoked acknowledgement is never ended.
+	other := testRunner(t)
+	other.status.Generation = "g"
+	other.exitRequested = true
+	callRunner(t, other, "/exiting", stateFor(other))
+	revoked := stateFor(other)
+	revoked.Ready = false
+	revoked.Reason = "exit acknowledgement cancelled: session changed"
+	callRunner(t, other, "/state", revoked)
+	if got := other.overdueExitSignalLocked(time.Now().Add(2 * exitDeadline)); got != 0 {
+		t.Fatalf("revoked exit was ended with %v", got)
 	}
 }
 
@@ -648,10 +725,13 @@ func TestRestartContinuesOnlyAfterCommittedRelease(t *testing.T) {
 			if strings.Contains(args, continuation) != (c.saved && c.committed) {
 				t.Fatalf("continuation decision did not match release: %s", args)
 			}
-			if r.continuing != (c.saved && c.committed) {
-				t.Fatalf("continuation prompt pending = %v, want %v", r.continuing, c.saved && c.committed)
+			// A continuation on the command line is marked so that a later
+			// resume does not send a second one.
+			want = "continue\n"
+			if c.saved && c.committed {
+				want = "prompted\n"
 			}
-			if !strings.HasPrefix(args, "continue\n") {
+			if !strings.HasPrefix(args, want) {
 				t.Fatalf("pending work state not preserved: %s", args)
 			}
 			var reg registration

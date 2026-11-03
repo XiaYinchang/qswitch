@@ -221,11 +221,32 @@ test('rotation exit keeps its acknowledgement while Claude shuts down', async ($
   await clock.advance(750);
   expect(exits).toBe(1);
   const afterExit = control.posted;
+  // Any heartbeat would revoke the runner's exit acknowledgement. Past the
+  // grace the session stays quiet: the runner ends an overdue exit itself.
   await clock.advance(10000);
-  // Any heartbeat here would revoke the runner's exit acknowledgement.
   expect(control.posted).toBe(afterExit);
-  await clock.advance(20000);
-  expect(await status($)).toMatchObject({ ready: false, reason: 'exit command returned without terminating the session' });
+  await clock.advance(80000);
+  expect(control.posted).toBe(afterExit);
+  expect(await status($)).toMatchObject({ ready: false, reason: 'waiting for Claude Code to exit', exit_overdue: true });
+});
+
+test('an acknowledged exit Claude Code runs late still proceeds', async ($, on) => {
+  const { clock, control } = setup(on);
+  let exits = 0;
+  on('command.run', { command: 'exit' }, () => { exits += 1; return { text: '' }; });
+  await start($);
+  control.action = 'exit';
+  control.generation = 'generation-1';
+  await clock.advance(750);
+  expect(exits).toBe(1);
+  // Claude Code held the first /exit in its queue and runs it 10 s later.
+  await clock.advance(10000);
+  const late = await $.command.run({
+    command: 'exit', args: '', origin: { kind: 'composer' },
+    presentation: { isFullscreen: false, columns: 80 },
+  });
+  expect(late.text ?? '').not.toContain('cancelled');
+  expect(exits).toBe(2);
 });
 
 test('a failed foreground Bash call does not leave an uncertain task', async ($, on) => {
@@ -327,6 +348,18 @@ test('a session restarted while interrupted continues once when the account reco
   control.action = 'resume';
   await clock.advance(750);
   expect(submitted).toHaveLength(1);
+});
+
+test('a session restarted with the continuation on its command line is not continued again', async ($, on) => {
+  const { clock, control } = setup(on, 'prompted');
+  const submitted: string[] = [];
+  on('prompt.submit', ($, e) => { submitted.push(e.text); return { text: e.text }; });
+  await start($);
+  expect(await status($)).toMatchObject({ ready: true, needs_continue: true });
+  control.action = 'resume';
+  await clock.advance(750);
+  control.action = 'run';
+  expect(submitted).toHaveLength(0);
 });
 
 test('a rate limit hit in the running process keeps Claude Code\'s own automatic continue', async ($, on) => {

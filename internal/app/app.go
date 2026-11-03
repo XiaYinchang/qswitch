@@ -60,6 +60,8 @@ type App struct {
 	lastDeskAt      time.Time
 	captureRetryAt  map[adapter.Tool]time.Time
 	claudeWriteLive func(string, []byte, os.FileMode) error
+	resumeMu        sync.Mutex
+	resumeUntil     time.Time // keep resuming interrupted Claude sessions until then
 }
 
 func Open(userHome, dataDir string, keys secutil.KeyProvider, bins []string, n notify.Notifier, list func() ([]adapter.Proc, error)) (*App, error) {
@@ -1138,8 +1140,33 @@ func (a *App) ProbeHTTP(ctx context.Context, tool adapter.Tool, force bool) {
 	if tool == adapter.Claude && recovered {
 		// No switch happened, so no restart carries a continuation; sessions
 		// restarted while interrupted would otherwise wait for the user.
-		_, _ = managed.Resume(a.DataDir)
+		a.resumeInterrupted()
 	}
+}
+
+// resumeWindow is how long the daemon keeps asking interrupted sessions to
+// continue after their account recovered without a switch. A switch that the
+// recovery cancelled still holds sessions that it released and that restart
+// only after the cancellation returns, and Resume skips a session that is not
+// running yet. The plugin continues each restarted session at most once.
+const resumeWindow = 2 * time.Minute
+
+func (a *App) resumeInterrupted() {
+	a.resumeMu.Lock()
+	a.resumeUntil = a.now().Add(resumeWindow)
+	a.resumeMu.Unlock()
+	_, _ = managed.Resume(a.DataDir)
+}
+
+func (a *App) resumeDue() bool {
+	a.resumeMu.Lock()
+	defer a.resumeMu.Unlock()
+	return a.now().Before(a.resumeUntil)
+}
+
+func (a *App) usableAccount(tool adapter.Tool, id string) bool {
+	ac, err := a.State.GetAccount(string(tool), id)
+	return err == nil && (quota.Class(ac.LastQuotaClass) == quota.OK || quota.Class(ac.LastQuotaClass) == quota.Soft)
 }
 
 // ProbeLimitHit re-checks the current account as soon as a managed session
@@ -1996,10 +2023,18 @@ func (a *App) TryApply(tool adapter.Tool, killCLI bool) (retErr error) {
 	// gates; only a completed credential switch authorizes task continuation.
 	releaseManaged, committed := true, false
 	managedGeneration := ""
+	// Set when the switch is cancelled because the account it would leave is
+	// usable again; on 11-03 two sessions then waited for the user at 09:10.
+	sourceRecovered := false
 	if tool == adapter.Claude {
 		defer func() {
-			if releaseManaged {
-				retErr = errors.Join(retErr, managed.Release(a.DataDir, managedGeneration, committed))
+			if !releaseManaged {
+				return
+			}
+			err := managed.Release(a.DataDir, managedGeneration, committed)
+			retErr = errors.Join(retErr, err)
+			if err == nil && sourceRecovered {
+				a.resumeInterrupted()
 			}
 		}()
 	}
@@ -2024,6 +2059,7 @@ func (a *App) TryApply(tool adapter.Tool, killCLI bool) (retErr error) {
 			return err
 		}
 		if quota.Class(ac.LastQuotaClass) != quota.Exhausted {
+			sourceRecovered = a.usableAccount(tool, pend.FromID)
 			return a.State.ClearPending(string(tool))
 		}
 		target, err := a.State.GetAccount(string(tool), pend.ToID)
@@ -2040,6 +2076,12 @@ func (a *App) TryApply(tool adapter.Tool, killCLI bool) (retErr error) {
 	ad := a.Adapters[tool]
 	auto, err := ad.AutoBlockers(a.UserHome)
 	if err != nil {
+		if errors.Is(err, managed.ErrRunnerUnavailable) {
+			// A runner that did not answer is no reason to cancel the switch;
+			// cancelling restarts every session that already exited without
+			// its continuation. Retry on the next tick.
+			releaseManaged = false
+		}
 		return err
 	}
 	if auto.ManualBusy() && tool != adapter.Claude {
@@ -2058,6 +2100,7 @@ func (a *App) TryApply(tool adapter.Tool, killCLI bool) (retErr error) {
 			return err
 		}
 		if !exhausted {
+			sourceRecovered = a.usableAccount(tool, pend.FromID)
 			return a.State.ClearPending(string(tool))
 		}
 		to, err := a.automaticQuotaLocked(ctx, tool, pend.ToID)
@@ -2089,6 +2132,7 @@ func (a *App) TryApply(tool adapter.Tool, killCLI bool) (retErr error) {
 			return err
 		}
 		if !exhausted || !fresh || (res.Class != quota.OK && res.Class != quota.Soft) {
+			sourceRecovered = !exhausted && a.usableAccount(tool, pend.FromID)
 			return a.State.ClearPending(string(tool))
 		}
 	}
@@ -2096,6 +2140,9 @@ func (a *App) TryApply(tool adapter.Tool, killCLI bool) (retErr error) {
 		managedGeneration = fmt.Sprintf("%s:%s:%d", pend.FromID, pend.ToID, pend.QueuedAt)
 		ready, err := managed.Prepare(a.DataDir, managedGeneration, auto.ManualPIDs())
 		if err != nil {
+			if errors.Is(err, managed.ErrRunnerUnavailable) {
+				releaseManaged = false
+			}
 			return err
 		}
 		if !ready {
@@ -2262,6 +2309,9 @@ func (a *App) runToolWorker(ctx context.Context, tool adapter.Tool) {
 				a.ProbeReset(ctx, tool)
 			}
 			_ = a.TryApply(tool, false)
+			if tool == adapter.Claude && a.resumeDue() {
+				_, _ = managed.Resume(a.DataDir)
+			}
 		}
 	}
 }
