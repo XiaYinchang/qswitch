@@ -2,7 +2,6 @@ package claude
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -80,7 +79,7 @@ func TestCaptureRestoreRoundtrip(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(home, ".claude.json"), []byte(meta), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	a := Adapter{List: func() ([]adapter.Proc, error) { return nil, nil }}
+	a := Adapter{DataDir: t.TempDir(), List: func() ([]adapter.Proc, error) { return nil, nil }}
 	blobs, warn, err := a.Capture(home)
 	if err != nil || len(blobs) != 1 {
 		t.Fatalf("capture: %v %v", blobs, err)
@@ -112,25 +111,25 @@ func TestCaptureRestoreRoundtrip(t *testing.T) {
 	}
 }
 
-func TestRestoreBlockedByRunningCLI(t *testing.T) {
+func TestRestoreIgnoresUnmanagedCLI(t *testing.T) {
 	home := t.TempDir()
 	writeCreds(t, home, validOAuth())
-	a := Adapter{List: func() ([]adapter.Proc, error) {
+	a := Adapter{DataDir: t.TempDir(), List: func() ([]adapter.Proc, error) {
 		return []adapter.Proc{{PID: 42, Command: "/home/u/.local/bin/claude chat"}}, nil
 	}}
 	blobs, _, err := a.Capture(home)
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = a.Restore(home, blobs[0], adapter.RestoreOpts{})
-	var busyErr *adapter.BusyError
-	if !errors.As(err, &busyErr) {
-		t.Fatalf("want BusyError, got %v", err)
+	other := validOAuth()
+	other["accessToken"] = "sk-ant-oat-other"
+	writeCreds(t, home, other)
+	if err := a.Restore(home, blobs[0], adapter.RestoreOpts{}); err != nil {
+		t.Fatal(err)
 	}
-	// Restore never runs with a live CLI, so credentials stay untouched.
 	c, _ := ReadLiveCreds(home)
 	if c.AccessToken != "sk-ant-oat-access" {
-		t.Fatal("credentials changed despite busy CLI")
+		t.Fatal("restore did not write credentials with an unmanaged CLI running")
 	}
 }
 
@@ -163,7 +162,7 @@ func TestIsClaudeCLI(t *testing.T) {
 func TestApplyRefresh(t *testing.T) {
 	home := t.TempDir()
 	writeCreds(t, home, validOAuth())
-	a := Adapter{List: func() ([]adapter.Proc, error) { return nil, nil }}
+	a := Adapter{DataDir: t.TempDir(), List: func() ([]adapter.Proc, error) { return nil, nil }}
 	blobs, _, err := a.Capture(home)
 	if err != nil {
 		t.Fatal(err)
@@ -229,7 +228,7 @@ func TestVerifiedIdentityRestoresMatchingMetadata(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				a := Adapter{List: func() ([]adapter.Proc, error) { return nil, nil }}
+				a := Adapter{DataDir: t.TempDir(), List: func() ([]adapter.Proc, error) { return nil, nil }}
 				blobs, _, err := a.Capture(home)
 				if err != nil {
 					t.Fatal(err)
@@ -286,7 +285,7 @@ func TestRestoreCredentialFailureRollsBackMetadata(t *testing.T) {
 			t.Setenv("CLAUDE_CONFIG_DIR", "")
 			source := t.TempDir()
 			writeCreds(t, source, validOAuth())
-			a := Adapter{List: func() ([]adapter.Proc, error) { return nil, nil }}
+			a := Adapter{DataDir: t.TempDir(), List: func() ([]adapter.Proc, error) { return nil, nil }}
 			blobs, _, err := a.Capture(source)
 			if err != nil {
 				t.Fatal(err)

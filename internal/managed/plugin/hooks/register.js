@@ -75,6 +75,8 @@ const CONTINUATION = 'Continue the work interrupted by the account usage limit f
     const agents = await $.agent.list();
     const draft = await $.prompt.read();
     let reason = '';
+    // Asynchronous work blocks an ordinary session. A pending continuation may
+    // need to run to retire that work, so keep reporting it without blocking.
     if (!initialized) reason = 'initializing';
     else if (awaitingExit) reason = 'waiting for Claude Code to exit';
     else if (unknown) reason = unknown;
@@ -82,10 +84,10 @@ const CONTINUATION = 'Continue the work interrupted by the account usage limit f
     else if (turns.size) reason = 'model turn running';
     else if (tools.size) reason = 'tool call running';
     else if (queued.length) reason = 'submitted prompt has not started a known turn';
-    else if (uncertainTasks.size) reason = 'background task lifecycle not confirmed by Stop';
-    else if (background.length) reason = 'known background tasks remain';
-    else if (crons.length) reason = 'scheduled session tasks remain';
-    else if (agents.some(agent => !terminal(agent.status))) reason = 'known agent is not finished';
+    else if (!needsContinue && uncertainTasks.size) reason = 'background task lifecycle not confirmed by Stop';
+    else if (!needsContinue && background.length) reason = 'known background tasks remain';
+    else if (!needsContinue && crons.length) reason = 'scheduled session tasks remain';
+    else if (!needsContinue && agents.some(agent => !terminal(agent.status))) reason = 'known agent is not finished';
     else if (draft.text.length) reason = 'text draft is present';
     else if (before !== revision) reason = 'session changed while checking readiness';
     else if (!sessionId || !cwd) reason = 'session identity unavailable';

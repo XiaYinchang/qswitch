@@ -28,7 +28,11 @@ func TestManagedClaudeRotationWaitsForEverySessionBeforeCredentialCommit(t *test
 		if req.URL.Path != "/api/oauth/profile" {
 			t.Errorf("unexpected HTTP path %s", req.URL.Path)
 		}
-		return claudeRecoveryResponse(req, 200, `{"account":{"uuid":"source"}}`), nil
+		id := "source"
+		if req.Header.Get("Authorization") == "Bearer target-access" {
+			id = "target"
+		}
+		return claudeRecoveryResponse(req, 200, fmt.Sprintf(`{"account":{"uuid":%q}}`, id)), nil
 	})}
 	if _, _, err := a.Capture(adapter.Claude); err != nil {
 		t.Fatal(err)
@@ -63,10 +67,11 @@ func TestManagedClaudeRotationWaitsForEverySessionBeforeCredentialCommit(t *test
 		generation                            string
 	}
 	terminals := []*terminal{{pid: 801, ready: true}, {pid: 802, ready: true, continuation: true}, {pid: 803, continuation: true}}
+	wantAccess := "target-access"
 	list := func() ([]adapter.Proc, error) {
 		mu.Lock()
 		defer mu.Unlock()
-		var ps []adapter.Proc
+		ps := []adapter.Proc{{PID: 900, Command: "claude"}}
 		for _, s := range terminals {
 			if !s.exited {
 				ps = append(ps, adapter.Proc{PID: s.pid, Command: "claude"})
@@ -74,7 +79,7 @@ func TestManagedClaudeRotationWaitsForEverySessionBeforeCredentialCommit(t *test
 		}
 		return ps, nil
 	}
-	a.Adapters[adapter.Claude] = claude.Adapter{List: list}
+	a.Adapters[adapter.Claude] = claude.Adapter{List: list, DataDir: a.DataDir}
 	root := filepath.Join(a.DataDir, "managed-claude")
 	if err := os.MkdirAll(root, 0700); err != nil {
 		t.Fatal(err)
@@ -121,8 +126,8 @@ func TestManagedClaudeRotationWaitsForEverySessionBeforeCredentialCommit(t *test
 				s.exited = true
 			case "/release":
 				live, err := claude.ReadLiveCreds(a.UserHome)
-				if err != nil || live.AccessToken != "target-access" {
-					t.Error("released before credential commit")
+				if err != nil || live.AccessToken != wantAccess {
+					t.Errorf("release credential check got %q, want %q (err=%v)", live.AccessToken, wantAccess, err)
 				}
 				if !c.Committed {
 					t.Error("successful rotation released as cancelled")
@@ -165,6 +170,30 @@ func TestManagedClaudeRotationWaitsForEverySessionBeforeCredentialCommit(t *test
 	for i, s := range terminals {
 		if !s.exited || !s.released {
 			t.Fatalf("terminal %d was not released after commit: %+v", i, s)
+		}
+	}
+	if strings.Contains(a.Status(), "blocked_by_pid=[900]") {
+		t.Fatal("unmanaged Claude appeared as a switch blocker")
+	}
+	mu.Lock()
+	wantAccess = "old-access"
+	for _, s := range terminals {
+		s.ready = true
+		s.exited = false
+		s.released = false
+		s.generation = ""
+	}
+	mu.Unlock()
+	if err := a.Switch(adapter.Claude, "source", adapter.RestoreOpts{}, true); err != nil {
+		t.Fatal(err)
+	}
+	p, err = a.State.GetPointer("claude")
+	if err != nil || p.StableID != "source" {
+		t.Fatalf("manual switch used the wrong account: %+v %v", p, err)
+	}
+	for i, s := range terminals {
+		if !s.exited || !s.released {
+			t.Fatalf("manual switch did not coordinate terminal %d: %+v", i, s)
 		}
 	}
 }

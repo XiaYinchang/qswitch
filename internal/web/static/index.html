@@ -338,8 +338,6 @@ function switchNote(tool) {
     parts.push(`待切换至 ${target ? accountLabel(target) : tool.pending_to}，当前账号尚未切换。`);
   }
   const managed = (tool.managed || []).filter(s => Number.isInteger(s.pid));
-  const managedPIDs = new Set(managed.map(s => s.pid));
-  const plain = pids.filter(pid => !managedPIDs.has(pid));
   if (tool.tool === "claude" && tool.managed_unavailable) {
     if (!tool.pending_to) return "";
     parts.push("受管会话状态暂时读取失败，稍后刷新查看。");
@@ -349,8 +347,7 @@ function switchNote(tool) {
     const recovery = managed.filter(s => s.recovery);
     // Healthy managed sessions rotate on their own; with nothing queued there
     // is nothing for the user to act on.
-    if (!tool.pending_to && !plain.length && !recovery.length) return "";
-    if (plain.length) parts.push(`未受管 Claude 进程 PID：${plain.join("、")}，会阻断切换。请在对应终端 /exit，再用 qswitch run claude 恢复该会话。`);
+    if (!tool.pending_to && !recovery.length) return "";
     if (recovery.length) parts.push(`受管会话需要人工恢复：${recovery.map(s => `PID ${s.pid}（${s.recovery}）`).join("；")}。`);
     if (tool.pending_to) {
       const waiting = managed.filter(s => !s.recovery && !s.ready);
@@ -361,8 +358,12 @@ function switchNote(tool) {
     }
     return parts.join(" ");
   }
+  if (tool.tool === "claude") {
+    if (tool.pending_to) parts.push("排队切换仍需通过用量和安全检查，请刷新查看结果。");
+    return parts.join(" ");
+  }
   if (pids.length) parts.push(`阻塞进程 PID：${pids.join("、")}。`);
-  if (["claude", "kimi"].includes(tool.tool)) {
+  if (tool.tool === "kimi") {
     if (blocked) parts.push("请在对应终端退出所有运行中的会话；仅空闲 30 秒不会解除阻塞。");
     else parts.push("当前未检测到阻塞会话。");
   } else if (blocked) {
@@ -535,7 +536,7 @@ async function onClick(e) {
         cursor: "切换到这个账号？会关掉并重启 Cursor.app；空闲的 cursor-agent 也会结束。只改登录字段，不碰聊天记录。",
         devin: "切换 Devin CLI 到这个账号？空闲 CLI 会结束，新进程使用新账号。Devin.app 使用独立登录。",
         kimi: "切换 Kimi Code 到这个账号？请先退出所有运行中的 Kimi 会话，仅空闲 30 秒不会解除阻塞；新进程将使用新账号。",
-        claude: "切换 Claude Code 到这个账号？请先退出所有运行中的 Claude 会话，仅空闲 30 秒不会解除阻塞；新进程将使用新账号。",
+        claude: "切换 Claude Code 到这个账号？只协调 qswitch run claude 受管会话，不等待、不退出、不杀、不恢复普通 Claude；共享 ~/.claude/.credentials.json 与 ~/.claude.json 会更新，运行中的非受管会话内存账号不保证改变。受管会话重启可能中断后台任务、agent、cron，仅保证已提交对话，恢复后请检查未完成的副作用工作。",
       }[tool] || "切换到这个账号？空闲的 CLI 会先结束。";
       if (!confirm(prompt)) return;
       b.disabled = true;

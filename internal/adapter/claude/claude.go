@@ -19,13 +19,15 @@ import (
 	"qswitch/internal/adapter"
 	"qswitch/internal/busy"
 	"qswitch/internal/livefile"
+	"qswitch/internal/managed"
 	"qswitch/internal/quota"
 )
 
 const payloadKind = "claude.oauth.v1"
 
 type Adapter struct {
-	List func() ([]adapter.Proc, error)
+	List    func() ([]adapter.Proc, error)
+	DataDir string
 }
 
 func (Adapter) Name() adapter.Tool { return adapter.Claude }
@@ -190,7 +192,7 @@ func (a Adapter) Restore(home string, blob adapter.Blob, _ adapter.RestoreOpts) 
 		}
 		p.OAuthAccount = string(account)
 	}
-	h, err := a.ManualBlockers(home)
+	h, err := a.AutoBlockers(home)
 	if err != nil {
 		return err
 	}
@@ -256,6 +258,8 @@ func (a Adapter) procs() ([]adapter.Proc, error) {
 	return (busy.PS{}).List()
 }
 
+// ManualBlockers protects OAuth renewal from refresh-token races with any
+// Claude process. Account switching uses only the managed registry instead.
 func (a Adapter) ManualBlockers(string) (adapter.Holders, error) {
 	ps, err := a.procs()
 	if err != nil {
@@ -273,7 +277,22 @@ func (a Adapter) ManualBlockers(string) (adapter.Holders, error) {
 	return h, nil
 }
 
-func (a Adapter) AutoBlockers(home string) (adapter.Holders, error) { return a.ManualBlockers(home) }
+func (a Adapter) AutoBlockers(string) (adapter.Holders, error) {
+	sessions, err := managed.Status(a.DataDir)
+	if err != nil {
+		return adapter.Holders{}, err
+	}
+	h := adapter.Holders{}
+	for _, s := range sessions {
+		if !s.Exited && s.ChildPID > 0 {
+			h.Manual = append(h.Manual, adapter.Proc{PID: s.ChildPID, Command: "qswitch managed claude"})
+		}
+	}
+	if len(h.Manual) > 0 {
+		h.Why = []string{"managed claude cli running"}
+	}
+	return h, nil
+}
 
 func (a Adapter) Idle(home string, grace time.Duration) bool {
 	h, err := a.ManualBlockers(home)
@@ -285,7 +304,7 @@ func (a Adapter) Idle(home string, grace time.Duration) bool {
 }
 
 func (a Adapter) KillCLI(home string) error {
-	h, err := a.ManualBlockers(home)
+	h, err := a.AutoBlockers(home)
 	if err != nil {
 		return err
 	}

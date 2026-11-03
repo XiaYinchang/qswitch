@@ -127,7 +127,7 @@ func Open(userHome, dataDir string, keys secutil.KeyProvider, bins []string, n n
 		adapter.Devin:  devin.Adapter{List: list},
 		adapter.Kimi:   kimi.Adapter{List: list},
 		adapter.ZCode:  zcode.Adapter{},
-		adapter.Claude: claude.Adapter{List: list},
+		adapter.Claude: claude.Adapter{List: list, DataDir: dataDir},
 	}
 	return a, nil
 }
@@ -414,13 +414,74 @@ func ambiguousRef(tool, ref string, hits []state.Account) error {
 	return errors.New(b.String())
 }
 
-func (a *App) Switch(tool adapter.Tool, ref string, opts adapter.RestoreOpts, killCLI bool) error {
+func (a *App) Switch(tool adapter.Tool, ref string, opts adapter.RestoreOpts, killCLI bool) (retErr error) {
 	lock, err := livefile.Acquire(filepath.Join(a.DataDir, "locks", string(tool)+".lock"))
 	if err != nil {
 		return err
 	}
 	defer lock.Close()
-	return a.switchLocked(tool, ref, opts, killCLI)
+	if tool != adapter.Claude {
+		return a.switchLocked(tool, ref, opts, killCLI)
+	}
+	if !killCLI {
+		h, err := a.switchBlockers(tool)
+		if err != nil {
+			return err
+		}
+		if h.ManualBusy() {
+			return &adapter.BusyError{Holders: h}
+		}
+	}
+	p, err := a.State.GetPointer(string(tool))
+	if err != nil {
+		return err
+	}
+	blob, err := a.loadBlob(tool, ref)
+	if err != nil {
+		return err
+	}
+	generation := fmt.Sprintf("manual:%s:%s:%d", p.StableID, blob.Identity.StableID, a.now().UnixNano())
+	committed := false
+	defer func() {
+		retErr = errors.Join(retErr, managed.Release(a.DataDir, generation, committed))
+	}()
+	var ready bool
+	prepare := func() bool {
+		ready, err = managed.Prepare(a.DataDir, generation, nil)
+		return err != nil || ready
+	}
+	var waitErr error
+	if killCLI {
+		waitErr = a.Host.WaitUntil(prepare)
+	} else {
+		prepare()
+	}
+	if err != nil {
+		return err
+	}
+	if waitErr != nil || !ready {
+		h, blockerErr := a.switchBlockers(tool)
+		if blockerErr != nil {
+			return errors.Join(waitErr, blockerErr)
+		}
+		if h.ManualBusy() {
+			return &adapter.BusyError{Holders: h}
+		}
+		if waitErr != nil {
+			return waitErr
+		}
+		return errors.New("managed Claude sessions are not ready")
+	}
+	retErr = a.switchLocked(tool, ref, opts, false)
+	committed = retErr == nil
+	return retErr
+}
+
+func (a *App) switchBlockers(tool adapter.Tool) (adapter.Holders, error) {
+	if tool == adapter.Claude {
+		return a.Adapters[tool].AutoBlockers(a.UserHome)
+	}
+	return a.Adapters[tool].ManualBlockers(a.UserHome)
 }
 
 // The caller holds the tool lock through validation and credential restore.
@@ -442,7 +503,7 @@ func (a *App) switchLocked(tool adapter.Tool, ref string, opts adapter.RestoreOp
 	}
 	// Check CLI blockers before quitting a desktop app. Cursor itself will be
 	// closed below, but its CLI must pass the same idle check as other tools.
-	preflight, err := ad.ManualBlockers(a.UserHome)
+	preflight, err := a.switchBlockers(tool)
 	if err != nil {
 		return err
 	}
@@ -474,7 +535,7 @@ func (a *App) switchLocked(tool adapter.Tool, ref string, opts adapter.RestoreOp
 		}
 	}()
 
-	h, err := ad.ManualBlockers(a.UserHome)
+	h, err := a.switchBlockers(tool)
 	if err != nil {
 		return err
 	}
@@ -493,7 +554,7 @@ func (a *App) switchLocked(tool adapter.Tool, ref string, opts adapter.RestoreOp
 			if err := a.waitManualClear(ad, tool, opts.CLIOnly); err != nil {
 				return err
 			}
-			h, _ = ad.ManualBlockers(a.UserHome)
+			h, _ = a.switchBlockers(tool)
 			if opts.CLIOnly && tool == adapter.Cursor {
 				h = stripCursorApp(h)
 			}
@@ -686,6 +747,9 @@ func (a *App) Status() string {
 		ad := a.Adapters[t]
 		man, _ := ad.ManualBlockers(a.UserHome)
 		aut, _ := ad.AutoBlockers(a.UserHome)
+		if t == adapter.Claude {
+			man = aut
+		}
 		pend, _ := a.State.GetPending(string(t))
 		label := accountLabel(acc)
 		if label == "" {
@@ -1973,6 +2037,9 @@ func (a *App) Doctor() string {
 		ad := a.Adapters[t]
 		h, _ := ad.ManualBlockers(a.UserHome)
 		au, _ := ad.AutoBlockers(a.UserHome)
+		if t == adapter.Claude {
+			h = au
+		}
 		p, _ := a.State.GetPointer(string(t))
 		fmt.Fprintf(&b, "%s live=%s desync=%v manual_busy=%v auto_busy=%v chatgpt=%v cursor_app=%v pids=%v enabled=%v\n",
 			t, p.StableID, p.Desync, h.ManualBusy(), au.AutoBusy(), au.ChatGPTApp, h.CursorApp, h.ManualPIDs(), cfg.ToolEnabled(string(t)))

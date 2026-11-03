@@ -78,10 +78,10 @@ qswitch run claude --resume-continuation=continue --dangerously-skip-permissions
 
 ### 注意事项
 
-- **所有 Claude 都要通过 `qswitch run claude` 在 tmux 或 Rex 终端里启动。** 直接运行的 `claude` 会阻止所有会话切号；在其他终端里启动的受管会话不能参与切号，排队的切号会一直等它退出。
+- **只有 `qswitch run claude` 在 tmux 或 Rex 终端里启动的会话参与受控切号。** 普通非受管 `claude` 不阻断自动或手动切号，qswitch 不等待、不退出、不杀、不恢复它；但共享的 `~/.claude/.credentials.json` 与 `~/.claude.json` 仍会更新，运行中的非受管会话内存账号不保证改变。在其他终端里启动的受管会话不能参与切号，排队的切号会一直等它退出。
 - **可用的启动参数**：`--model`、`--fallback-model`、`--effort`、`--permission-mode`、`--dangerously-skip-permissions`、`--allowedTools`/`--disallowedTools`、`--tools`、`--agent`/`--agents`、`--system-prompt` 系列、`--max-budget-usd`、`--name`、`--verbose`、`--resume`/`--continue`。`--print`、`--settings`、`--plugin-dir` 等其他参数和子命令会被拒绝。
 - **不能设置的环境变量**：`ANTHROPIC_API_KEY`、`ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_BASE_URL`、`CLAUDE_CONFIG_DIR`、`CLAUDE_CODE_OAUTH_TOKEN`、`CLAUDE_CODE_USE_BEDROCK`/`VERTEX`/`FOUNDRY` 等，会被拒绝启动。
-- **切号只在会话空闲时进行**：模型在回复、工具或后台任务在跑、输入框里有没发出的文字，都会让切号等待。切号准备期间你提交的消息会退回输入框，切号完成后再发一次即可。
+- **切号只在受管会话空闲时进行**：进行中的 turn、活动前台工具、queued prompt 或输入框里的草稿都会让切号等待。`rate_limit` 中断后的后台任务、agent、cron 不再阻断，但切号重启可能中断这些异步工作，恢复后应检查未完成的副作用工作。切号准备期间你提交的消息会退回输入框，切号完成后再发一次即可。
 - **所有号都用完时**会等最早重置的那个号；重置后自动切过去并让中断的会话继续。
 - **出现异常**时，`qswitch sessions` 的 `recovery=` 会给出原因和恢复命令；确认旧进程已退出后按提示手动恢复。
 
@@ -89,11 +89,11 @@ qswitch run claude --resume-continuation=continue --dangerously-skip-permissions
 
 - **ZCode**：读取桌面客户端 `~/.zcode/v2/credentials.json` 中当前 BigModel / Z.ai 个人 Coding Plan，支持官方加密格式。使用官方 `/api/monitor/usage/quota/limit`，显示套餐、5 小时/周模型额度及月度 MCP 额度。MCP 用尽不误判模型额度耗尽；切换套餐后删除旧窗口。当前仅监控订阅，账号在 ZCode 中切换；不修改独立的 ZCode CLI 配置。
 - **Kimi Code**：读取 `~/.kimi-code/credentials/kimi-code.json`（支持 `KIMI_CODE_HOME`），用 `/coding/v1/me` 确认账号身份，优先显示接口返回的手机号，缺省时显示昵称或账号 ID；用 `/coding/v1/usages` 展示 5 小时、7 天、月度总额度及编程分项；`usages` 缺少某窗口时从响应的 `limits` 数组按窗口时长补齐（含月度窗口）。月度总额度另从桌面版 Kimi.app 订阅页同款的会员网关读取：只读复用桌面 App localStorage 里的网页会话（要求会话属于同一账号且未过期），不刷新、不轮换桌面登录，桌面 App 未运行或会话过期时自动跳过。编程分项不作为独立耗尽门限。切号只原子替换凭据文件，保留 config/hooks；有 Kimi 会话运行时阻断切换。闲置账号按官方 OAuth 协议续期写入加密仓库；当前 CLI 运行时由官方客户端续期，退出后由 qswitch 持有官方 OAuth 目录锁续期，并同时更新登录文件和加密仓库。续期门限跟随官方客户端，至少预留 5 分钟。身份无法确认时不收录、不抢用 refresh token。
-- **Claude Code**：管理 `~/.claude/.credentials.json` 中的官方 OAuth 登录（Linux/macOS 文件布局，支持 `CLAUDE_CONFIG_DIR`；macOS Keychain 存储暂不支持）。收录前用官方 `/api/oauth/profile` 确认账号 uuid、邮箱和套餐（Pro/Max/Team），确认失败不收录。用量走官方状态栏同款 `GET /api/oauth/usage`：5 小时与 7 天窗口决定是否耗尽（达到 100% 才切号），Sonnet/Opus 专项周额度和按量付费余额只展示、不作为切换门限。切号原子替换凭据文件并同步 `~/.claude.json` 的 oauthAccount 显示信息；未受管的 Claude 会话运行时阻断自动切换。refresh token 一次性轮换：闲置账号续期只写加密仓库；当前账号在 CLI 退出后由 qswitch 复核文件内容续期，同时写回登录文件和仓库。
+- **Claude Code**：管理 `~/.claude/.credentials.json` 中的官方 OAuth 登录（Linux/macOS 文件布局，支持 `CLAUDE_CONFIG_DIR`；macOS Keychain 存储暂不支持）。收录前用官方 `/api/oauth/profile` 确认账号 uuid、邮箱和套餐（Pro/Max/Team），确认失败不收录。用量走官方状态栏同款 `GET /api/oauth/usage`：5 小时与 7 天窗口决定是否耗尽（达到 100% 才切号），Sonnet/Opus 专项周额度和按量付费余额只展示、不作为切换门限。切号原子替换凭据文件并同步 `~/.claude.json` 的 oauthAccount 显示信息；普通非受管 Claude 不阻断自动或手动切号，qswitch 只协调受管会话。refresh token 一次性轮换：闲置账号续期只写加密仓库；当前账号在 CLI 退出后由 qswitch 复核文件内容续期，同时写回登录文件和仓库。
 
   收录以官方 profile 返回的身份为准，同时修正快照中的账号显示信息；切号也会修正旧快照的显示信息，并在缺少 `.claude.json` 时创建该文件。凭据写入失败会回滚账号元数据，回滚失败单独报错。
 
-  **续期恢复**：换票前在加密仓库记录待恢复事务，收到新凭据后先持久化，再验证身份和写回。profile 临时故障不会反复消费 refresh token；身份未确认的凭据隔离保存，不按旧元数据 UUID 收录。文件写回失败可在重启后恢复；若外部已登录另一个账号，不覆盖新登录。换票结果无法确定时停止复用旧 refresh token，明确要求重新登录。
+  **续期恢复**：OAuth 续期与恢复写回仍会为了 refresh token 安全检查所有 Claude 进程。换票前在加密仓库记录待恢复事务，收到新凭据后先持久化，再验证身份和写回。profile 临时故障不会反复消费 refresh token；身份未确认的凭据隔离保存，不按旧元数据 UUID 收录。文件写回失败可在重启后恢复；若外部已登录另一个账号，不覆盖新登录。换票结果无法确定时停止复用旧 refresh token，明确要求重新登录。
 
   **加号（Linux）**：在同一个终端运行一次 `qswitch login claude`。qswitch 在数据目录下创建私有的 `claude-enrollments/session-*` 临时目录，设置 `CLAUDE_CONFIG_DIR` 和 `CLAUDE_SECURESTORAGE_CONFIG_DIR`，运行官方 `claude auth login --claudeai`；打开授权链接并把完整 code 粘贴回当前终端、按回车即可。官方登录成功退出后，qswitch 校验账号身份、写入加密仓库并打印 `enrolled claude ...`，不需要另开终端或手动 `capture`。整个过程不清除、覆盖或登出当前登录，不改变当前账号指针，也不调用新账号的 refresh token。正常退出、Ctrl+C、终端挂断、SIGTERM 或超时会结束直接子进程并清理临时目录；SIGKILL 时由 Linux 结束直接子进程，残留目录在下次使用同一数据目录登录时回收。仅回收带有效标记、属主和权限正确且租约已释放的目录，不扫描旧 `/tmp` 目录，也不结束其他 Claude 会话。身份校验失败不报收录成功，需要重新执行登录。
 
@@ -101,7 +101,7 @@ qswitch run claude --resume-continuation=continue --dangerously-skip-permissions
 
   **macOS 限制**：macOS 上凭据存系统 Keychain，qswitch 暂不支持直接管理。请在 Linux 服务器（如 novix）上运行 qswitch 管理 Claude 账号。
 
-  **tmux / Rex 无人值守续接（Claude Code 2.1.312+）**：在 tmux 窗格或 Rex 终端的项目目录里通过 `qswitch run claude` 启动，启用 `qswitch enable-auto --tool claude`，并保持 `qswitchd` 运行。使用默认 OAuth 配置与同一个 qswitch 数据目录；不接受 API key、云厂商、独立凭据目录、无持久化或会绕过受管插件的启动选项。所有共用账号的 Claude 进程都必须受管；普通 `claude` 进程会阻断切换。准备切号、确认退出和重启前，runner 都向 tmux 或 Rex 服务器核实自己仍在启动时的窗格或终端里：该终端的进程是 runner 的上级进程，且 runner 读的就是这个终端。核实不了的会话不参与切号。在 Rex 终端里开的 tmux 按 tmux 窗格核实。
+  **tmux / Rex 无人值守续接（Claude Code 2.1.312+）**：在 tmux 窗格或 Rex 终端的项目目录里通过 `qswitch run claude` 启动，启用 `qswitch enable-auto --tool claude`，并保持 `qswitchd` 运行。使用默认 OAuth 配置与同一个 qswitch 数据目录；不接受 API key、云厂商、独立凭据目录、无持久化或会绕过受管插件的启动选项。只有 `qswitch run claude` 受管会话参与切号协调；普通 `claude` 进程不阻断切换。准备切号、确认退出和重启前，runner 都向 tmux 或 Rex 服务器核实自己仍在启动时的窗格或终端里：该终端的进程是 runner 的上级进程，且 runner 读的就是这个终端。核实不了的会话不参与切号。在 Rex 终端里开的 tmux 按 tmux 窗格核实。
 
   ```sh
   tmux new-session -s work   # 或在 Rex 里新开一个终端
@@ -114,7 +114,7 @@ qswitch run claude --resume-continuation=continue --dangerously-skip-permissions
 
   受管会话一旦因 `rate_limit` 中断，daemon 在约 5 秒内用官方接口复查当前号，不等下一次定时查询；确认耗尽才排队切号，查询退避仍然生效。耗尽号过了接口给出的重置时间会立即复查。若当前号自己恢复、没有发生切号：会话一直开着时由 Claude Code 自带的自动续接继续；会话在等待期间重启过（Claude Code 会取消自带续接）时，qswitch 在会话空闲且无草稿的前提下补发一次续接指令。
 
-  文本草稿、运行中的工具/代理、待处理输入或已知后台任务都会阻断自动切号；tmux 有客户端连接、Rex App 正显示这个终端都不阻断，你看着时也可能看到会话自动退出并恢复。会话内 `/qswitch-status` 可查看具体阻断原因。保留的是已提交对话；官方接口不能保证未提交附件和所有临时弹窗状态。草稿检查不是原子输入锁：在会话退出前一刻开始输入的内容可能丢失，使用本模式即接受这项自动重启边界。
+  进行中的 turn、活动前台工具、queued prompt 或文本草稿都会阻断自动切号；tmux 有客户端连接、Rex App 正显示这个终端都不阻断，你看着时也可能看到会话自动退出并恢复。会话内 `/qswitch-status` 可查看具体阻断原因。受管会话因 `rate_limit` 中断后，后台任务、agent、cron 不再阻断，但切号重启可能中断这些异步工作。只保证已提交对话，恢复后应检查未完成的副作用工作；官方接口不能保证未提交附件和所有临时弹窗状态。草稿检查不是原子输入锁：在会话退出前一刻开始输入的内容可能丢失，使用本模式即接受这项自动重启边界。
 
   升级 qswitch 后不必手动重启受管会话。runner 发现自己的程序文件被替换（按部署方式改名覆盖），会等会话空闲且没有切号在进行时，经同一套确认流程 `/exit`，在原进程内换成新版本，并像切号时一样用原会话 ID 恢复。runner 的进程号、ID、控制端口和租约都不变，不发续接指令；会话在此之前被额度中断的状态原样保留。会话一忙起来就放弃本次升级，下次空闲再试；换版失败则留在旧版本继续运行。
 
@@ -174,7 +174,7 @@ qswitch serve [--addr 127.0.0.1:7432]
 
 普通 Git 工作区构建自动从 Go 嵌入的 VCS 信息读取提交号，未提交改动带 `-dirty`；发布构建可通过 `-ldflags "-X qswitch/internal/buildinfo.Version=<release>"` 显式指定版本。无 VCS 信息且未指定版本时显示 `dev`。CLI 的 `version`、daemon 的 `--version`、健康接口与页面标题使用同一个版本标识。
 
-页面显示阻塞切换的 PID、待切换目标账号及排队状态。Kimi 和未受管的 Claude 会话运行时必须先退出会话，仅等待 30 秒空闲不会解除阻塞；通过 `qswitch run claude` 启动的受管会话会在空闲时自动退出、切号并恢复。排队目标仍需在执行前通过最新用量和安全检查。
+页面显示阻塞切换的 PID、待切换目标账号及排队状态。Kimi 会话运行时必须先退出，仅等待 30 秒空闲不会解除阻塞；普通非受管 Claude 不阻断自动或手动切号。通过 `qswitch run claude` 启动的受管会话会在空闲时自动退出、切号并恢复。排队目标仍需在执行前通过最新用量和安全检查。
 
 远程服务器（如 novix）建议保持默认 loopback 监听，通过 SSH 隧道访问：`ssh -N -L 7432:127.0.0.1:7432 <host>`，然后本机打开 `http://127.0.0.1:7432`。流量由 SSH 加密，不需要 token。
 

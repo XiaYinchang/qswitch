@@ -37,8 +37,8 @@ type ToolView struct {
 	Accounts           []AccountView `json:"accounts"`
 }
 
-// ManagedView lets the page tell sessions that rotate on their own apart from
-// plain Claude processes that must be restarted through qswitch run.
+// ManagedView reports the sessions that qswitch coordinates during rotation.
+// Plain Claude processes are neither shown as blockers nor controlled.
 type ManagedView struct {
 	PID           int    `json:"pid"`
 	Ready         bool   `json:"ready"`
@@ -99,6 +99,9 @@ func (a *App) Overview() Overview {
 		ad := a.Adapters[t]
 		man, _ := ad.ManualBlockers(a.UserHome)
 		aut, _ := ad.AutoBlockers(a.UserHome)
+		if t == adapter.Claude {
+			man = aut
+		}
 		pend, _ := a.State.GetPending(string(t))
 		tv := ToolView{
 			Tool:        string(t),

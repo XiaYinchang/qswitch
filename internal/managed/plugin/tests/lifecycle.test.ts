@@ -76,39 +76,43 @@ test('adopted continuation is pending only and subagent failure does not replace
   expect((await status($)).needs_continue).toBe(true);
 });
 
-test('Bash background task survives rate-limit failure until an authoritative empty Stop', async ($, on) => {
+test('Bash background task stays visible without blocking rate-limit continuation', async ($, on) => {
   setup(on);
   on('tool.call', { tool: 'Bash' }, () => ({ result: {
     stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'bg1',
   } }));
   await start($);
   await $.tool.call({ tool: 'Bash', command: 'background-work', run_in_background: true });
+  expect(await status($)).toMatchObject({ ready: false, background_tasks: [{ id: 'bg1', type: 'shell' }] });
   await $.classic.StopFailure({ error: 'rate_limit' });
-  expect(await status($)).toMatchObject({ ready: false, needs_continue: true });
+  expect(await status($)).toMatchObject({
+    ready: true, needs_continue: true, background_tasks: [{ id: 'bg1', type: 'shell' }],
+  });
   await $.classic.Stop({ stop_hook_active: false,
     background_tasks: [{ id: 'bg1', type: 'shell', status: 'running', description: 'work' }], session_crons: [] });
-  expect((await status($)).ready).toBe(false);
+  expect(await status($)).toMatchObject({ ready: true, background_tasks: [{ id: 'bg1', status: 'running' }] });
   await $.classic.Stop({ stop_hook_active: false, background_tasks: [], session_crons: [] });
-  expect(await status($)).toMatchObject({ ready: true, needs_continue: true });
+  expect(await status($)).toMatchObject({ ready: true, needs_continue: true, background_tasks: [] });
 });
 
-test('foreground Bash allows rotation but an unknown tool lifecycle requires Stop evidence', async ($, on) => {
+test('unknown tool lifecycle blocks normal readiness but not rate-limit continuation', async ($, on) => {
   setup(on);
   on('tool.call', { tool: 'Bash' }, () => ({ result: { stdout: 'done', stderr: '', interrupted: false } }));
   on('tool.call', { tool: 'mcp__external__start' }, () => ({ result: { accepted: true } }));
   await start($);
   await $.tool.call({ tool: 'Bash', command: 'foreground-work' });
-  await $.classic.StopFailure({ error: 'rate_limit' });
   expect((await status($)).ready).toBe(true);
   await $.tool.call({ tool: 'mcp__external__start' });
   expect((await status($)).ready).toBe(false);
   await $.classic.StopFailure({ error: 'rate_limit' });
-  expect((await status($)).ready).toBe(false);
+  const interrupted = await status($);
+  expect(interrupted).toMatchObject({ ready: true, needs_continue: true });
+  expect(interrupted.uncertain_tasks).toHaveLength(1);
   await $.classic.Stop({ stop_hook_active: false, background_tasks: [], session_crons: [] });
-  expect((await status($)).ready).toBe(true);
+  expect(await status($)).toMatchObject({ ready: true, uncertain_tasks: [] });
 });
 
-test('live agents and scheduled tasks block readiness', async ($, on) => {
+test('live agents and scheduled tasks block normal readiness but not rate-limit continuation', async ($, on) => {
   const { control } = setup(on);
   await start($);
   control.agents = [{ id: 'child', description: 'work', type: 'general-purpose', status: 'running' }];
@@ -119,6 +123,42 @@ test('live agents and scheduled tasks block readiness', async ($, on) => {
   expect((await status($)).ready).toBe(false);
   await $.classic.Stop({ stop_hook_active: false, background_tasks: [], session_crons: [] });
   expect((await status($)).ready).toBe(true);
+  control.agents[0]!.status = 'running';
+  await $.classic.Stop({ stop_hook_active: false, background_tasks: [],
+    session_crons: [{ id: 'cron1', schedule: '* * * * *', recurring: true, prompt: 'work' }] });
+  await $.classic.StopFailure({ error: 'rate_limit' });
+  expect(await status($)).toMatchObject({ ready: true, needs_continue: true, session_crons: [{ id: 'cron1' }] });
+});
+
+test('an active foreground tool still blocks rate-limit continuation', async ($, on) => {
+  setup(on);
+  let releaseTool!: () => void;
+  const toolGate = new Promise<void>(resolve => { releaseTool = resolve; });
+  on('tool.call', { tool: 'Bash' }, async () => {
+    await toolGate;
+    return { result: { stdout: 'done', stderr: '', interrupted: false } };
+  });
+  await start($);
+  await $.turn.start({ turnId: 'limited', text: 'work' });
+  await $.classic.StopFailure({ error: 'rate_limit' });
+  await complete($, 'limited', 'error');
+  const pending = $.tool.call({ tool: 'Bash', command: 'foreground-work' });
+  expect(await status($)).toMatchObject({
+    ready: false, needs_continue: true, active_tools: 1, reason: 'tool call running',
+  });
+  releaseTool();
+  await pending;
+  expect(await status($)).toMatchObject({ ready: true, needs_continue: true, active_tools: 0 });
+});
+
+test('a text draft still blocks rate-limit continuation', async ($, on) => {
+  const { control } = setup(on);
+  await start($);
+  await $.classic.StopFailure({ error: 'rate_limit' });
+  control.draft = 'unfinished';
+  expect(await status($)).toMatchObject({ ready: false, needs_continue: true, reason: 'text draft is present' });
+  control.draft = '';
+  expect(await status($)).toMatchObject({ ready: true, needs_continue: true });
 });
 
 test('prepare drops user submission, restores text, and blocks readiness until release', async ($, on) => {
@@ -138,14 +178,17 @@ test('prepare drops user submission, restores text, and blocks readiness until r
   expect((await status($)).ready).toBe(true);
 });
 
-test('accepted queued text blocks rotation until its model turn starts and finishes', async ($, on) => {
+test('accepted queued text still blocks rate-limit continuation until its turn finishes', async ($, on) => {
   setup(on);
   on('prompt.submit', ($, e) => ({ text: e.text }));
   await start($);
+  await $.turn.start({ turnId: 'limited', text: 'work' });
+  await $.classic.StopFailure({ error: 'rate_limit' });
+  await complete($, 'limited', 'error');
   await $.prompt.submit({ text: 'queued work', wait: true, origin: { kind: 'composer' } });
-  expect(await status($)).toMatchObject({ ready: false, queued_submissions: 1 });
+  expect(await status($)).toMatchObject({ ready: false, needs_continue: true, queued_submissions: 1 });
   await $.turn.start({ turnId: 'queued-turn', text: 'queued work' });
-  expect(await status($)).toMatchObject({ ready: false, queued_submissions: 0 });
+  expect(await status($)).toMatchObject({ ready: false, needs_continue: true, queued_submissions: 0 });
   await complete($, 'queued-turn', 'answer');
   expect((await status($)).ready).toBe(true);
 });
