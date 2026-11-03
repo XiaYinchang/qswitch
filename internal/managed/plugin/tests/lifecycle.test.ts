@@ -151,6 +151,14 @@ test('an active foreground tool still blocks rate-limit continuation', async ($,
   expect(await status($)).toMatchObject({ ready: true, needs_continue: true, active_tools: 0 });
 });
 
+test('whitespace-only input does not block rate-limit continuation', async ($, on) => {
+  const { control } = setup(on);
+  await start($);
+  await $.classic.StopFailure({ error: 'rate_limit' });
+  control.draft = ' \t\n\u00a0';
+  expect(await status($)).toMatchObject({ ready: true, needs_continue: true });
+});
+
 test('a text draft still blocks rate-limit continuation', async ($, on) => {
   const { control } = setup(on);
   await start($);

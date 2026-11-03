@@ -88,7 +88,7 @@ const CONTINUATION = 'Continue the work interrupted by the account usage limit f
     else if (!needsContinue && background.length) reason = 'known background tasks remain';
     else if (!needsContinue && crons.length) reason = 'scheduled session tasks remain';
     else if (!needsContinue && agents.some(agent => !terminal(agent.status))) reason = 'known agent is not finished';
-    else if (draft.text.length) reason = 'text draft is present';
+    else if (draft.text.trim().length) reason = 'text draft is present';
     else if (before !== revision) reason = 'session changed while checking readiness';
     else if (!sessionId || !cwd) reason = 'session identity unavailable';
     return {
