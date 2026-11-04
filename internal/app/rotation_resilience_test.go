@@ -141,6 +141,19 @@ func seedClaudeQuota(t *testing.T, a *App, id, class string, pct float64) {
 	}
 }
 
+// applyTick runs what the daemon's apply ticker runs for Claude.
+func applyTick(a *App) error {
+	err := a.TryApply(adapter.Claude, false)
+	a.continueInterrupted(adapter.Claude)
+	return err
+}
+
+func (s *fakeRunner) resumeCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.resumes
+}
+
 // On novix the live account's 5-hour window reset at 09:10 while a switch
 // away from it still waited for a session. The probe that saw the recovery
 // asked sessions to continue while the switch was still queued, which Resume
@@ -149,17 +162,18 @@ func TestCancelledSwitchContinuesSessionsWhenTheAccountRecovers(t *testing.T) {
 	a := pendingClaudeSwitch(t)
 	s := &fakeRunner{needsContinue: true}
 	startFakeRunner(t, a, 1, s)
-	if err := a.TryApply(adapter.Claude, false); err != nil {
+	if err := applyTick(a); err != nil {
 		t.Fatal(err)
 	}
-	if s.prepares == 0 || s.releases != 0 {
-		t.Fatalf("setup: prepares=%d releases=%d", s.prepares, s.releases)
-	}
-	seedClaudeQuota(t, a, "source", "ok", 27)
 	s.mu.Lock()
+	prepares, releases, resumes := s.prepares, s.releases, s.resumes
 	s.ready = true
 	s.mu.Unlock()
-	if err := a.TryApply(adapter.Claude, false); err != nil {
+	if prepares == 0 || releases != 0 || resumes != 0 {
+		t.Fatalf("setup: prepares=%d releases=%d resumes=%d", prepares, releases, resumes)
+	}
+	seedClaudeQuota(t, a, "source", "ok", 27)
+	if err := applyTick(a); err != nil {
 		t.Fatal(err)
 	}
 	if p, _ := a.State.GetPending("claude"); p.ToID != "" {
@@ -174,13 +188,48 @@ func TestCancelledSwitchContinuesSessionsWhenTheAccountRecovers(t *testing.T) {
 	if resumes != 1 {
 		t.Fatalf("interrupted session was not asked to continue: resumes=%d", resumes)
 	}
-	// Sessions the cancellation released restart after it returns.
-	if !a.resumeDue() {
-		t.Fatal("no resume window for sessions that are still restarting")
+	// A session the cancellation released may restart long after it returns.
+	a.Clock = clock.Fixed{T: a.now().Add(time.Hour)}
+	if err := applyTick(a); err != nil {
+		t.Fatal(err)
 	}
-	a.Clock = clock.Fixed{T: a.now().Add(resumeWindow + time.Second)}
-	if a.resumeDue() {
-		t.Fatal("resume window did not end")
+	if n := s.resumeCount(); n != 2 {
+		t.Fatalf("a session still waiting an hour later was not asked again: resumes=%d", n)
+	}
+}
+
+// On 11-03 a runner upgrade restarted a session at 09:56 while it still
+// waited to continue. Its account had recovered at 09:10, before the restart,
+// so no recovery came after it, and the session sat idle until the 12:16
+// switch. Waiting sessions are asked whenever the live account has quota and
+// no switch is queued, not only when the recovery is seen.
+func TestWaitingSessionContinuesWhileTheAccountHasQuota(t *testing.T) {
+	a := pendingClaudeSwitch(t)
+	if err := a.State.ClearPending("claude"); err != nil {
+		t.Fatal(err)
+	}
+	s := &fakeRunner{ready: true, needsContinue: true}
+	startFakeRunner(t, a, 1, s)
+	if err := applyTick(a); err != nil {
+		t.Fatal(err)
+	}
+	if n := s.resumeCount(); n != 0 {
+		t.Fatalf("asked to continue on an exhausted account: resumes=%d", n)
+	}
+	seedClaudeQuota(t, a, "source", "soft", 92)
+	if err := applyTick(a); err != nil {
+		t.Fatal(err)
+	}
+	if n := s.resumeCount(); n != 1 {
+		t.Fatalf("not asked to continue on an account with quota: resumes=%d", n)
+	}
+	// A queued switch restarts the session with its continuation instead.
+	if err := a.State.SetPending(state.Pending{Tool: "claude", FromID: "source", ToID: "target", QueuedAt: a.now().Unix(), Reason: "exhausted"}); err != nil {
+		t.Fatal(err)
+	}
+	a.continueInterrupted(adapter.Claude)
+	if n := s.resumeCount(); n != 1 {
+		t.Fatalf("asked to continue while a switch was queued: resumes=%d", n)
 	}
 }
 

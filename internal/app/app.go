@@ -60,8 +60,6 @@ type App struct {
 	lastDeskAt      time.Time
 	captureRetryAt  map[adapter.Tool]time.Time
 	claudeWriteLive func(string, []byte, os.FileMode) error
-	resumeMu        sync.Mutex
-	resumeUntil     time.Time // keep resuming interrupted Claude sessions until then
 }
 
 func Open(userHome, dataDir string, keys secutil.KeyProvider, bins []string, n notify.Notifier, list func() ([]adapter.Proc, error)) (*App, error) {
@@ -1136,32 +1134,30 @@ func (a *App) ProbeHTTP(ctx context.Context, tool adapter.Tool, force bool) {
 	if exhausted {
 		a.considerSwitch(tool)
 	}
-	recovered := quota.Class(before.LastQuotaClass) == quota.Exhausted && (res.Class == quota.OK || res.Class == quota.Soft)
-	if tool == adapter.Claude && recovered {
-		// No switch happened, so no restart carries a continuation; sessions
-		// restarted while interrupted would otherwise wait for the user.
-		a.resumeInterrupted()
+}
+
+// continueInterrupted asks managed sessions still waiting after a usage-limit
+// failure to continue while the live account has quota and no switch is
+// queued. Claude Code continues such a session by itself unless it restarted
+// during the wait: a cancelled switch, a runner upgrade, or a takeover with
+// --resume-continuation=continue cancels that. It runs every tick instead of
+// on the recovery, which a daemon restart, a probe from the web page, or a
+// restart that happened later misses. On 11-03 a session restarted at 09:56
+// then waited for the 12:16 switch. Runners refuse busy, preparing and
+// uninterrupted sessions, and the plugin continues a restarted session at
+// most once, so asking every tick sends no second continuation.
+func (a *App) continueInterrupted(tool adapter.Tool) {
+	if tool != adapter.Claude || !a.cfgSnapshot().ToolEnabled(string(tool)) {
+		return
 	}
-}
-
-// resumeWindow is how long the daemon keeps asking interrupted sessions to
-// continue after their account recovered without a switch. A switch that the
-// recovery cancelled still holds sessions that it released and that restart
-// only after the cancellation returns, and Resume skips a session that is not
-// running yet. The plugin continues each restarted session at most once.
-const resumeWindow = 2 * time.Minute
-
-func (a *App) resumeInterrupted() {
-	a.resumeMu.Lock()
-	a.resumeUntil = a.now().Add(resumeWindow)
-	a.resumeMu.Unlock()
+	if pend, err := a.State.GetPending(string(tool)); err != nil || pend.ToID != "" {
+		return // the switch restarts these sessions with their continuation
+	}
+	p, err := a.State.GetPointer(string(tool))
+	if err != nil || p.StableID == "" || strings.HasPrefix(p.StableID, "desktop:") || !a.usableAccount(tool, p.StableID) {
+		return
+	}
 	_, _ = managed.Resume(a.DataDir)
-}
-
-func (a *App) resumeDue() bool {
-	a.resumeMu.Lock()
-	defer a.resumeMu.Unlock()
-	return a.now().Before(a.resumeUntil)
 }
 
 func (a *App) usableAccount(tool adapter.Tool, id string) bool {
@@ -2023,18 +2019,10 @@ func (a *App) TryApply(tool adapter.Tool, killCLI bool) (retErr error) {
 	// gates; only a completed credential switch authorizes task continuation.
 	releaseManaged, committed := true, false
 	managedGeneration := ""
-	// Set when the switch is cancelled because the account it would leave is
-	// usable again; on 11-03 two sessions then waited for the user at 09:10.
-	sourceRecovered := false
 	if tool == adapter.Claude {
 		defer func() {
-			if !releaseManaged {
-				return
-			}
-			err := managed.Release(a.DataDir, managedGeneration, committed)
-			retErr = errors.Join(retErr, err)
-			if err == nil && sourceRecovered {
-				a.resumeInterrupted()
+			if releaseManaged {
+				retErr = errors.Join(retErr, managed.Release(a.DataDir, managedGeneration, committed))
 			}
 		}()
 	}
@@ -2059,7 +2047,6 @@ func (a *App) TryApply(tool adapter.Tool, killCLI bool) (retErr error) {
 			return err
 		}
 		if quota.Class(ac.LastQuotaClass) != quota.Exhausted {
-			sourceRecovered = a.usableAccount(tool, pend.FromID)
 			return a.State.ClearPending(string(tool))
 		}
 		target, err := a.State.GetAccount(string(tool), pend.ToID)
@@ -2100,7 +2087,6 @@ func (a *App) TryApply(tool adapter.Tool, killCLI bool) (retErr error) {
 			return err
 		}
 		if !exhausted {
-			sourceRecovered = a.usableAccount(tool, pend.FromID)
 			return a.State.ClearPending(string(tool))
 		}
 		to, err := a.automaticQuotaLocked(ctx, tool, pend.ToID)
@@ -2132,7 +2118,6 @@ func (a *App) TryApply(tool adapter.Tool, killCLI bool) (retErr error) {
 			return err
 		}
 		if !exhausted || !fresh || (res.Class != quota.OK && res.Class != quota.Soft) {
-			sourceRecovered = !exhausted && a.usableAccount(tool, pend.FromID)
 			return a.State.ClearPending(string(tool))
 		}
 	}
@@ -2309,9 +2294,7 @@ func (a *App) runToolWorker(ctx context.Context, tool adapter.Tool) {
 				a.ProbeReset(ctx, tool)
 			}
 			_ = a.TryApply(tool, false)
-			if tool == adapter.Claude && a.resumeDue() {
-				_, _ = managed.Resume(a.DataDir)
-			}
+			a.continueInterrupted(tool)
 		}
 	}
 }

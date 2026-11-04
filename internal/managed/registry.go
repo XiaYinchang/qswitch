@@ -352,9 +352,9 @@ func Status(dataDir string) ([]StatusInfo, error) {
 }
 
 // Resume asks every live session still waiting after a usage-limit failure to
-// continue. It is for an account that recovered without a switch: Claude
-// Code cancels its own automatic continue when a session restarts during the
-// wait. Runners refuse sessions that are busy, preparing, or not interrupted.
+// continue. It is for an account that has quota without a switch: Claude Code
+// cancels its own automatic continue when a session restarts during the wait.
+// Runners refuse sessions that are busy, preparing, or not interrupted.
 func Resume(dataDir string) (int, error) {
 	root, err := rootDir(dataDir)
 	if err != nil {
