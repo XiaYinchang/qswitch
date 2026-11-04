@@ -116,7 +116,11 @@ const DRAFT_LIMIT = 8000;
     else if (queued.length) reason = 'submitted prompt has not started a known turn';
     else if (!asyncWaived && uncertainTasks.size) reason = 'background task lifecycle not confirmed by Stop';
     else if (!asyncWaived && background.length) reason = 'known background tasks remain';
-    else if (!asyncWaived && crons.length) reason = 'scheduled session tasks remain';
+    // A scheduled task never finishes, so a switch does not wait for one: the
+    // exit stops it and the continuation lists it. On 11-04 a switch waited
+    // ten minutes for a task due the next day. An upgrade restart tells the
+    // session nothing, so it still waits.
+    else if (!asyncWaived && crons.length && phase !== 'prepare') reason = 'scheduled session tasks remain';
     else if (!asyncWaived && agents.some(agent => !terminal(agent.status))) reason = 'known agent is not finished';
     // A draft holds the switch only while someone is typing it; a quiet one
     // goes along with the exit. A switch used to wait for any draft until the

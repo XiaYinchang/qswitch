@@ -326,12 +326,25 @@ func TestCommittedReleaseRequiresWaitConfirmedExit(t *testing.T) {
 	}
 }
 
+func statusOf(t *testing.T, r *runner) StatusInfo {
+	t.Helper()
+	var s StatusInfo
+	if err := json.Unmarshal(callRunner(t, r, "/status", nil).Body.Bytes(), &s); err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
 func TestExitAcknowledgementCanBeRevoked(t *testing.T) {
 	r := testRunner(t)
 	r.status.Generation = "g"
 	r.exitRequested = true
 	if got := callRunner(t, r, "/exiting", stateFor(r)); got.Code != 200 {
 		t.Fatal(got.Body.String())
+	}
+	// The switch log names an acknowledged session as exiting.
+	if s := statusOf(t, r); s.Reason != "exiting" {
+		t.Fatalf("acknowledged session reported as %q", s.Reason)
 	}
 	state := stateFor(r)
 	state.Ready = false
@@ -341,6 +354,9 @@ func TestExitAcknowledgementCanBeRevoked(t *testing.T) {
 	}
 	if r.exitAcknowledged || r.exitRequested || r.status.Generation != "g" || r.status.Ready {
 		t.Fatalf("exit acknowledgement stayed armed: %+v", r.status)
+	}
+	if s := statusOf(t, r); s.Reason != "draft changed before final exit" {
+		t.Fatalf("revoked exit reported as %q", s.Reason)
 	}
 	if got := callRunner(t, r, "/exiting", stateFor(r)); got.Code != 409 {
 		t.Fatal("exit rearmed without coordinator")

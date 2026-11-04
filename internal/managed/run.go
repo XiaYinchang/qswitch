@@ -180,6 +180,11 @@ func (r *runner) snapshotLocked() StatusInfo {
 	if !s.Exited && !r.freshLocked() {
 		s.Ready = false
 	}
+	// A child that acknowledged its exit is quiet until it is gone; its last
+	// reason, usually empty, would show a switch waiting on "not ready".
+	if r.exitAcknowledged && !s.Exited {
+		s.Reason = "exiting"
+	}
 	return s
 }
 

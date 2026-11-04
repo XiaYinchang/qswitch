@@ -135,6 +135,23 @@ test('live agents and scheduled tasks block normal readiness but not rate-limit 
   expect(await status($)).toMatchObject({ ready: true, needs_continue: true, session_crons: [{ id: 'cron1' }] });
 });
 
+// On 11-04 a switch waited ten minutes for a scheduled task due the next day.
+test('a switch does not wait for a scheduled task, but an upgrade does', async ($, on) => {
+  const { clock, control } = setup(on);
+  await start($);
+  await $.classic.Stop({ stop_hook_active: false, background_tasks: [],
+    session_crons: [{ id: 'cron1', schedule: '7 10 5 11 *', recurring: false, prompt: 'check' }] });
+  expect(await status($)).toMatchObject({ ready: false, reason: 'scheduled session tasks remain' });
+  control.action = 'prepare';
+  control.generation = 'generation-1';
+  await clock.advance(750);
+  expect(await status($)).toMatchObject({ ready: true, phase: 'prepare', stopped: ['scheduled task cron1'] });
+  control.action = 'run';
+  control.generation = '';
+  await clock.advance(750);
+  expect(await status($)).toMatchObject({ ready: false, reason: 'scheduled session tasks remain' });
+});
+
 test('an active foreground tool still blocks rate-limit continuation', async ($, on) => {
   setup(on);
   let releaseTool!: () => void;
