@@ -20,7 +20,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const maxJSON = 64 << 10
+// maxJSON bounds control requests and state files. An exit acknowledgement
+// carries held messages and a draft: up to 14000 characters, which JSON
+// escaping can grow past 64 KiB.
+const maxJSON = 256 << 10
 
 type registration struct {
 	ID    string `json:"id"`

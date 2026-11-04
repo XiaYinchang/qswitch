@@ -5,7 +5,7 @@ import type { On } from 'claude-code';
 function setup(on: On, initial = 'idle') {
   const clock = mock.clock(on);
   const control = {
-    action: 'run', generation: '', draft: '', posted: 0,
+    action: 'run', generation: '', draft: '', posted: 0, restore: '',
     agents: [] as { id: string; description: string; type: string; status: 'running' | 'completed' }[],
     requests: [] as { path: string; body: Record<string, unknown> }[],
   };
@@ -29,7 +29,7 @@ function setup(on: On, initial = 'idle') {
     control.requests.push({ path: e.url.slice(e.url.lastIndexOf('/')), body: JSON.parse(e.init?.body ?? '{}') });
     return { value: {
       status: 200, ok: true, headers: {},
-      text: JSON.stringify({ action: control.action, generation: control.generation }),
+      text: JSON.stringify({ action: control.action, generation: control.generation, ...(control.restore ? { restore: control.restore } : {}) }),
     } };
   });
   on('turn.start', ($, e) => ({ turnId: e.turnId }));
@@ -192,14 +192,76 @@ test('a switch waits for an idle session\'s background task at most ten minutes'
   expect(await status($)).toMatchObject({ ready: false, reason: 'known background tasks remain' });
 });
 
-test('a text draft still blocks rate-limit continuation', async ($, on) => {
+test('a draft being edited still blocks rate-limit continuation', async ($, on) => {
   const { control } = setup(on);
   await start($);
   await $.classic.StopFailure({ error: 'rate_limit' });
   control.draft = 'unfinished';
-  expect(await status($)).toMatchObject({ ready: false, needs_continue: true, reason: 'text draft is present' });
+  expect(await status($)).toMatchObject({ ready: false, needs_continue: true, reason: 'text draft is being edited' });
   control.draft = '';
   expect(await status($)).toMatchObject({ ready: true, needs_continue: true });
+});
+
+// A switch used to wait for any draft until the old account recovered, even
+// one left in a box nobody was looking at.
+test('a draft holds a switch only while it is edited, then goes along with the exit', { timeoutMs: 30000 }, async ($, on) => {
+  const { clock, control } = setup(on);
+  let exits = 0;
+  on('command.run', { command: 'exit' }, () => { exits += 1; return { text: '' }; });
+  control.action = 'prepare';
+  control.generation = 'generation-1';
+  await start($);
+  control.draft = 'half written';
+  await clock.advance(750);
+  expect(await status($)).toMatchObject({ ready: false, reason: 'text draft is being edited' });
+  control.draft = 'half written idea';
+  await clock.advance(20000);
+  expect((await status($)).ready).toBe(false);
+  await clock.advance(11000);
+  expect(await status($)).toMatchObject({ ready: true, draft_characters: 17 });
+  control.action = 'exit';
+  await clock.advance(750);
+  expect(exits).toBe(1);
+  const acks = control.requests.filter(request => request.path === '/exiting');
+  expect(acks).toHaveLength(1);
+  expect(acks[0]!.body).toMatchObject({ generation: 'generation-1', draft: 'half written idea' });
+});
+
+test('a draft too long to carry over keeps holding the switch', { timeoutMs: 30000 }, async ($, on) => {
+  const { clock, control } = setup(on);
+  control.action = 'prepare';
+  control.generation = 'generation-1';
+  await start($);
+  control.draft = 'x'.repeat(8001);
+  await clock.advance(31000);
+  expect(await status($)).toMatchObject({ ready: false, reason: 'text draft too long to keep across a restart' });
+});
+
+test('a draft the runner kept goes back into the input box once, as a quiet draft', async ($, on) => {
+  const { clock, control } = setup(on);
+  control.restore = 'half written idea';
+  await start($);
+  expect(control.draft).toBe('half written idea');
+  // Delivered again until acknowledged, but put back only once.
+  await clock.advance(750);
+  expect(control.draft).toBe('half written idea');
+  expect(control.requests.at(-1)!.body).toMatchObject({ restored: true });
+  expect(await status($)).toMatchObject({ ready: true, draft_characters: 17 });
+});
+
+test('an interrupted session is not continued while its box has a draft', { timeoutMs: 30000 }, async ($, on) => {
+  const { clock, control } = setup(on, 'continue');
+  const submitted: string[] = [];
+  on('prompt.submit', ($, e) => { submitted.push(e.text); return { text: e.text }; });
+  await start($);
+  control.draft = 'about to ask something';
+  await clock.advance(31000);
+  control.action = 'resume';
+  await clock.advance(750);
+  expect(submitted).toHaveLength(0);
+  control.draft = '';
+  await clock.advance(750);
+  expect(submitted).toHaveLength(1);
 });
 
 // On 11-04 a message typed during a switch went back to the input box and
@@ -248,6 +310,25 @@ test('an exit hands held messages to the runner, and one typed after it updates 
   expect(later[0]!.body).toMatchObject({ generation: 'generation-1', ready: true, held: ['first', 'second'] });
 });
 
+// The acknowledgement carried the draft; sending it after that empties the
+// box, so the restarted session must not get the same text twice.
+test('a draft sent after the exit acknowledgement is not put back as well', async ($, on) => {
+  const { clock, control } = setup(on);
+  on('command.run', { command: 'exit' }, () => ({ text: '' }));
+  control.action = 'prepare';
+  control.generation = 'generation-1';
+  await start($);
+  control.draft = 'send me';
+  await clock.advance(31000);
+  control.action = 'exit';
+  await clock.advance(750);
+  const acks = () => control.requests.filter(request => request.path === '/exiting');
+  expect(acks()[0]!.body).toMatchObject({ draft: 'send me' });
+  control.draft = '';
+  await $.prompt.submit({ text: 'send me', wait: false, origin: { kind: 'composer' } });
+  expect(acks().at(-1)!.body).toMatchObject({ held: ['send me'], draft: '' });
+});
+
 test('a message too long to hold goes back to the input box', async ($, on) => {
   const { control } = setup(on);
   control.action = 'prepare';
@@ -257,7 +338,7 @@ test('a message too long to hold goes back to the input box', async ($, on) => {
   const result = await $.prompt.submit({ text, wait: false, origin: { kind: 'composer' } });
   expect(result.drop).toContain('back in the input box');
   expect(control.draft).toBe(text);
-  expect(await status($)).toMatchObject({ ready: false, reason: 'text draft is present', held_messages: 0 });
+  expect(await status($)).toMatchObject({ ready: false, reason: 'text draft is being edited', held_messages: 0 });
 });
 
 test('accepted queued text still blocks rate-limit continuation until its turn finishes', async ($, on) => {

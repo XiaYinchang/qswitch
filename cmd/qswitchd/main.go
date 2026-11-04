@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -29,6 +30,8 @@ func main() {
 		os.Exit(1)
 	}
 	defer a.Close()
+	// journald stamps each line; one line per change in a switch's progress.
+	a.Log = log.New(os.Stderr, "", 0).Printf
 	if err := a.Init(); err != nil {
 		fmt.Fprintln(os.Stderr, "init:", err)
 		os.Exit(1)

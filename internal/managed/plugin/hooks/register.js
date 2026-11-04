@@ -12,6 +12,11 @@ const CONTINUATION = 'Continue the work interrupted by the account usage limit f
 // characters, which keeps the exit acknowledgement within the runner's limit.
 const HELD_LIMIT = 6000;
 const HELD_NOTICE = 'qswitch is switching accounts. This message is held and will be sent as soon as the switch finishes.';
+// A draft left unchanged this long no longer holds a switch: the exit hands it
+// to the runner, which puts it back in the input box after the restart. A
+// draft longer than DRAFT_LIMIT characters is not carried and keeps holding.
+const DRAFT_QUIET_MS = 30 * 1000;
+const DRAFT_LIMIT = 8000;
   let url = '';
   let token = '';
   let phase = 'run';
@@ -28,6 +33,11 @@ const HELD_NOTICE = 'qswitch is switching accounts. This message is held and wil
   let unknown = '';
   // Messages typed during a switch, in order, not yet sent.
   let held = [];
+  // The input box as last read, and when its text last changed.
+  let draftText = '';
+  let draftChangedAt = -Infinity;
+  // The draft the previous process left was put back in this one's box.
+  let restored = false;
   let revision = 0;
   let polling = false;
   let requestPending = false;
@@ -86,6 +96,13 @@ const HELD_NOTICE = 'qswitch is switching accounts. This message is held and wil
     const cwd = await $.session.cwd();
     const agents = await $.agent.list();
     const draft = await $.prompt.read();
+    const now = await $.clock.now();
+    const text = String(draft?.text ?? '');
+    if (text !== draftText) {
+      draftText = text;
+      draftChangedAt = now;
+    }
+    const hasDraft = text.trim().length > 0;
     let reason = '';
     // Asynchronous work blocks an ordinary session. A pending continuation may
     // need to run to retire that work, and a switch waits for it only so long;
@@ -101,7 +118,11 @@ const HELD_NOTICE = 'qswitch is switching accounts. This message is held and wil
     else if (!asyncWaived && background.length) reason = 'known background tasks remain';
     else if (!asyncWaived && crons.length) reason = 'scheduled session tasks remain';
     else if (!asyncWaived && agents.some(agent => !terminal(agent.status))) reason = 'known agent is not finished';
-    else if (draft.text.trim().length) reason = 'text draft is present';
+    // A draft holds the switch only while someone is typing it; a quiet one
+    // goes along with the exit. A switch used to wait for any draft until the
+    // old account recovered, even one left in a box nobody was looking at.
+    else if (hasDraft && text.length > DRAFT_LIMIT) reason = 'text draft too long to keep across a restart';
+    else if (hasDraft && now - draftChangedAt < DRAFT_QUIET_MS) reason = 'text draft is being edited';
     else if (before !== revision) reason = 'session changed while checking readiness';
     else if (!sessionId || !cwd) reason = 'session identity unavailable';
     return {
@@ -112,7 +133,23 @@ const HELD_NOTICE = 'qswitch is switching accounts. This message is held and wil
       limit_hits: limitHits,
       reason,
       stopped: unfinishedWork(agents),
+      restored,
     };
+  }
+
+  // The draft an exit hands to the runner.
+  const carriedDraft = () => (draftText.trim() ? draftText.replace(/\u0000/g, '') : '');
+
+  // Puts back the draft the previous process had when the switch restarted
+  // it. The text arrives from the runner, so it is not a new edit.
+  async function restoreDraft($, text) {
+    try {
+      const filled = await $.prompt.fill({ text, mode: 'append' });
+      if (!filled.isFilled) return;
+      draftText = String(filled.text ?? text);
+      restored = true;
+      changed();
+    } catch {}
   }
 
   // What an exit now would stop. The continuation after the restart lists it,
@@ -148,7 +185,7 @@ const HELD_NOTICE = 'qswitch is switching accounts. This message is held and wil
   // release that only the finished switch could bring: on 11-04 a message
   // typed at 05:27 kept the switch queued at 05:17 waiting until the old
   // account recovered at 05:50.
-  async function hold($, input) {
+  async function hold($, input, origin) {
     const text = String(input ?? '').replace(/\u0000/g, '');
     if (!text.trim()) return { drop: HELD_NOTICE };
     if (held.reduce((n, item) => n + item.length, 0) + text.length > HELD_LIMIT) {
@@ -160,9 +197,12 @@ const HELD_NOTICE = 'qswitch is switching accounts. This message is held and wil
     held.push(text);
     changed();
     // After the exit acknowledgement only the runner's record of it may be
-    // updated: a heartbeat would revoke the acknowledgement.
+    // updated: a heartbeat would revoke the acknowledgement. A message typed
+    // here emptied the input box, so the draft recorded with the
+    // acknowledgement is gone; one from the remote bridge left the box alone.
     if (exiting && !requestPending) {
-      try { await request($, '/exiting', { ...lastState, generation, held }); } catch {}
+      const draft = origin === 'composer' ? '' : carriedDraft();
+      try { await request($, '/exiting', { ...lastState, generation, held, draft }); } catch {}
     }
     return { drop: HELD_NOTICE };
   }
@@ -188,11 +228,12 @@ const HELD_NOTICE = 'qswitch is switching accounts. This message is held and wil
       lastState = await snapshot($);
       const before = revision;
       const action = await request($, '/state', lastState);
+      if (typeof action.restore === 'string' && action.restore && !restored) await restoreDraft($, action.restore);
       if (action.action === 'resume') {
         // The account recovered without a switch. Continue only a session that
         // lost Claude Code's own automatic continue, and only if nothing
-        // changed since this heartbeat.
-        if (phase !== 'run' || before !== revision || !lastState.ready || !needsContinue || !restartedInterrupted) return;
+        // changed since this heartbeat and nobody has a draft in its box.
+        if (phase !== 'run' || before !== revision || !lastState.ready || !needsContinue || !restartedInterrupted || draftText.trim()) return;
         restartedInterrupted = false;
         changed();
         await $.prompt.submit({ text: CONTINUATION, wait: false });
@@ -227,7 +268,7 @@ const HELD_NOTICE = 'qswitch is switching accounts. This message is held and wil
       const candidate = await snapshot($);
       if (!candidate.ready) { lastState = candidate; return; }
       const candidateRevision = revision;
-      const acknowledged = await request($, '/exiting', { ...candidate, generation: preparedGeneration, held });
+      const acknowledged = await request($, '/exiting', { ...candidate, generation: preparedGeneration, held, draft: carriedDraft() });
       if (acknowledged.action !== 'exit' || acknowledged.generation !== preparedGeneration) return;
       const finalState = await snapshot($);
       lastState = finalState;
@@ -347,7 +388,7 @@ export function register(on) {
     // the queued prompt and its turn block readiness until they finish, and
     // the drain resumes afterwards.
     if (phase !== 'run' && (e.origin.kind === 'composer' || e.origin.kind === 'bridge')) {
-      return hold($, e.text);
+      return hold($, e.text, e.origin.kind);
     }
     const submission = {};
     // Typed prompts queue even with turnId; machine notifications may instead
@@ -508,7 +549,8 @@ export function register(on) {
     catch (error) { lastState = { ...lastState, ready: false, reason: String(error) }; }
     return { text: JSON.stringify({
       ...lastState, phase, generation, exit_overdue: exitOverdue, active_turns: turns.size, active_tools: tools.size,
-      queued_submissions: queued.length, held_messages: held.length, uncertain_tasks: [...uncertainTasks],
+      queued_submissions: queued.length, held_messages: held.length, draft_characters: draftText.length,
+      uncertain_tasks: [...uncertainTasks],
       background_tasks: background, session_crons: crons,
       ui_contract: 'submitted transcript preserved; unsubmitted attachments and temporary UI are not guaranteed',
     }, null, 2) };

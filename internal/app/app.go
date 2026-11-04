@@ -60,6 +60,11 @@ type App struct {
 	lastDeskAt      time.Time
 	captureRetryAt  map[adapter.Tool]time.Time
 	claudeWriteLive func(string, []byte, os.FileMode) error
+
+	// Log, when set, gets a line each time a switch's progress changes.
+	Log       func(format string, args ...any)
+	logMu     sync.Mutex
+	switchLog map[adapter.Tool]string
 }
 
 func Open(userHome, dataDir string, keys secutil.KeyProvider, bins []string, n notify.Notifier, list func() ([]adapter.Proc, error)) (*App, error) {
@@ -447,7 +452,7 @@ func (a *App) Switch(tool adapter.Tool, ref string, opts adapter.RestoreOpts, ki
 	}()
 	var ready bool
 	prepare := func() bool {
-		ready, err = managed.Prepare(a.DataDir, generation, nil)
+		ready, _, err = managed.Prepare(a.DataDir, generation, nil)
 		return err != nil || ready
 	}
 	var waitErr error
@@ -1897,6 +1902,7 @@ func (a *App) considerSwitch(tool adapter.Tool) {
 	}
 	pend := state.Pending{Tool: string(tool), FromID: p.StableID, ToID: next, QueuedAt: a.now().Unix(), Reason: "exhausted", BlockedByPID: joinPIDs(auto.AllPIDs())}
 	_ = a.State.SetPending(pend)
+	a.logSwitch(tool, pendingKey(pend)+" queued", "%s is used up; switching to %s%s", a.accountName(tool, pend.FromID), a.accountName(tool, next), a.expiryNote(tool, next))
 	a.Notify.Send("qswitch", fmt.Sprintf("%s quota exhausted; will switch to %s", tool, next))
 	a.TryApply(tool, false)
 }
@@ -2033,31 +2039,31 @@ func (a *App) TryApply(tool adapter.Tool, killCLI bool) (retErr error) {
 	}
 	if pend.Reason == "exhausted" {
 		if !cfg.General.AutoSwitch || !cfg.ToolEnabled(string(tool)) {
-			return a.State.ClearPending(string(tool))
+			return a.cancelSwitch(tool, pend, "automatic switching is off")
 		}
 		p, err := a.State.GetPointer(string(tool))
 		if err != nil {
 			return err
 		}
 		if p.StableID != pend.FromID {
-			return a.State.ClearPending(string(tool))
+			return a.cancelSwitch(tool, pend, "the live account changed")
 		}
 		ac, err := a.State.GetAccount(string(tool), pend.FromID)
 		if err != nil {
 			return err
 		}
 		if quota.Class(ac.LastQuotaClass) != quota.Exhausted {
-			return a.State.ClearPending(string(tool))
+			return a.cancelSwitch(tool, pend, "the used-up account has quota again")
 		}
 		target, err := a.State.GetAccount(string(tool), pend.ToID)
 		if err != nil {
 			return err
 		}
 		if target.Incomplete || target.StaleCLI || target.CoolingUntil > a.now().Unix() {
-			return a.State.ClearPending(string(tool))
+			return a.cancelSwitch(tool, pend, "the next account cannot be used now")
 		}
 		if quota.Class(target.LastQuotaClass) != quota.OK && quota.Class(target.LastQuotaClass) != quota.Soft {
-			return a.State.ClearPending(string(tool))
+			return a.cancelSwitch(tool, pend, "the next account has no quota left")
 		}
 	}
 	ad := a.Adapters[tool]
@@ -2087,20 +2093,20 @@ func (a *App) TryApply(tool adapter.Tool, killCLI bool) (retErr error) {
 			return err
 		}
 		if !exhausted {
-			return a.State.ClearPending(string(tool))
+			return a.cancelSwitch(tool, pend, "the used-up account has quota again")
 		}
 		to, err := a.automaticQuotaLocked(ctx, tool, pend.ToID)
 		if err != nil {
 			return err
 		}
 		if to.Class != quota.OK && to.Class != quota.Soft {
-			return a.State.ClearPending(string(tool))
+			return a.cancelSwitch(tool, pend, "the next account has no quota left")
 		}
 		// The target request can cross the source's recovery deadline, and
 		// configuration can be reloaded while HTTP is in flight.
 		cfg = a.cfgSnapshot()
 		if !cfg.General.AutoSwitch || !cfg.ToolEnabled(string(tool)) {
-			return a.State.ClearPending(string(tool))
+			return a.cancelSwitch(tool, pend, "automatic switching is off")
 		}
 		from, err := a.State.GetAccount(string(tool), pend.FromID)
 		if err != nil {
@@ -2118,12 +2124,12 @@ func (a *App) TryApply(tool adapter.Tool, killCLI bool) (retErr error) {
 			return err
 		}
 		if !exhausted || !fresh || (res.Class != quota.OK && res.Class != quota.Soft) {
-			return a.State.ClearPending(string(tool))
+			return a.cancelSwitch(tool, pend, "the latest quota check no longer supports it")
 		}
 	}
 	if tool == adapter.Claude {
 		managedGeneration = fmt.Sprintf("%s:%s:%d", pend.FromID, pend.ToID, pend.QueuedAt)
-		ready, err := managed.Prepare(a.DataDir, managedGeneration, auto.ManualPIDs())
+		ready, waiting, err := managed.Prepare(a.DataDir, managedGeneration, auto.ManualPIDs())
 		if err != nil {
 			if errors.Is(err, managed.ErrRunnerUnavailable) {
 				releaseManaged = false
@@ -2131,6 +2137,7 @@ func (a *App) TryApply(tool adapter.Tool, killCLI bool) (retErr error) {
 			return err
 		}
 		if !ready {
+			a.logWaiting(tool, pend, waiting)
 			releaseManaged = false
 			return nil
 		}
@@ -2138,7 +2145,101 @@ func (a *App) TryApply(tool adapter.Tool, killCLI bool) (retErr error) {
 	}
 	retErr = a.switchLocked(tool, pend.ToID, adapter.RestoreOpts{}, killCLI)
 	committed = retErr == nil
+	if committed {
+		a.logSwitch(tool, pendingKey(pend)+" done", "switched from %s to %s, %s after the switch was queued", a.accountName(tool, pend.FromID), a.accountName(tool, pend.ToID), a.since(pend.QueuedAt))
+	}
 	return retErr
+}
+
+// logSwitch writes a line about a switch to the daemon log. key names the
+// state the line describes, and nothing is written while it stays the same,
+// so a switch that waits for minutes logs each change once, not every tick.
+// Until 11-04 nothing was logged, and finding out why a switch waited from
+// 05:17 to 05:50 took reading every session's transcript.
+func (a *App) logSwitch(tool adapter.Tool, key, format string, args ...any) {
+	if a.Log == nil {
+		return
+	}
+	a.logMu.Lock()
+	defer a.logMu.Unlock()
+	if a.switchLog[tool] == key {
+		return
+	}
+	if a.switchLog == nil {
+		a.switchLog = make(map[adapter.Tool]string)
+	}
+	a.switchLog[tool] = key
+	a.Log("%s: %s", tool, fmt.Sprintf(format, args...))
+}
+
+func pendingKey(p state.Pending) string {
+	return fmt.Sprintf("%s>%s@%d", p.FromID, p.ToID, p.QueuedAt)
+}
+
+// logWaiting names the sessions a queued switch waits for and why. A busy
+// session's reason changes every few seconds, so only a change in which
+// sessions it waits for, or in whether they are exiting, makes a new line.
+func (a *App) logWaiting(tool adapter.Tool, p state.Pending, waiting []managed.Waiting) {
+	keys := make([]string, 0, len(waiting))
+	parts := make([]string, 0, len(waiting))
+	for _, w := range waiting {
+		id := w.SessionID
+		if len(id) > 8 {
+			id = id[:8]
+		}
+		if id == "" {
+			id = "a starting session"
+		}
+		keys = append(keys, fmt.Sprintf("%s/%v", id, w.Reason == "exiting"))
+		parts = append(parts, fmt.Sprintf("%s (%s)", id, w.Reason))
+	}
+	sort.Strings(keys)
+	a.logSwitch(tool, pendingKey(p)+" waits "+strings.Join(keys, ","), "switch from %s to %s waits for %s", a.accountName(tool, p.FromID), a.accountName(tool, p.ToID), strings.Join(parts, "; "))
+}
+
+// cancelSwitch drops a queued switch and logs why.
+func (a *App) cancelSwitch(tool adapter.Tool, p state.Pending, why string) error {
+	a.logSwitch(tool, pendingKey(p)+" cancelled", "switch from %s to %s cancelled %s after it was queued: %s", a.accountName(tool, p.FromID), a.accountName(tool, p.ToID), a.since(p.QueuedAt), why)
+	return a.State.ClearPending(string(tool))
+}
+
+// logSwitchError logs an error that holds up a queued switch.
+func (a *App) logSwitchError(tool adapter.Tool, err error) {
+	p, perr := a.State.GetPending(string(tool))
+	if perr != nil || p.ToID == "" {
+		return
+	}
+	a.logSwitch(tool, pendingKey(p)+" error "+err.Error(), "switch from %s to %s held up: %v", a.accountName(tool, p.FromID), a.accountName(tool, p.ToID), err)
+}
+
+// accountName is a short account ID with the account's label.
+func (a *App) accountName(tool adapter.Tool, id string) string {
+	short := id
+	if len(short) > 8 {
+		short = short[:8]
+	}
+	if ac, err := a.State.GetAccount(string(tool), id); err == nil {
+		if label := accountLabel(ac); label != "" && label != id {
+			return short + " (" + label + ")"
+		}
+	}
+	return short
+}
+
+// expiryNote tells when an account's remaining quota expires, if known.
+func (a *App) expiryNote(tool adapter.Tool, id string) string {
+	ac, err := a.State.GetAccount(string(tool), id)
+	if err != nil {
+		return ""
+	}
+	if at := quotaExpiry(quota.DecodeBuckets(ac.QuotaDetail), a.now().Unix()); at > 0 {
+		return ", whose quota expires " + time.Unix(at, 0).Format("01-02 15:04")
+	}
+	return ""
+}
+
+func (a *App) since(unix int64) time.Duration {
+	return a.now().Sub(time.Unix(unix, 0)).Round(time.Second)
 }
 
 func (a *App) Apply(tool adapter.Tool, killCLI bool) error {
@@ -2293,7 +2394,9 @@ func (a *App) runToolWorker(ctx context.Context, tool adapter.Tool) {
 			if a.HTTP.Client != nil || !secutil.InTest() {
 				a.ProbeReset(ctx, tool)
 			}
-			_ = a.TryApply(tool, false)
+			if err := a.TryApply(tool, false); err != nil {
+				a.logSwitchError(tool, err)
+			}
 			a.continueInterrupted(tool)
 		}
 	}

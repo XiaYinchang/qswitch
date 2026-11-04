@@ -129,6 +129,15 @@ func validHeld(items []string) bool {
 	return n <= maxHeld
 }
 
+// maxDraft bounds a carried draft in bytes. The plugin carries at most 8000
+// UTF-16 code units, which is under 24 KiB of UTF-8.
+const maxDraft = 32 << 10
+
+// validDraft accepts a draft the plugin carries across a restart.
+func validDraft(draft string) bool {
+	return len(draft) <= maxDraft && !strings.ContainsRune(draft, 0)
+}
+
 // withHeld adds the messages the user typed while a switch drained the
 // session. They were held instead of sent, so the restarted session gets them
 // as its prompt: on their own as typed, or after the automatic note.

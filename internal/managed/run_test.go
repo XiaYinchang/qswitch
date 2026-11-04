@@ -592,7 +592,7 @@ func TestLostRunnerBlocksPrepareAndRelease(t *testing.T) {
 	if err := atomicJSON(filepath.Join(root, "pending.json"), transaction{Generation: "g", IDs: []string{id}}); err != nil {
 		t.Fatal(err)
 	}
-	if ok, err := Prepare(dataDir, "g", nil); err == nil || ok {
+	if ok, _, err := Prepare(dataDir, "g", nil); err == nil || ok {
 		t.Fatal("crashed participant counted as exited")
 	}
 	if err := Release(dataDir, "", false); err == nil {
@@ -678,7 +678,7 @@ func TestRotationOutlivesARunnerThatNeverJoined(t *testing.T) {
 			outside.status.ID = outside.reg.ID
 			outside.gate = func() error { return errors.New("automatic rotation requires a verified tmux pane or Rex terminal") }
 			stop := serveRunner(t, root, outside)
-			if ready, err := Prepare(dataDir, "g", nil); err != nil || ready {
+			if ready, _, err := Prepare(dataDir, "g", nil); err != nil || ready {
 				t.Fatalf("first prepare = %v, %v", ready, err)
 			}
 			joined.mu.Lock()
@@ -704,7 +704,7 @@ func TestRotationOutlivesARunnerThatNeverJoined(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			ready, err := Prepare(dataDir, "g", nil)
+			ready, _, err := Prepare(dataDir, "g", nil)
 			if c.blocks {
 				if err == nil || ready {
 					t.Fatal("participant lost with a running Claude was dropped")
@@ -733,7 +733,7 @@ func TestRotationOutlivesARunnerThatNeverJoined(t *testing.T) {
 			joined.mu.Lock()
 			joined.status.Exited = true
 			joined.mu.Unlock()
-			if ready, err := Prepare(dataDir, "g", nil); err != nil || !ready {
+			if ready, _, err := Prepare(dataDir, "g", nil); err != nil || !ready {
 				t.Fatalf("drain did not finish: %v, %v", ready, err)
 			}
 			if err := Release(dataDir, "g", true); err != nil {
@@ -849,6 +849,34 @@ func TestRestartContinuesOnlyAfterCommittedRelease(t *testing.T) {
 	}
 }
 
+// fakeClaudeRunner returns a runner whose Claude only writes its continuation
+// state and arguments to the returned file, for a session whose transcript is
+// saved or not.
+func fakeClaudeRunner(t *testing.T, session string, saved bool) (*runner, string) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	project := filepath.Join(home, ".claude", "projects", "-work")
+	if err := os.MkdirAll(project, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if saved {
+		if err := os.WriteFile(filepath.Join(project, session+".jsonl"), nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r := testRunner(t)
+	r.status.SessionID = session
+	capture := filepath.Join(r.dir, "child-arguments")
+	binary := filepath.Join(r.dir, "fake-claude")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$QSWITCH_INITIAL_CONTINUATION\" \"$@\" > " + shellQuote(capture) + "\n"
+	if err := os.WriteFile(binary, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	r.options.ClaudeBin = binary
+	return r, capture
+}
+
 // Messages typed during the switch reach the restarted session: as its
 // prompt on their own, after the continuation when there is one, and even in
 // a session that saved nothing. A runner upgrade carries them as well.
@@ -877,26 +905,7 @@ func TestRestartSendsHeldMessages(t *testing.T) {
 			"--resume\n" + session + "\n--\ntyped during the upgrade\n"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			home := t.TempDir()
-			t.Setenv("HOME", home)
-			project := filepath.Join(home, ".claude", "projects", "-work")
-			if err := os.MkdirAll(project, 0700); err != nil {
-				t.Fatal(err)
-			}
-			if c.saved {
-				if err := os.WriteFile(filepath.Join(project, session+".jsonl"), nil, 0600); err != nil {
-					t.Fatal(err)
-				}
-			}
-			r := testRunner(t)
-			r.status.SessionID = session
-			capture := filepath.Join(r.dir, "child-arguments")
-			binary := filepath.Join(r.dir, "fake-claude")
-			script := "#!/bin/sh\nprintf '%s\\n' \"$QSWITCH_INITIAL_CONTINUATION\" \"$@\" > " + shellQuote(capture) + "\n"
-			if err := os.WriteFile(binary, []byte(script), 0700); err != nil {
-				t.Fatal(err)
-			}
-			r.options.ClaudeBin = binary
+			r, capture := fakeClaudeRunner(t, session, c.saved)
 			if c.mode == startRotation {
 				r.status.Exited = true
 				r.status.Generation = "g"
@@ -927,11 +936,79 @@ func TestRestartSendsHeldMessages(t *testing.T) {
 	}
 }
 
-// A message typed during an upgrade's exit reaches the new binary's session.
+// An exit acknowledgement records the unsent text in the input box. A later
+// one from the same exiting session replaces it, and a revoked one drops it:
+// the plugin sends it again with its next acknowledgement.
+func TestExitAcknowledgementCarriesTheDraft(t *testing.T) {
+	r := testRunner(t)
+	r.status.Generation = "g"
+	r.exitRequested = true
+	state := stateFor(r)
+	state.Draft = "half written idea"
+	if got := callRunner(t, r, "/exiting", state); got.Code != 200 {
+		t.Fatal(got.Body.String())
+	}
+	if r.draft != "half written idea" {
+		t.Fatalf("acknowledgement did not record the draft: %q", r.draft)
+	}
+	// Sent while Claude Code shut down: now held, and gone from the box.
+	state.Held, state.Draft = []string{"half written idea"}, ""
+	if got := callRunner(t, r, "/exiting", state); got.Code != 200 || r.draft != "" {
+		t.Fatalf("update after the acknowledgement: %d, draft %q", got.Code, r.draft)
+	}
+	state.Draft = "typed again"
+	callRunner(t, r, "/exiting", state)
+	revoked := stateFor(r)
+	revoked.Ready = false
+	revoked.Reason = "exit acknowledgement cancelled: session changed"
+	callRunner(t, r, "/state", revoked)
+	if r.draft != "" {
+		t.Fatalf("revoked exit kept the draft: %q", r.draft)
+	}
+	bad := stateFor(r)
+	bad.Draft = strings.Repeat("x", maxDraft+1)
+	if got := callRunner(t, r, "/state", bad); got.Code != 400 {
+		t.Fatalf("oversized draft accepted: %d", got.Code)
+	}
+}
+
+// The restarted child is given the draft with every answer until it reports
+// that it put it back in its input box.
+func TestRestartPutsTheDraftBack(t *testing.T) {
+	r, _ := fakeClaudeRunner(t, "0b7c3f9e-5d1a-4c2b-9e8f-1a2b3c4d5e6f", true)
+	r.status.Exited = true
+	r.status.Generation = "g"
+	r.exitAcknowledged, r.released, r.committed = true, true, true
+	r.draft = "half written idea"
+	child, err := r.startLocked(context.Background(), startRotation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := child.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	if r.draft != "" || r.restore != "half written idea" {
+		t.Fatalf("draft %q, restore %q after the restart", r.draft, r.restore)
+	}
+	state := stateFor(r)
+	for range 2 {
+		if a := heartbeat(t, r, state); a.Restore != "half written idea" {
+			t.Fatalf("draft not handed to the new child: %+v", a)
+		}
+	}
+	state.Restored = true
+	if a := heartbeat(t, r, state); a.Restore != "" || r.restore != "" {
+		t.Fatalf("draft handed out again after it was put back: %+v", a)
+	}
+}
+
+// A message typed during an upgrade's exit, and the draft left in the box,
+// reach the new binary's session.
 func TestHandoffCarriesHeldMessages(t *testing.T) {
 	old := testRunner(t)
 	old.status.NeedsContinue = true
 	old.held = []string{"typed during the upgrade"}
+	old.draft = "half written idea"
 	h := old.handoffLocked()
 	h.Dir = filepath.Join(t.TempDir(), old.reg.ID)
 	h.ListenerFD, h.LeaseFD = 3, 4
@@ -946,7 +1023,7 @@ func TestHandoffCarriesHeldMessages(t *testing.T) {
 	}
 	upgraded := testRunner(t)
 	upgraded.inherit(got)
-	if len(upgraded.held) != 1 || upgraded.held[0] != old.held[0] || upgraded.status.SessionID != old.status.SessionID || !upgraded.status.NeedsContinue {
-		t.Fatalf("handoff lost session state: held %q, status %+v", upgraded.held, upgraded.status)
+	if len(upgraded.held) != 1 || upgraded.held[0] != old.held[0] || upgraded.draft != old.draft || upgraded.status.SessionID != old.status.SessionID || !upgraded.status.NeedsContinue {
+		t.Fatalf("handoff lost session state: held %q, draft %q, status %+v", upgraded.held, upgraded.draft, upgraded.status)
 	}
 }

@@ -47,11 +47,18 @@ type sessionState struct {
 	// Held lists messages the user typed while a switch drained the session.
 	// They were not sent; the restarted session receives them.
 	Held []string `json:"held,omitempty"`
+	// Draft is the unsent text in the input box when the exit was
+	// acknowledged; the restarted session gets it back in its box.
+	Draft string `json:"draft,omitempty"`
+	// Restored reports that the child put back the draft it was given.
+	Restored bool `json:"restored,omitempty"`
 }
 
 type action struct {
 	Action     string `json:"action"`
 	Generation string `json:"generation,omitempty"`
+	// Restore is the draft the child should put back in its input box.
+	Restore string `json:"restore,omitempty"`
 }
 
 type runner struct {
@@ -75,6 +82,8 @@ type runner struct {
 	forcedExit       bool      // the runner is ending a child whose acknowledged exit is overdue
 	stopped          []string  // asynchronous work the child still had when it acknowledged its exit
 	held             []string  // messages typed during the switch, for the restarted session's prompt
+	draft            string    // input box text when the exit was acknowledged
+	restore          string    // draft the current child still has to put back
 	forcedAt         time.Time
 	upgrading        bool
 	upgradeAt        time.Time
@@ -322,14 +331,15 @@ func (r *runner) handleState(w http.ResponseWriter, route string, state sessionS
 		http.Error(w, "child unavailable", http.StatusConflict)
 		return
 	}
-	if len(state.SessionID) > 256 || len(state.CWD) > 4096 || len(state.Reason) > 4096 || !validStopped(state.Stopped) || !validHeld(state.Held) || (state.Ready && (state.SessionID == "" || !filepath.IsAbs(state.CWD))) {
+	if len(state.SessionID) > 256 || len(state.CWD) > 4096 || len(state.Reason) > 4096 || !validStopped(state.Stopped) || !validHeld(state.Held) || !validDraft(state.Draft) || (state.Ready && (state.SessionID == "" || !filepath.IsAbs(state.CWD))) {
 		http.Error(w, "invalid session identity", http.StatusBadRequest)
 		return
 	}
 	if route == "/exiting" && r.exitAcknowledged && !r.released && state.Generation != "" && state.Generation == r.status.Generation && state.SessionID == r.status.SessionID {
 		// A message typed after the acknowledgement, while Claude Code shuts
-		// down: only the record the restarted session's prompt comes from changes.
+		// down: only the record the restarted session is built from changes.
 		r.held = append([]string(nil), state.Held...)
+		r.draft = state.Draft
 		writeResponse(w, action{Action: "exit", Generation: r.status.Generation})
 		return
 	}
@@ -347,6 +357,7 @@ func (r *runner) handleState(w http.ResponseWriter, route string, state sessionS
 		r.status.NeedsContinue = state.NeedsContinue
 		r.stopped = append([]string(nil), state.Stopped...)
 		r.held = append([]string(nil), state.Held...)
+		r.draft = state.Draft
 		r.exitAcknowledged = true
 		r.exitAckAt = time.Now()
 		if err := r.persistLocked(); err != nil {
@@ -364,6 +375,7 @@ func (r *runner) handleState(w http.ResponseWriter, route string, state sessionS
 		r.exitRequested = false
 		r.stopped = nil
 		r.held = nil // the plugin still holds them and sends them again
+		r.draft = ""
 		if r.released {
 			r.status.Generation = ""
 			r.released = false
@@ -406,6 +418,12 @@ func (r *runner) handleState(w http.ResponseWriter, route string, state sessionS
 		r.exitRequested = true
 		response = action{Action: "exit", Generation: upgradeGeneration}
 	}
+	// The draft the previous child left goes with every answer until this
+	// child reports it was put back.
+	if state.Restored {
+		r.restore = ""
+	}
+	response.Restore = r.restore
 	// Heartbeats arrive every 750 ms and usually change nothing durable. A
 	// redundant fsync here holds r.mu through disk stalls and times out /status.
 	if r.status != before {
@@ -428,9 +446,11 @@ func (r *runner) handleState(w http.ResponseWriter, route string, state sessionS
 // exitDeadline bounds how long an acknowledged exit may take. Claude Code can
 // hold /exit in its input queue: on novix a session restarted for an upgrade
 // kept the switch's /exit queued from 05:46 to 09:03 while every other
-// session waited. The session was idle when it acknowledged, so ending the
-// process loses nothing the exit itself would have kept.
-const exitDeadline = 60 * time.Second
+// session waited. It also asks before stopping background work the plugin
+// cannot see, such as a monitor or an MCP task. The session was idle when it
+// acknowledged, so ending the process loses nothing the exit itself would
+// have kept, and a normal exit takes about a second.
+const exitDeadline = 15 * time.Second
 
 // exitDeadlineWithWork bounds the exit of a session that acknowledged with
 // asynchronous work still running. Claude Code 2.1.318 does not carry out such
@@ -585,6 +605,8 @@ func (r *runner) startLocked(ctx context.Context, mode startMode) (*exec.Cmd, er
 	r.exitRequested, r.exitAcknowledged, r.released, r.committed = false, false, false, false
 	r.exitAckAt, r.forcedExit, r.forcedAt = time.Time{}, false, time.Time{}
 	r.stopped, r.held = nil, nil
+	// The new child puts the old one's draft back in its input box.
+	r.restore, r.draft = r.draft, ""
 	if err := r.persistLocked(); err != nil {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()

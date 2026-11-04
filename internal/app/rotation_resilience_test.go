@@ -26,7 +26,7 @@ import (
 type fakeRunner struct {
 	mu                                      sync.Mutex
 	ready, exited, needsContinue, exitWorks bool
-	generation                              string
+	generation, reason                      string
 	prepares, releases, resumes             int
 	committed                               bool
 }
@@ -84,7 +84,7 @@ func startFakeRunner(t *testing.T, a *App, n int, s *fakeRunner) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"id": id, "runner_pid": os.Getpid(), "child_pid": 7000 + n, "session_id": fmt.Sprintf("session-%d", n),
-			"cwd": "/work", "ready": s.ready, "exited": s.exited, "needs_continue": s.needsContinue, "generation": s.generation,
+			"cwd": "/work", "ready": s.ready, "exited": s.exited, "needs_continue": s.needsContinue, "generation": s.generation, "reason": s.reason,
 		})
 	}))
 	t.Cleanup(server.Close)
@@ -230,6 +230,39 @@ func TestWaitingSessionContinuesWhileTheAccountHasQuota(t *testing.T) {
 	a.continueInterrupted(adapter.Claude)
 	if n := s.resumeCount(); n != 1 {
 		t.Fatalf("asked to continue while a switch was queued: resumes=%d", n)
+	}
+}
+
+// A switch logs each change in its progress once: whom it waits for and why,
+// and how it ends. On 11-04 nothing was logged, and finding out why a switch
+// waited from 05:17 to 05:50 took reading every session's transcript.
+func TestSwitchProgressIsLoggedOncePerChange(t *testing.T) {
+	a := pendingClaudeSwitch(t)
+	var lines []string
+	a.Log = func(format string, args ...any) { lines = append(lines, fmt.Sprintf(format, args...)) }
+	s := &fakeRunner{reason: "model turn running"}
+	startFakeRunner(t, a, 1, s)
+	for range 3 {
+		if err := applyTick(a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A busy session's reason changes all the time; only who is waited for counts.
+	s.mu.Lock()
+	s.reason = "tool call running"
+	s.mu.Unlock()
+	if err := applyTick(a); err != nil {
+		t.Fatal(err)
+	}
+	if len(lines) != 1 || !strings.Contains(lines[0], "waits for session- (model turn running)") {
+		t.Fatalf("waiting logged as %q", lines)
+	}
+	seedClaudeQuota(t, a, "source", "ok", 27)
+	if err := applyTick(a); err != nil {
+		t.Fatal(err)
+	}
+	if len(lines) != 2 || !strings.Contains(lines[1], "cancelled") || !strings.Contains(lines[1], "the used-up account has quota again") {
+		t.Fatalf("cancellation logged as %q", lines)
 	}
 }
 
