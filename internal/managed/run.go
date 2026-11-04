@@ -44,6 +44,9 @@ type sessionState struct {
 	Generation    string `json:"generation,omitempty"`
 	// Stopped lists the asynchronous work an exit now would stop.
 	Stopped []string `json:"stopped,omitempty"`
+	// Held lists messages the user typed while a switch drained the session.
+	// They were not sent; the restarted session receives them.
+	Held []string `json:"held,omitempty"`
 }
 
 type action struct {
@@ -71,6 +74,7 @@ type runner struct {
 	exitAckAt        time.Time // when the plugin acknowledged the current exit
 	forcedExit       bool      // the runner is ending a child whose acknowledged exit is overdue
 	stopped          []string  // asynchronous work the child still had when it acknowledged its exit
+	held             []string  // messages typed during the switch, for the restarted session's prompt
 	forcedAt         time.Time
 	upgrading        bool
 	upgradeAt        time.Time
@@ -318,8 +322,15 @@ func (r *runner) handleState(w http.ResponseWriter, route string, state sessionS
 		http.Error(w, "child unavailable", http.StatusConflict)
 		return
 	}
-	if len(state.SessionID) > 256 || len(state.CWD) > 4096 || len(state.Reason) > 4096 || !validStopped(state.Stopped) || (state.Ready && (state.SessionID == "" || !filepath.IsAbs(state.CWD))) {
+	if len(state.SessionID) > 256 || len(state.CWD) > 4096 || len(state.Reason) > 4096 || !validStopped(state.Stopped) || !validHeld(state.Held) || (state.Ready && (state.SessionID == "" || !filepath.IsAbs(state.CWD))) {
 		http.Error(w, "invalid session identity", http.StatusBadRequest)
+		return
+	}
+	if route == "/exiting" && r.exitAcknowledged && !r.released && state.Generation != "" && state.Generation == r.status.Generation && state.SessionID == r.status.SessionID {
+		// A message typed after the acknowledgement, while Claude Code shuts
+		// down: only the record the restarted session's prompt comes from changes.
+		r.held = append([]string(nil), state.Held...)
+		writeResponse(w, action{Action: "exit", Generation: r.status.Generation})
 		return
 	}
 	if route == "/exiting" {
@@ -335,6 +346,7 @@ func (r *runner) handleState(w http.ResponseWriter, route string, state sessionS
 		}
 		r.status.NeedsContinue = state.NeedsContinue
 		r.stopped = append([]string(nil), state.Stopped...)
+		r.held = append([]string(nil), state.Held...)
 		r.exitAcknowledged = true
 		r.exitAckAt = time.Now()
 		if err := r.persistLocked(); err != nil {
@@ -351,6 +363,7 @@ func (r *runner) handleState(w http.ResponseWriter, route string, state sessionS
 		r.exitAcknowledged = false
 		r.exitRequested = false
 		r.stopped = nil
+		r.held = nil // the plugin still holds them and sends them again
 		if r.released {
 			r.status.Generation = ""
 			r.released = false
@@ -521,8 +534,15 @@ func (r *runner) startLocked(ctx context.Context, mode startMode) (*exec.Cmd, er
 		}
 	}
 	saved := id != "" && savedSession(id)
-	if prompt != "" && saved {
-		// The prompt below is the continuation; a later resume must not add one.
+	if !saved {
+		prompt = "" // no message was recorded, so there is no work to continue
+	}
+	// Messages typed during the switch were held instead of sent, however it
+	// ended; the restarted session gets them, even one that saved nothing.
+	prompt = withHeld(prompt, r.held)
+	if prompt != "" {
+		// The prompt below runs at once; a later resume must not add a
+		// continuation to it.
 		continuationState = "prompted"
 	}
 	args, err := parseArgs(r.options.Args, id, saved, prompt)
@@ -552,7 +572,7 @@ func (r *runner) startLocked(ctx context.Context, mode startMode) (*exec.Cmd, er
 	r.lastState = time.Time{}
 	r.exitRequested, r.exitAcknowledged, r.released, r.committed = false, false, false, false
 	r.exitAckAt, r.forcedExit, r.forcedAt = time.Time{}, false, time.Time{}
-	r.stopped = nil
+	r.stopped, r.held = nil, nil
 	if err := r.persistLocked(); err != nil {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
@@ -704,8 +724,7 @@ func Run(ctx context.Context, options Options) error {
 	r.reg = reg
 	r.status = StatusInfo{ID: reg.ID, RunnerPID: os.Getpid(), CWD: cwd, Live: true, NeedsContinue: options.InitialContinuation == "continue"}
 	if inherited != nil {
-		r.status.SessionID = inherited.SessionID
-		r.status.NeedsContinue = inherited.NeedsContinue
+		r.inherit(inherited)
 	}
 	if self, err := os.Executable(); err == nil {
 		if resolved, err := filepath.EvalSymlinks(self); err == nil {
@@ -799,7 +818,7 @@ func Run(ctx context.Context, options Options) error {
 			// A child the runner ended for an overdue exit reports the signal.
 			exitOK := childErr == nil || r.forcedExit
 			if r.upgrading && r.exitAcknowledged && r.status.Generation == upgradeGeneration && exitOK {
-				h := handoff{Reg: r.reg, Dir: r.dir, Options: r.options, SessionID: r.status.SessionID, CWD: r.status.CWD, NeedsContinue: r.status.NeedsContinue}
+				h := r.handoffLocked()
 				self := r.self
 				r.mu.Unlock()
 				execErr := errors.New("listener cannot be handed over")

@@ -452,6 +452,50 @@ func TestExitAcknowledgementRecordsStoppedWork(t *testing.T) {
 	}
 }
 
+// Messages typed during a switch are held by the plugin. The acknowledgement
+// hands them over and a later one from the same exiting session updates
+// them. A revoked acknowledgement drops them: the plugin still holds them and
+// sends them with its next acknowledgement.
+func TestExitAcknowledgementRecordsHeldMessages(t *testing.T) {
+	r := testRunner(t)
+	r.status.Generation = "g"
+	r.exitRequested = true
+	state := stateFor(r)
+	state.Held = []string{"why is it stuck"}
+	if got := callRunner(t, r, "/exiting", state); got.Code != 200 {
+		t.Fatal(got.Body.String())
+	}
+	if len(r.held) != 1 || r.held[0] != "why is it stuck" {
+		t.Fatalf("acknowledgement did not record held messages: %q", r.held)
+	}
+	// Typed while Claude Code shuts down.
+	state.Held = []string{"why is it stuck", "second\nline"}
+	if got := callRunner(t, r, "/exiting", state); got.Code != 200 {
+		t.Fatalf("update after the acknowledgement refused: %d %s", got.Code, got.Body.String())
+	}
+	if len(r.held) != 2 || r.held[1] != "second\nline" || !r.exitAcknowledged {
+		t.Fatalf("held = %q, acknowledged = %v", r.held, r.exitAcknowledged)
+	}
+	other := state
+	other.Generation = "h"
+	other.Held = []string{"from another generation"}
+	if got := callRunner(t, r, "/exiting", other); got.Code != 409 || len(r.held) != 2 {
+		t.Fatalf("update for another generation: %d %q", got.Code, r.held)
+	}
+	revoked := stateFor(r)
+	revoked.Ready = false
+	revoked.Reason = "exit acknowledgement cancelled: session changed"
+	callRunner(t, r, "/state", revoked)
+	if r.held != nil {
+		t.Fatalf("revoked exit kept held messages: %q", r.held)
+	}
+	bad := stateFor(r)
+	bad.Held = []string{strings.Repeat("x", maxHeld+1)}
+	if got := callRunner(t, r, "/state", bad); got.Code != 400 {
+		t.Fatalf("oversized held messages accepted: %d", got.Code)
+	}
+}
+
 func TestAbortBeforeAcknowledgementKeepsChild(t *testing.T) {
 	r := testRunner(t)
 	r.status.Generation = "g"
@@ -781,5 +825,107 @@ func TestRestartContinuesOnlyAfterCommittedRelease(t *testing.T) {
 				t.Fatalf("child not registered: %+v %v", reg, err)
 			}
 		})
+	}
+}
+
+// Messages typed during the switch reach the restarted session: as its
+// prompt on their own, after the continuation when there is one, and even in
+// a session that saved nothing. A runner upgrade carries them as well.
+func TestRestartSendsHeldMessages(t *testing.T) {
+	const session = "0b7c3f9e-5d1a-4c2b-9e8f-1a2b3c4d5e6f"
+	for _, c := range []struct {
+		name                      string
+		mode                      startMode
+		saved, committed, waiting bool
+		held                      []string
+		want                      string
+	}{
+		{"idle session", startRotation, true, true, false, []string{"why is it stuck"},
+			"--resume\n" + session + "\n--\nwhy is it stuck\n"},
+		{"interrupted session", startRotation, true, true, true, []string{"also check the logs"},
+			"--\n" + continuation + "\n\nThe user sent this while the account was switching:\n\nalso check the logs\n"},
+		// A cancelled switch does not continue, but still delivers what was typed.
+		{"cancelled switch", startRotation, true, false, true, []string{"first", "second"},
+			"--resume\n" + session + "\n--\nfirst\n\nsecond\n"},
+		// On the command line a leading slash would run a command.
+		{"leading slash", startRotation, true, true, false, []string{"/home is full"},
+			"--\nThe user sent this while the account was switching:\n\n/home is full\n"},
+		{"unsaved session", startRotation, false, true, false, []string{"start here"},
+			"--session-id\n" + session + "\n--\nstart here\n"},
+		{"runner upgrade", startHandoff, true, false, false, []string{"typed during the upgrade"},
+			"--resume\n" + session + "\n--\ntyped during the upgrade\n"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			project := filepath.Join(home, ".claude", "projects", "-work")
+			if err := os.MkdirAll(project, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if c.saved {
+				if err := os.WriteFile(filepath.Join(project, session+".jsonl"), nil, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			r := testRunner(t)
+			r.status.SessionID = session
+			capture := filepath.Join(r.dir, "child-arguments")
+			binary := filepath.Join(r.dir, "fake-claude")
+			script := "#!/bin/sh\nprintf '%s\\n' \"$QSWITCH_INITIAL_CONTINUATION\" \"$@\" > " + shellQuote(capture) + "\n"
+			if err := os.WriteFile(binary, []byte(script), 0700); err != nil {
+				t.Fatal(err)
+			}
+			r.options.ClaudeBin = binary
+			if c.mode == startRotation {
+				r.status.Exited = true
+				r.status.Generation = "g"
+				r.exitAcknowledged, r.released, r.committed = true, true, c.committed
+			}
+			r.status.NeedsContinue = c.waiting
+			r.held = c.held
+			child, err := r.startLocked(context.Background(), c.mode)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := child.Wait(); err != nil {
+				t.Fatal(err)
+			}
+			got, err := os.ReadFile(capture)
+			if err != nil {
+				t.Fatal(err)
+			}
+			args := string(got)
+			// The prompt runs at once, so a later resume must not add a continuation.
+			if !strings.HasPrefix(args, "prompted\n") || !strings.HasSuffix(args, c.want) {
+				t.Fatalf("restart arguments:\n%s", args)
+			}
+			if r.held != nil {
+				t.Fatal("held messages kept for a later restart")
+			}
+		})
+	}
+}
+
+// A message typed during an upgrade's exit reaches the new binary's session.
+func TestHandoffCarriesHeldMessages(t *testing.T) {
+	old := testRunner(t)
+	old.status.NeedsContinue = true
+	old.held = []string{"typed during the upgrade"}
+	h := old.handoffLocked()
+	h.Dir = filepath.Join(t.TempDir(), old.reg.ID)
+	h.ListenerFD, h.LeaseFD = 3, 4
+	b, err := json.Marshal(h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(handoffEnv, string(b))
+	got, err := takeHandoff()
+	if err != nil {
+		t.Fatal(err)
+	}
+	upgraded := testRunner(t)
+	upgraded.inherit(got)
+	if len(upgraded.held) != 1 || upgraded.held[0] != old.held[0] || upgraded.status.SessionID != old.status.SessionID || !upgraded.status.NeedsContinue {
+		t.Fatalf("handoff lost session state: held %q, status %+v", upgraded.held, upgraded.status)
 	}
 }

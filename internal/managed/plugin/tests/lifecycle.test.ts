@@ -4,7 +4,11 @@ import type { On } from 'claude-code';
 
 function setup(on: On, initial = 'idle') {
   const clock = mock.clock(on);
-  const control = { action: 'run', generation: '', draft: '', posted: 0, agents: [] as { id: string; description: string; type: string; status: 'running' | 'completed' }[] };
+  const control = {
+    action: 'run', generation: '', draft: '', posted: 0,
+    agents: [] as { id: string; description: string; type: string; status: 'running' | 'completed' }[],
+    requests: [] as { path: string; body: Record<string, unknown> }[],
+  };
   mock.env(on, {
     QSWITCH_CONTROL_URL: 'http://127.0.0.1:43210',
     QSWITCH_CONTROL_TOKEN: 'test-only-token',
@@ -20,8 +24,9 @@ function setup(on: On, initial = 'idle') {
     return { isFilled: true, text: control.draft, cursor: control.draft.length };
   });
   on('command.register', ($, e) => ({ value: { command: e.name } }));
-  on('http.fetch', () => {
+  on('http.fetch', ($, e) => {
     control.posted += 1;
+    control.requests.push({ path: e.url.slice(e.url.lastIndexOf('/')), body: JSON.parse(e.init?.body ?? '{}') });
     return { value: {
       status: 200, ok: true, headers: {},
       text: JSON.stringify({ action: control.action, generation: control.generation }),
@@ -159,7 +164,9 @@ test('whitespace-only input does not block rate-limit continuation', async ($, o
   expect(await status($)).toMatchObject({ ready: true, needs_continue: true });
 });
 
-test('a switch waits for an idle session\'s background task at most ten minutes', async ($, on) => {
+// Ten simulated minutes run about 800 heartbeats, which can take longer than
+// the default five seconds.
+test('a switch waits for an idle session\'s background task at most ten minutes', { timeoutMs: 30000 }, async ($, on) => {
   const { clock, control } = setup(on);
   on('tool.call', { tool: 'Bash' }, () => ({ result: {
     stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'bg1',
@@ -195,21 +202,62 @@ test('a text draft still blocks rate-limit continuation', async ($, on) => {
   expect(await status($)).toMatchObject({ ready: true, needs_continue: true });
 });
 
-test('prepare drops user submission, restores text, and blocks readiness until release', async ($, on) => {
+// On 11-04 a message typed during a switch went back to the input box and
+// blocked readiness until a release that only the finished switch could
+// bring; the switch waited until the old account recovered.
+test('a message typed during preparation is held without blocking the switch and sent on release', async ($, on) => {
   const { clock, control } = setup(on);
+  const submitted: { text: string; origin: unknown }[] = [];
+  on('prompt.submit', ($, e) => { submitted.push({ text: e.text, origin: e.origin }); return { text: e.text }; });
   control.action = 'prepare';
   control.generation = 'generation-1';
   await start($);
-  const result = await $.prompt.submit({ text: 'do not lose this', wait: false, origin: { kind: 'composer' } });
-  expect(result.drop).toContain('not sent');
-  expect(control.draft).toBe('do not lose this');
-  expect((await status($)).ready).toBe(false);
+  const result = await $.prompt.submit({ text: 'why is it stuck', wait: false, origin: { kind: 'composer' } });
+  expect(result.drop).toContain('held');
+  expect(control.draft).toBe('');
+  expect(submitted).toHaveLength(0);
+  expect(await status($)).toMatchObject({ ready: true, phase: 'prepare', held_messages: 1 });
+  // Released without a restart: sent now, as the user's own message.
   control.action = 'run';
   control.generation = '';
   await clock.advance(750);
-  expect((await status($)).ready).toBe(false);
-  control.draft = '';
-  expect((await status($)).ready).toBe(true);
+  expect(submitted).toEqual([{ text: 'why is it stuck', origin: { kind: 'plugin', name: 'qswitch-managed', asUser: true } }]);
+  expect((await status($)).held_messages).toBe(0);
+});
+
+test('an exit hands held messages to the runner, and one typed after it updates the record', async ($, on) => {
+  const { clock, control } = setup(on);
+  let exits = 0;
+  on('command.run', { command: 'exit' }, () => { exits += 1; return { text: '' }; });
+  control.action = 'prepare';
+  control.generation = 'generation-1';
+  await start($);
+  await $.prompt.submit({ text: 'first', wait: false, origin: { kind: 'composer' } });
+  control.action = 'exit';
+  await clock.advance(750);
+  expect(exits).toBe(1);
+  const acks = control.requests.filter(request => request.path === '/exiting');
+  expect(acks).toHaveLength(1);
+  expect(acks[0]!.body).toMatchObject({ generation: 'generation-1', held: ['first'] });
+  // Claude Code is shutting down: no heartbeat, only the record is updated.
+  const before = control.requests.length;
+  const result = await $.prompt.submit({ text: 'second', wait: false, origin: { kind: 'bridge' } });
+  expect(result.drop).toContain('held');
+  const later = control.requests.slice(before);
+  expect(later.map(request => request.path)).toEqual(['/exiting']);
+  expect(later[0]!.body).toMatchObject({ generation: 'generation-1', ready: true, held: ['first', 'second'] });
+});
+
+test('a message too long to hold goes back to the input box', async ($, on) => {
+  const { control } = setup(on);
+  control.action = 'prepare';
+  control.generation = 'generation-1';
+  await start($);
+  const text = 'x'.repeat(6001);
+  const result = await $.prompt.submit({ text, wait: false, origin: { kind: 'composer' } });
+  expect(result.drop).toContain('back in the input box');
+  expect(control.draft).toBe(text);
+  expect(await status($)).toMatchObject({ ready: false, reason: 'text draft is present', held_messages: 0 });
 });
 
 test('accepted queued text still blocks rate-limit continuation until its turn finishes', async ($, on) => {

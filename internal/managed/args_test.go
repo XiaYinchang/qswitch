@@ -24,13 +24,19 @@ func TestResumePreservesPermissionsWithoutReplayingPrompt(t *testing.T) {
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("resume arguments: %q, want %q", got, want)
 		}
-		// A session that saved nothing cannot be resumed; it starts again
-		// under its ID with nothing to continue.
-		got, err = parseArgs(original, "exact-session", false, prompt)
+	}
+	// A session that saved nothing cannot be resumed; it starts again under
+	// its ID. It has nothing to continue, so its only prompt is a message the
+	// user typed during the switch.
+	for _, prompt := range []string{"", "typed during the switch"} {
+		got, err := parseArgs(original, "exact-session", false, prompt)
 		if err != nil {
 			t.Fatal(err)
 		}
-		want = []string{"--permission-mode", "plan", "--model=sonnet", "--session-id", "exact-session"}
+		want := []string{"--permission-mode", "plan", "--model=sonnet", "--session-id", "exact-session"}
+		if prompt != "" {
+			want = append(want, "--", prompt)
+		}
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("unsaved session arguments: %q, want %q", got, want)
 		}

@@ -82,8 +82,12 @@ func parseArgs(args []string, resume string, saved bool, prompt string) ([]strin
 		}
 	}
 	if resume != "" && !saved {
-		// No message was recorded, so there is no work to continue either.
+		// Started again under its ID. The only prompt is a message typed
+		// during the switch; nothing was recorded to continue.
 		out = append(out, "--session-id", resume)
+		if prompt != "" {
+			out = append(out, "--", prompt)
+		}
 	} else if resume != "" {
 		out = append(out, "--resume", resume)
 		if prompt != "" {
@@ -107,6 +111,37 @@ func parseArgs(args []string, resume string, saved bool, prompt string) ([]strin
 func stoppedNote(items []string) string {
 	return "Switching accounts restarted this session and stopped unfinished background work, which will not report back: " +
 		strings.Join(items, "; ") + ". Check what each left behind, including anything it started on other hosts, before starting it again, then continue the work."
+}
+
+// maxHeld bounds the held messages in bytes. The plugin holds at most 6000
+// UTF-16 code units, which is under 18 KiB of UTF-8.
+const maxHeld = 32 << 10
+
+// validHeld accepts messages the plugin held: text a command line can carry.
+func validHeld(items []string) bool {
+	n := 0
+	for _, item := range items {
+		n += len(item)
+		if item == "" || strings.ContainsRune(item, 0) {
+			return false
+		}
+	}
+	return n <= maxHeld
+}
+
+// withHeld adds the messages the user typed while a switch drained the
+// session. They were held instead of sent, so the restarted session gets them
+// as its prompt: on their own as typed, or after the automatic note.
+func withHeld(prompt string, held []string) string {
+	text := strings.TrimSpace(strings.Join(held, "\n\n"))
+	if text == "" {
+		return prompt
+	}
+	if prompt == "" && !strings.HasPrefix(text, "/") {
+		return text
+	}
+	// A leading slash on the command line would run a command instead.
+	return strings.TrimSpace(prompt + "\n\nThe user sent this while the account was switching:\n\n" + text)
 }
 
 // validStopped bounds the plugin's list of unfinished work.

@@ -85,6 +85,20 @@ type handoff struct {
 	SessionID     string       `json:"session_id"`
 	CWD           string       `json:"cwd"`
 	NeedsContinue bool         `json:"needs_continue"`
+	// Held carries messages typed during the upgrade's exit to the new binary.
+	Held []string `json:"held,omitempty"`
+}
+
+// handoffLocked is what the new binary needs to continue this session.
+func (r *runner) handoffLocked() handoff {
+	return handoff{Reg: r.reg, Dir: r.dir, Options: r.options, SessionID: r.status.SessionID, CWD: r.status.CWD, NeedsContinue: r.status.NeedsContinue, Held: r.held}
+}
+
+// inherit takes over the session a previous binary handed off.
+func (r *runner) inherit(h *handoff) {
+	r.status.SessionID = h.SessionID
+	r.status.NeedsContinue = h.NeedsContinue
+	r.held = h.Held
 }
 
 // execUpgrade replaces this process with the new qswitch binary. On success

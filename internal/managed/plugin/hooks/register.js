@@ -8,6 +8,10 @@ const QUEUE_SETTLE_MS = 5000;
 const ASYNC_WAIT_MS = 10 * 60 * 1000;
 // Same text the runner passes on restart after an account switch.
 const CONTINUATION = 'Continue the work interrupted by the account usage limit from the last unfinished step. Do not repeat work already completed.';
+// Input typed while a switch drains the sessions is held up to this many
+// characters, which keeps the exit acknowledgement within the runner's limit.
+const HELD_LIMIT = 6000;
+const HELD_NOTICE = 'qswitch is switching accounts. This message is held and will be sent as soon as the switch finishes.';
   let url = '';
   let token = '';
   let phase = 'run';
@@ -22,7 +26,8 @@ const CONTINUATION = 'Continue the work interrupted by the account usage limit f
   // even when needs_continue was already true from an earlier interruption.
   let limitHits = 0;
   let unknown = '';
-  let blockedSubmission = false;
+  // Messages typed during a switch, in order, not yet sent.
+  let held = [];
   let revision = 0;
   let polling = false;
   let requestPending = false;
@@ -89,7 +94,6 @@ const CONTINUATION = 'Continue the work interrupted by the account usage limit f
     if (!initialized) reason = 'initializing';
     else if (awaitingExit || exitOverdue) reason = 'waiting for Claude Code to exit';
     else if (unknown) reason = unknown;
-    else if (blockedSubmission) reason = 'submission attempted during account switch; submit again after release';
     else if (turns.size) reason = 'model turn running';
     else if (tools.size) reason = 'tool call running';
     else if (queued.length) reason = 'submitted prompt has not started a known turn';
@@ -127,6 +131,56 @@ const CONTINUATION = 'Continue the work interrupted by the account usage limit f
     return items.slice(0, 20).map(item => String(item).slice(0, 200));
   }
 
+  async function restoreToBox($, text) {
+    try {
+      const filled = await $.prompt.fill({ text, mode: 'append' });
+      if (!filled.isFilled) unknown = 'held submission could not be restored to the text input';
+    } catch {
+      unknown = 'held submission could not be restored to the text input';
+    }
+    changed();
+  }
+
+  // Holds input typed while a switch drains the sessions, so the switch never
+  // waits for the user: the runner sends it as the restarted session's prompt,
+  // and a preparation released without a restart sends it here. Returning it
+  // to the text box and blocking readiness until the release waited for a
+  // release that only the finished switch could bring: on 11-04 a message
+  // typed at 05:27 kept the switch queued at 05:17 waiting until the old
+  // account recovered at 05:50.
+  async function hold($, input) {
+    const text = String(input ?? '').replace(/\u0000/g, '');
+    if (!text.trim()) return { drop: HELD_NOTICE };
+    if (held.reduce((n, item) => n + item.length, 0) + text.length > HELD_LIMIT) {
+      // Too long to carry over. In the text box it holds the switch until it
+      // is sent or cleared, as any draft does.
+      await restoreToBox($, text);
+      return { drop: 'qswitch is switching accounts and cannot hold a message this long. It is back in the input box: send it after the switch, or clear it to let the switch go ahead.' };
+    }
+    held.push(text);
+    changed();
+    // After the exit acknowledgement only the runner's record of it may be
+    // updated: a heartbeat would revoke the acknowledgement.
+    if (exiting && !requestPending) {
+      try { await request($, '/exiting', { ...lastState, generation, held }); } catch {}
+    }
+    return { drop: HELD_NOTICE };
+  }
+
+  // Sends what was held during a preparation that ended without a restart, as
+  // the user's own message. Text that cannot be sent goes back to the box.
+  async function sendHeld($) {
+    const text = held.join('\n\n');
+    held = [];
+    if (!text.trim()) return;
+    changed();
+    try {
+      await $.prompt.submit({ text, asUser: true, wait: false });
+    } catch {
+      await restoreToBox($, text);
+    }
+  }
+
   async function poll($) {
     if (polling || exiting || !url || !token) return;
     polling = true;
@@ -148,11 +202,11 @@ const CONTINUATION = 'Continue the work interrupted by the account usage limit f
         if (phase !== 'run') {
           phase = 'run';
           generation = '';
-          blockedSubmission = false;
           asyncTimer?.cancel();
           asyncTimer = undefined;
           asyncWaitOver = false;
           changed();
+          await sendHeld($);
         }
         return;
       }
@@ -173,7 +227,7 @@ const CONTINUATION = 'Continue the work interrupted by the account usage limit f
       const candidate = await snapshot($);
       if (!candidate.ready) { lastState = candidate; return; }
       const candidateRevision = revision;
-      const acknowledged = await request($, '/exiting', { ...candidate, generation: preparedGeneration });
+      const acknowledged = await request($, '/exiting', { ...candidate, generation: preparedGeneration, held });
       if (acknowledged.action !== 'exit' || acknowledged.generation !== preparedGeneration) return;
       const finalState = await snapshot($);
       lastState = finalState;
@@ -288,20 +342,12 @@ export function register(on) {
 
   on('prompt.submit', async ($, e, next) => {
     changed();
-    // Typed input is held back and restored to the text box. Automatic
-    // deliveries (task notifications, scheduled prompts) cannot be restored,
-    // so they are admitted: the queued prompt and its turn block readiness
-    // until they finish, and the drain resumes afterwards.
+    // Typed input is held for after the switch. Automatic deliveries (task
+    // notifications, scheduled prompts) cannot be held, so they are admitted:
+    // the queued prompt and its turn block readiness until they finish, and
+    // the drain resumes afterwards.
     if (phase !== 'run' && (e.origin.kind === 'composer' || e.origin.kind === 'bridge')) {
-      blockedSubmission = true;
-      const message = 'qswitch is preparing an account switch. This submission was not sent. Submit it again after preparation is released.';
-      try {
-        const filled = await $.prompt.fill({ text: e.text, mode: 'append' });
-        if (!filled.isFilled) unknown = 'blocked submission could not be restored to the text input';
-      } catch {
-        unknown = 'blocked submission could not be restored to the text input';
-      }
-      return { drop: message };
+      return hold($, e.text);
     }
     const submission = {};
     // Typed prompts queue even with turnId; machine notifications may instead
@@ -326,7 +372,6 @@ export function register(on) {
     }
   }).catch(($, e, next) => {
     unknown = 'prompt admission hook failed';
-    blockedSubmission = true;
     changed();
     return next.called ? next(e) : { drop: 'qswitch could not safely admit this prompt; submit again after checking /qswitch-status.' };
   });
@@ -463,7 +508,7 @@ export function register(on) {
     catch (error) { lastState = { ...lastState, ready: false, reason: String(error) }; }
     return { text: JSON.stringify({
       ...lastState, phase, generation, exit_overdue: exitOverdue, active_turns: turns.size, active_tools: tools.size,
-      queued_submissions: queued.length, uncertain_tasks: [...uncertainTasks],
+      queued_submissions: queued.length, held_messages: held.length, uncertain_tasks: [...uncertainTasks],
       background_tasks: background, session_crons: crons,
       ui_contract: 'submitted transcript preserved; unsubmitted attachments and temporary UI are not guaranteed',
     }, null, 2) };

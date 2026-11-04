@@ -81,7 +81,7 @@ qswitch run claude --resume-continuation=continue --dangerously-skip-permissions
 - **只有 `qswitch run claude` 在 tmux 或 Rex 终端里启动的会话参与受控切号。** 普通非受管 `claude` 不阻断自动或手动切号，qswitch 不等待、不退出、不杀、不恢复它；但共享的 `~/.claude/.credentials.json` 与 `~/.claude.json` 仍会更新，运行中的非受管会话内存账号不保证改变。在其他终端里启动的受管会话不能参与切号，排队的切号会一直等它退出。
 - **可用的启动参数**：`--model`、`--fallback-model`、`--effort`、`--permission-mode`、`--dangerously-skip-permissions`、`--allowedTools`/`--disallowedTools`、`--tools`、`--agent`/`--agents`、`--system-prompt` 系列、`--max-budget-usd`、`--name`、`--verbose`、`--resume`/`--continue`。`--print`、`--settings`、`--plugin-dir` 等其他参数和子命令会被拒绝。
 - **不能设置的环境变量**：`ANTHROPIC_API_KEY`、`ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_BASE_URL`、`CLAUDE_CONFIG_DIR`、`CLAUDE_CODE_OAUTH_TOKEN`、`CLAUDE_CODE_USE_BEDROCK`/`VERTEX`/`FOUNDRY` 等，会被拒绝启动。
-- **切号只在受管会话空闲时进行**：进行中的 turn、活动前台工具、queued prompt 或输入框里的草稿都会让切号等待。`rate_limit` 中断后的后台任务、agent、cron 不再阻断，但切号重启可能中断这些异步工作，恢复后应检查未完成的副作用工作。切号准备期间你提交的消息会退回输入框，切号完成后再发一次即可。
+- **切号只在受管会话空闲时进行**：进行中的 turn、活动前台工具、queued prompt 或输入框里的草稿都会让切号等待。`rate_limit` 中断后的后台任务、agent、cron 不再阻断，但切号重启可能中断这些异步工作，恢复后应检查未完成的副作用工作。切号准备期间你发出的消息不会让切号等待：qswitch 先暂存，切号完成后作为重启会话的第一条消息自动发出，会话需要续接时接在续接指令之后；切号撤销时在原会话里原样发出。超过 6000 字的消息退回输入框，留在输入框里的文字仍会让切号等待。
 - **所有号都用完时**会等最早重置的那个号；重置后自动切过去并让中断的会话继续。
 - **出现异常**时，`qswitch sessions` 的 `recovery=` 会给出原因和恢复命令；确认旧进程已退出后按提示手动恢复。
 
