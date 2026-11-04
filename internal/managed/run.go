@@ -432,18 +432,30 @@ func (r *runner) handleState(w http.ResponseWriter, route string, state sessionS
 // process loses nothing the exit itself would have kept.
 const exitDeadline = 60 * time.Second
 
+// exitDeadlineWithWork bounds the exit of a session that acknowledged with
+// asynchronous work still running. Claude Code 2.1.318 does not carry out such
+// an /exit: it asks "Background work is running" and waits for an answer that
+// nobody gives. On 11-04 08:33 a session with a scheduled task sat in that
+// prompt for the whole exitDeadline while the four others waited exited, and
+// the switch took 71 seconds.
+const exitDeadlineWithWork = 5 * time.Second
+
 // exitKillGrace is how long a child may take to end after SIGTERM.
 const exitKillGrace = 10 * time.Second
 
 // overdueExitSignalLocked returns the signal for a child whose acknowledged
-// exit is overdue: SIGTERM once exitDeadline has passed, then SIGKILL each
+// exit is overdue: SIGTERM once its deadline has passed, then SIGKILL each
 // exitKillGrace while it still runs. It returns 0 otherwise.
 func (r *runner) overdueExitSignalLocked(now time.Time) syscall.Signal {
 	if !r.exitAcknowledged || r.status.Exited || r.exitAckAt.IsZero() {
 		return 0
 	}
 	if !r.forcedExit {
-		if now.Sub(r.exitAckAt) < exitDeadline {
+		deadline := exitDeadline
+		if len(r.stopped) > 0 {
+			deadline = exitDeadlineWithWork
+		}
+		if now.Sub(r.exitAckAt) < deadline {
 			return 0
 		}
 		r.forcedExit, r.forcedAt = true, now

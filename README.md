@@ -110,7 +110,7 @@ qswitch run claude --resume-continuation=continue --dangerously-skip-permissions
   qswitch sessions --json
   ```
 
-  daemon 确认当前配额耗尽且候选号可用后，等待所有受管会话就绪，再经官方 `/exit` 退出。会话确认退出后 60 秒仍未结束（例如 Claude Code 把 `/exit` 压在输入队列里），runner 先发 SIGTERM、10 秒后再发 SIGKILL 结束它，按已确认的退出处理；确认时会话已空闲，结束进程不会丢掉退出本来会保留的内容。某个 runner 一时没有应答控制请求时，切号保留到下一轮重试，不取消，以免已经退出的会话被不带续接地重启。所有子进程退出确认后才写凭据，并在原目录用原会话 ID 恢复（还没发过消息的新会话没有记录可恢复，用同一 ID 重新开始）；仅因 `rate_limit` 中断的会话收到一次继续工作的指令，已完成或用户取消的会话保持等待输入。初次接管历史会话必须显式指定状态：`qswitch run claude --resume-continuation=idle --resume <session-id>`，或对额度中断会话使用 `--resume-continuation=continue`。`continue` 会话的续接时机见下一段。
+  daemon 确认当前配额耗尽且候选号可用后，等待所有受管会话就绪，再经官方 `/exit` 退出。会话确认退出后 60 秒仍未结束（例如 Claude Code 把 `/exit` 压在输入队列里），runner 先发 SIGTERM、10 秒后再发 SIGKILL 结束它，按已确认的退出处理。确认退出时还有后台任务、agent 或定时任务的会话，这个时限是 5 秒：Claude Code 会先弹出「Background work is running」确认框，没人回答，`/exit` 不会执行。确认时会话已空闲，结束进程不会丢掉退出本来会保留的内容。某个 runner 一时没有应答控制请求时，切号保留到下一轮重试，不取消，以免已经退出的会话被不带续接地重启。所有子进程退出确认后才写凭据，并在原目录用原会话 ID 恢复（还没发过消息的新会话没有记录可恢复，用同一 ID 重新开始）；仅因 `rate_limit` 中断的会话收到一次继续工作的指令，已完成或用户取消的会话保持等待输入。初次接管历史会话必须显式指定状态：`qswitch run claude --resume-continuation=idle --resume <session-id>`，或对额度中断会话使用 `--resume-continuation=continue`。`continue` 会话的续接时机见下一段。
 
   受管会话一旦因 `rate_limit` 中断，daemon 在约 5 秒内用官方接口复查当前号，不等下一次定时查询；确认耗尽才排队切号，查询退避仍然生效。已确认耗尽的号不再因后续会话中断重复查询，直接排队切号，避免同一账号短时间内请求过多被限流。耗尽号（当前号或闲置号）过了接口给出的重置时间，daemon 在 10 秒余量后复查一次，不受重置前那次查询的间隔限制，查询退避仍然生效。若当前号自己恢复、没有发生切号：会话一直开着时由 Claude Code 自带的自动续接继续；会话在等待期间重启过（切号取消、runner 升级或手动以 `continue` 接管都会让 Claude Code 取消自带续接）时，qswitch 补发一次续接指令。daemon 每 5 秒检查一次：只要当前号有额度、又没有切号排队，就让这类会话在空闲且无草稿时继续，不依赖恰好看到号恢复的那一刻，daemon 重启或会话晚于恢复才重启都不会漏掉。
 

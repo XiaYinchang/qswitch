@@ -424,6 +424,27 @@ func TestOverdueAcknowledgedExitIsEnded(t *testing.T) {
 	}
 }
 
+// Claude Code asks before an /exit stops background work, and nobody answers.
+// An exit acknowledged with unfinished work is ended after a few seconds
+// instead of a minute, while the other sessions wait exited.
+func TestExitWithUnfinishedWorkIsEndedSoon(t *testing.T) {
+	r := testRunner(t)
+	r.status.Generation = "g"
+	r.exitRequested = true
+	state := stateFor(r)
+	state.Stopped = []string{"scheduled task 47ccd50b"}
+	if got := callRunner(t, r, "/exiting", state); got.Code != 200 {
+		t.Fatal(got.Body.String())
+	}
+	at := r.exitAckAt
+	if got := r.overdueExitSignalLocked(at.Add(exitDeadlineWithWork - time.Second)); got != 0 {
+		t.Fatalf("ended before its deadline: %v", got)
+	}
+	if got := r.overdueExitSignalLocked(at.Add(exitDeadlineWithWork)); got != syscall.SIGTERM {
+		t.Fatalf("exit with unfinished work not ended after %s: %v", exitDeadlineWithWork, got)
+	}
+}
+
 // The acknowledgement records the work an exit stops, for the continuation
 // after the restart. A revoked acknowledgement stopped nothing.
 func TestExitAcknowledgementRecordsStoppedWork(t *testing.T) {
