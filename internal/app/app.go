@@ -94,7 +94,7 @@ func Open(userHome, dataDir string, keys secutil.KeyProvider, bins []string, n n
 		if secutil.InTest() {
 			keys = &secutil.Memory{}
 		} else if runtime.GOOS == "darwin" {
-			keys = secutil.Darwin{}
+			keys = &secutil.Cached{Provider: secutil.Darwin{}}
 		} else {
 			keys = secutil.File{Path: filepath.Join(dataDir, "wrap.key")}
 		}

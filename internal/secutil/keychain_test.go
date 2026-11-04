@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The fake runs from a temporary directory and never invokes macOS security.
@@ -175,4 +176,25 @@ func TestDarwinCreateFailureDoesNotExposeOutput(t *testing.T) {
 		t.Error("create failure exposed command output")
 	}
 	assertSecurityCalls(t, dir, "find-generic-password", "add-generic-password")
+}
+
+func TestDarwinTimeoutStopsWaitingForSecurity(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "security")
+	// Stands in for security waiting on a locked keychain's password dialog.
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexec sleep 30\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	d := Darwin{Security: bin, Timeout: 200 * time.Millisecond}
+	start := time.Now()
+	_, err := d.GetOrCreate(nil)
+	if !errors.Is(err, ErrSecurityTimeout) {
+		t.Fatalf("err = %v, want ErrSecurityTimeout", err)
+	}
+	if !strings.Contains(err.Error(), "keychain find") {
+		t.Error("timeout lacks keychain context")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("returned after %s; the timeout did not stop the wait", elapsed)
+	}
 }
