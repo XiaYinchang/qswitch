@@ -27,8 +27,11 @@ type fakeRunner struct {
 	mu                                      sync.Mutex
 	ready, exited, needsContinue, exitWorks bool
 	generation, reason                      string
-	prepares, releases, resumes             int
-	committed                               bool
+	// busyOnPrepare reports the session busy to /prepare only, as one that
+	// got busy right after a status check.
+	busyOnPrepare               bool
+	prepares, releases, resumes int
+	committed                   bool
 }
 
 func startFakeRunner(t *testing.T, a *App, n int, s *fakeRunner) {
@@ -65,10 +68,12 @@ func startFakeRunner(t *testing.T, a *App, n int, s *fakeRunner) {
 		if r.Method == http.MethodPost {
 			_ = json.NewDecoder(r.Body).Decode(&c)
 		}
+		ready := s.ready
 		switch r.URL.Path {
 		case "/prepare":
 			s.prepares++
 			s.generation = c.Generation
+			ready = ready && !s.busyOnPrepare
 		case "/exit":
 			if s.exitWorks {
 				s.exited = true
@@ -84,7 +89,7 @@ func startFakeRunner(t *testing.T, a *App, n int, s *fakeRunner) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"id": id, "runner_pid": os.Getpid(), "child_pid": 7000 + n, "session_id": fmt.Sprintf("session-%d", n),
-			"cwd": "/work", "ready": s.ready, "exited": s.exited, "needs_continue": s.needsContinue, "generation": s.generation, "reason": s.reason,
+			"cwd": "/work", "ready": ready, "exited": s.exited, "needs_continue": s.needsContinue, "generation": s.generation, "reason": s.reason,
 		})
 	}))
 	t.Cleanup(server.Close)

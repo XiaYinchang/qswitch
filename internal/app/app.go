@@ -1155,7 +1155,7 @@ func (a *App) continueInterrupted(tool adapter.Tool) {
 	if tool != adapter.Claude || !a.cfgSnapshot().ToolEnabled(string(tool)) {
 		return
 	}
-	if pend, err := a.State.GetPending(string(tool)); err != nil || pend.ToID != "" {
+	if pend, err := a.State.GetPending(string(tool)); err != nil || (pend.ToID != "" && pend.Reason != reasonExpiring) {
 		return // the switch restarts these sessions with their continuation
 	}
 	p, err := a.State.GetPointer(string(tool))
@@ -2066,6 +2066,24 @@ func (a *App) TryApply(tool adapter.Tool, killCLI bool) (retErr error) {
 			return a.cancelSwitch(tool, pend, "the next account has no quota left")
 		}
 	}
+	if pend.Reason == reasonExpiring {
+		if why, err := a.expiringStillDue(tool, pend); err != nil || why != "" {
+			if err != nil {
+				return err
+			}
+			return a.cancelSwitch(tool, pend, why)
+		}
+		// Nothing is used up, so nothing waits for this switch. It starts only
+		// when every session is idle, and never holds a turn or a message.
+		busy, err := busySessions(a.DataDir)
+		if err != nil {
+			return err
+		}
+		if len(busy) > 0 {
+			a.logSwitch(tool, pendingKey(pend)+" idle", "switch from %s to %s waits until every session is idle", a.accountName(tool, pend.FromID), a.accountName(tool, pend.ToID))
+			return nil
+		}
+	}
 	ad := a.Adapters[tool]
 	auto, err := ad.AutoBlockers(a.UserHome)
 	if err != nil {
@@ -2127,6 +2145,23 @@ func (a *App) TryApply(tool adapter.Tool, killCLI bool) (retErr error) {
 			return a.cancelSwitch(tool, pend, "the latest quota check no longer supports it")
 		}
 	}
+	if pend.Reason == reasonExpiring {
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		defer cancel()
+		to, err := a.automaticQuotaLocked(ctx, tool, pend.ToID)
+		if err != nil {
+			return err
+		}
+		if to.Class != quota.OK && to.Class != quota.Soft {
+			return a.cancelSwitch(tool, pend, "the next account has no quota left")
+		}
+		if why, err := a.expiringStillDue(tool, pend); err != nil || why != "" {
+			if err != nil {
+				return err
+			}
+			return a.cancelSwitch(tool, pend, why)
+		}
+	}
 	if tool == adapter.Claude {
 		managedGeneration = fmt.Sprintf("%s:%s:%d", pend.FromID, pend.ToID, pend.QueuedAt)
 		ready, waiting, err := managed.Prepare(a.DataDir, managedGeneration, auto.ManualPIDs())
@@ -2137,6 +2172,11 @@ func (a *App) TryApply(tool adapter.Tool, killCLI bool) (retErr error) {
 			return err
 		}
 		if !ready {
+			if pend.Reason == reasonExpiring && !anyExiting(waiting) {
+				// A session got busy after the idle check. Release it rather
+				// than hold its input, and try again when every one is idle.
+				return nil
+			}
 			a.logWaiting(tool, pend, waiting)
 			releaseManaged = false
 			return nil
@@ -2387,6 +2427,7 @@ func (a *App) runToolWorker(ctx context.Context, tool adapter.Tool) {
 			a.KeepAlive(ctx, tool)
 			a.ProbeHTTP(ctx, tool, false)
 			a.ProbeRecovered(ctx, tool, false)
+			a.considerExpiring(tool)
 		case <-tApply.C:
 			if tool == adapter.Claude && managed.TakeLimitHit(a.DataDir) {
 				a.ProbeLimitHit(ctx, tool)
