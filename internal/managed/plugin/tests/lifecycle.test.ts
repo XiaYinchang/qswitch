@@ -181,9 +181,9 @@ test('whitespace-only input does not block rate-limit continuation', async ($, o
   expect(await status($)).toMatchObject({ ready: true, needs_continue: true });
 });
 
-// Ten simulated minutes run about 800 heartbeats, which can take longer than
-// the default five seconds.
-test('a switch waits for an idle session\'s background task at most ten minutes', { timeoutMs: 30000 }, async ($, on) => {
+// Three simulated minutes run about 240 heartbeats, which can take a while on
+// a busy machine.
+test('a switch waits for an idle session\'s background task at most three minutes', { timeoutMs: 30000 }, async ($, on) => {
   const { clock, control } = setup(on);
   on('tool.call', { tool: 'Bash' }, () => ({ result: {
     stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'bg1',
@@ -196,7 +196,7 @@ test('a switch waits for an idle session\'s background task at most ten minutes'
   control.generation = 'generation-1';
   await clock.advance(750);
   expect(await status($)).toMatchObject({ ready: false, reason: 'known background tasks remain', phase: 'prepare' });
-  await clock.advance(9 * 60 * 1000);
+  await clock.advance(2 * 60 * 1000);
   expect((await status($)).ready).toBe(false);
   await clock.advance(60 * 1000);
   expect(await status($)).toMatchObject({

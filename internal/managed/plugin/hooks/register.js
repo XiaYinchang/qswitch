@@ -2,10 +2,12 @@
 // preserved: prompt.read() does not expose attachments or every temporary UI.
 const EXIT_GRACE_MS = 30000;
 const QUEUE_SETTLE_MS = 5000;
-// A switch waits this long for an idle session's background tasks, agents and
-// scheduled tasks to finish; then the session exits with them unfinished and
-// its continuation lists them.
-const ASYNC_WAIT_MS = 10 * 60 * 1000;
+// A switch waits this long for an idle session's background tasks and agents
+// to finish; then the session exits with them unfinished and its continuation
+// lists them. The account is used up, so every other session waits as well. On
+// 11-04 two waits ran out a ten-minute limit for work that could not finish in
+// it: a hung ssh, and a command sleeping until a fixed time.
+const ASYNC_WAIT_MS = 3 * 60 * 1000;
 // Same text the runner passes on restart after an account switch.
 const CONTINUATION = 'Continue the work interrupted by the account usage limit from the last unfinished step. Do not repeat work already completed.';
 // Input typed while a switch drains the sessions is held up to this many
