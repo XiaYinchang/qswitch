@@ -77,13 +77,14 @@ type runner struct {
 	committed        bool
 	stopping         bool
 	resumePending    bool
-	limitHits        int       // plugin's count for the current child process
-	exitAckAt        time.Time // when the plugin acknowledged the current exit
-	forcedExit       bool      // the runner is ending a child whose acknowledged exit is overdue
-	stopped          []string  // asynchronous work the child still had when it acknowledged its exit
-	held             []string  // messages typed during the switch, for the restarted session's prompt
-	draft            string    // input box text when the exit was acknowledged
-	restore          string    // draft the current child still has to put back
+	limitHits        int        // plugin's count for the current child process
+	exitAckAt        time.Time  // when the plugin acknowledged the current exit
+	forcedExit       bool       // the runner is ending a child whose acknowledged exit is overdue
+	stopped          []string   // asynchronous work the child still had when it acknowledged its exit
+	held             []string   // messages typed during the switch, for the restarted session's prompt
+	draft            string     // input box text when the exit was acknowledged
+	restore          string     // draft the current child still has to put back
+	persisted        StatusInfo // status as status.json last recorded it
 	forcedAt         time.Time
 	upgrading        bool
 	upgradeAt        time.Time
@@ -163,7 +164,24 @@ func acquireClaudeLock(ctx context.Context, dataDir string) (*os.File, error) {
 }
 
 func (r *runner) persistLocked() error {
-	return atomicJSON(filepath.Join(r.dir, "status.json"), r.status)
+	if err := atomicJSON(filepath.Join(r.dir, "status.json"), r.status); err != nil {
+		return err
+	}
+	r.persisted = r.status
+	return nil
+}
+
+// persistChangedLocked writes the status only when it differs from what the
+// file holds. The coordinator repeats /prepare and /exit every tick while a
+// switch waits, and heartbeats arrive every 750 ms; each write is an fsync
+// under r.mu. On novix, with ext4 mounted commit=30,discard, such a write took
+// up to 3 s, and on 11-04 eight repeated /prepare requests ran past the
+// coordinator's 3 s timeout.
+func (r *runner) persistChangedLocked() error {
+	if r.status == r.persisted {
+		return nil
+	}
+	return r.persistLocked()
 }
 
 func (r *runner) failLocked(err error) {
@@ -318,7 +336,7 @@ func (r *runner) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	if err := r.persistLocked(); err != nil {
+	if err := r.persistChangedLocked(); err != nil {
 		r.failLocked(err)
 		http.Error(w, "cannot persist runner state", http.StatusInternalServerError)
 		return
@@ -374,7 +392,6 @@ func (r *runner) handleState(w http.ResponseWriter, route string, state sessionS
 		writeResponse(w, action{Action: "exit", Generation: r.status.Generation})
 		return
 	}
-	before := r.status
 	if r.exitAcknowledged && !r.forcedExit {
 		r.exitAcknowledged = false
 		r.exitRequested = false
@@ -431,12 +448,10 @@ func (r *runner) handleState(w http.ResponseWriter, route string, state sessionS
 	response.Restore = r.restore
 	// Heartbeats arrive every 750 ms and usually change nothing durable. A
 	// redundant fsync here holds r.mu through disk stalls and times out /status.
-	if r.status != before {
-		if err := r.persistLocked(); err != nil {
-			r.failLocked(err)
-			http.Error(w, "cannot persist session state", http.StatusInternalServerError)
-			return
-		}
+	if err := r.persistChangedLocked(); err != nil {
+		r.failLocked(err)
+		http.Error(w, "cannot persist session state", http.StatusInternalServerError)
+		return
 	}
 	if state.LimitHits > r.limitHits && state.SessionID != "" {
 		// Each main-turn rate_limit failure counts once, including one hit by a

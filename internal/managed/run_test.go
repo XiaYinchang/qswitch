@@ -463,6 +463,52 @@ func TestExitWithUnfinishedWorkIsEndedSoon(t *testing.T) {
 
 // The acknowledgement records the work an exit stops, for the continuation
 // after the restart. A revoked acknowledgement stopped nothing.
+// statusFileID identifies the current status.json. Each write replaces the
+// file through a rename, so an unchanged ID means nothing was written.
+func statusFileID(t *testing.T, r *runner) uint64 {
+	t.Helper()
+	st, err := os.Stat(filepath.Join(r.dir, "status.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st.Sys().(*syscall.Stat_t).Ino
+}
+
+// The coordinator repeats /prepare and /exit every tick while a switch waits.
+// On novix a status write could take 3 s, and eight repeated /prepare requests
+// on 11-04 ran past the coordinator's 3 s timeout. Only a change is written.
+func TestRepeatedControlRequestsDoNotRewriteStatus(t *testing.T) {
+	r := testRunner(t)
+	if got := callRunner(t, r, "/prepare", control{Generation: "g"}); got.Code != 200 {
+		t.Fatal(got.Body.String())
+	}
+	prepared := statusFileID(t, r)
+	for _, route := range []string{"/prepare", "/prepare", "/exit", "/exit"} {
+		if got := callRunner(t, r, route, control{Generation: "g"}); got.Code != 200 {
+			t.Fatalf("%s: %s", route, got.Body.String())
+		}
+	}
+	heartbeat(t, r, stateFor(r))
+	if statusFileID(t, r) != prepared {
+		t.Fatal("status rewritten although nothing changed")
+	}
+	// A change made without writing it, as the upgrade watchdog does, is
+	// written with the next request.
+	r.mu.Lock()
+	r.status.Reason = "changed in memory only"
+	r.mu.Unlock()
+	if got := callRunner(t, r, "/prepare", control{Generation: "g"}); got.Code != 200 {
+		t.Fatal(got.Body.String())
+	}
+	if statusFileID(t, r) == prepared {
+		t.Fatal("a change was not written")
+	}
+	var onDisk StatusInfo
+	if err := readJSON(filepath.Join(r.dir, "status.json"), &onDisk); err != nil || onDisk.Generation != "g" || onDisk.Reason != "changed in memory only" {
+		t.Fatalf("status.json holds %+v (%v)", onDisk, err)
+	}
+}
+
 func TestExitAcknowledgementRecordsStoppedWork(t *testing.T) {
 	r := testRunner(t)
 	r.status.Generation = "g"
