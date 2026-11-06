@@ -301,13 +301,19 @@ func (r *runner) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			http.Error(w, "previous generation is restarting", http.StatusConflict)
 			return
 		}
-		if err := r.gate(); err != nil {
-			r.status.Ready = false
-			r.status.Reason = err.Error()
-			writeResponse(w, r.snapshotLocked())
-			return
+		// The terminal is verified when the session joins the switch, and
+		// again for /exit, the acknowledgement and the restart. The
+		// coordinator repeats /prepare every tick while the switch waits;
+		// verifying each time ran rex and ps under r.mu for nothing.
+		if r.status.Generation != ctl.Generation {
+			if err := r.gate(); err != nil {
+				r.status.Ready = false
+				r.status.Reason = err.Error()
+				writeResponse(w, r.snapshotLocked())
+				return
+			}
+			r.status.Generation = ctl.Generation
 		}
-		r.status.Generation = ctl.Generation
 	case "/exit":
 		if r.status.Generation != ctl.Generation || r.released {
 			http.Error(w, "generation mismatch", http.StatusConflict)

@@ -274,6 +274,40 @@ func TestExitRechecksTmuxAndFreshSession(t *testing.T) {
 	}
 }
 
+// The coordinator repeats /prepare every tick while a switch waits. The
+// terminal is verified when the session joins the switch and again for the
+// exit; a repeated /prepare for the same generation does not run rex and ps
+// under r.mu once more.
+func TestRepeatedPrepareDoesNotVerifyTheTerminalAgain(t *testing.T) {
+	r := testRunner(t)
+	gates := 0
+	r.gate = func() error { gates++; return nil }
+	for range 3 {
+		if got := callRunner(t, r, "/prepare", control{Generation: "g"}); got.Code != 200 {
+			t.Fatal(got.Body.String())
+		}
+	}
+	if gates != 1 {
+		t.Fatalf("terminal verified %d times for one generation", gates)
+	}
+	if got := callRunner(t, r, "/exit", control{Generation: "g"}); got.Code != 200 {
+		t.Fatal(got.Body.String())
+	}
+	if gates != 2 {
+		t.Fatalf("exit did not verify the terminal: %d", gates)
+	}
+	// A new generation after a release is verified again.
+	if got := callRunner(t, r, "/release", control{Generation: "g"}); got.Code != 200 {
+		t.Fatal(got.Body.String())
+	}
+	if got := callRunner(t, r, "/prepare", control{Generation: "h"}); got.Code != 200 {
+		t.Fatal(got.Body.String())
+	}
+	if gates != 3 || r.status.Generation != "h" {
+		t.Fatalf("new generation: verified %d times, generation %q", gates, r.status.Generation)
+	}
+}
+
 func TestPrepareBlocksWithoutVerifiedTmuxPane(t *testing.T) {
 	r := testRunner(t)
 	r.gate = func() error { return errors.New("no verified tmux pane") }
