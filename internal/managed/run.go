@@ -869,7 +869,10 @@ func Run(ctx context.Context, options Options) error {
 	childDone := make(chan error, 1)
 	go func() { childDone <- cmd.Wait() }()
 	childRunning := true
-	watchdog := time.NewTicker(5 * time.Second)
+	// The watchdog ends overdue exits. Every tick it waits is added to the
+	// deadline: at 5 s the exit phase of the 11-05 23:30 switch took 24 s
+	// for a 15 s deadline, and ones with unfinished work 9 to 14 s for 5 s.
+	watchdog := time.NewTicker(time.Second)
 	defer watchdog.Stop()
 	for {
 		select {
