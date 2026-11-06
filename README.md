@@ -85,7 +85,7 @@ qswitch run claude --resume-continuation=continue --dangerously-skip-permissions
 - **切号只在受管会话空闲时进行**：进行中的 turn、活动前台工具、queued prompt 都会让切号等待。输入框里的草稿只在 30 秒内改过时让切号等待，之后照常切号，重启后草稿放回输入框；超过 8000 字的草稿会一直让切号等待。`rate_limit` 中断后的后台任务、agent、cron 不再阻断，但切号重启可能中断这些异步工作，恢复后应检查未完成的副作用工作。切号准备期间你发出的消息不会让切号等待：qswitch 先暂存，切号完成后作为重启会话的第一条消息自动发出，会话需要续接时接在续接指令之后；切号撤销时在原会话里原样发出。超过 6000 字的消息退回输入框，按草稿处理。
 - **所有号都用完时**会等最早重置的那个号；重置后自动切过去并让中断的会话继续。
 - **切号期间关掉某个会话**（自己 `/exit`、关终端、Claude 崩溃）不会卡住切号：runner 等 Claude 结束后退出本轮切号，其余会话照常切；这个会话不再被重启。
-- **出现异常**时，`qswitch sessions` 的 `recovery=` 会给出原因和恢复命令；确认旧进程已退出后按提示手动恢复。只有 runner 进程没来得及清理就没了（被 SIGKILL、OOM）时切号才会停下，日志里是 `runner <id> stopped during generation …; manual recovery required`：它的 Claude 可能还在跑，确认该进程已退出后删除 `~/.qswitch/managed-claude/<id>`，切号自动继续。
+- **出现异常**时，`qswitch sessions` 的 `recovery=` 会给出原因和恢复命令；确认旧进程已退出后按提示手动恢复。只有 runner 进程没来得及清理就没了（被 SIGKILL、OOM）时切号才会停下，日志里是 `runner <id> stopped during generation …; manual recovery required`：它的 Claude 可能还在跑，确认该进程已退出后删除 `~/.qswitch/managed-claude/<id>`（`qswitch sessions` 的 `runner=` 是 id 的前 12 位，日志和 `--json` 里是完整 id），切号自动继续。
 - **切号过程**写在 qswitchd 的日志里，用 `journalctl --user -u qswitchd` 查看：每次切号何时排队、在等哪个会话及原因、何时切完或撤销及原因，每种状态只记一行；会话确认退出后超时、被 runner 结束时另记一行（`exit overdue, ending it`）。
 
 ## 新增订阅
@@ -121,7 +121,7 @@ qswitch run claude --resume-continuation=continue --dangerously-skip-permissions
 
   升级 qswitch 后不必手动重启受管会话。runner 发现自己的程序文件被替换（按部署方式改名覆盖），会等会话空闲且没有切号在进行时，经同一套确认流程 `/exit`，在原进程内换成新版本，并像切号时一样用原会话 ID 恢复。runner 的进程号、ID、控制端口和租约都不变，不发续接指令；会话在此之前被额度中断的状态原样保留。还在等续接的会话不升级：因 `rate_limit` 中断的会话马上要参与切号，由切号带着续接指令重启；切号后带着续接指令重启的会话，要等续接答完或被中止后才升级。否则升级会先把它重启一遍，丢掉续接、取消 Claude Code 自带的自动续接，还会停掉切号本来允许它保留到那时的后台任务。会话一忙起来就放弃本次升级，下次空闲再试；换版失败则留在旧版本继续运行。
 
-  用户正常 `/exit` 不会被重新拉起；不能参与切号的会话退出后，排队的切号照常进行。切号排空期间会话自己结束（`/exit`、挂断、崩溃）或 runner 收到 SIGTERM/SIGHUP 时，runner 等 Claude 结束后退出本轮切号，切号照常进行，这个会话不会被重启；崩溃的会话，以及已为切号退出 Claude 却没等到重启的会话，在 `qswitch sessions` 里留有恢复命令。runner 没来得及清理就消失（SIGKILL、OOM）时，它的 Claude 可能还在运行，切号停下并在日志里报 `manual recovery required`；确认该进程已退出后删除对应的 `~/.qswitch/managed-claude/<runner id>` 目录（id 见那行日志或 `qswitch sessions --json`），切号继续。若凭据已写入但 daemon 未能确认提交，不自动发送续接指令。
+  用户正常 `/exit` 不会被重新拉起；不能参与切号的会话退出后，排队的切号照常进行。切号排空期间会话自己结束（`/exit`、挂断、崩溃）或 runner 收到 SIGTERM/SIGHUP 时，runner 等 Claude 结束后退出本轮切号，切号照常进行，这个会话不会被重启；崩溃的会话，以及已为切号退出 Claude 却没等到重启的会话，在 `qswitch sessions` 里留有恢复命令。runner 没来得及清理就消失（SIGKILL、OOM）时，它的 Claude 可能还在运行，切号停下并在日志里报 `manual recovery required`；确认该进程已退出后删除对应的 `~/.qswitch/managed-claude/<runner id>` 目录（`qswitch sessions` 的 `runner=` 是 id 的前 12 位，日志和 `--json` 里是完整 id），切号继续。若凭据已写入但 daemon 未能确认提交，不自动发送续接指令。
 - **Devin CLI**：按官方 `billingStrategy` 识别订阅额度，Max 仅显示周额度；总体重置时间跟随实际限制窗口。CLI 与 Devin.app 使用独立凭据，CLI 切号不关闭或改写 Devin.app。
 
 首次收录 Kimi 需要先在官方客户端登录；未安装或未登录时保持空状态。

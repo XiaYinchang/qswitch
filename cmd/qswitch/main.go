@@ -93,7 +93,9 @@ func run(args []string) int {
 			return fail(json.NewEncoder(os.Stdout).Encode(sessions))
 		}
 		for _, session := range sessions {
-			fmt.Printf("claude session=%s pid=%d ready=%v continue=%v exited=%v reason=%s recovery=%s\n", session.SessionID, session.ChildPID, session.Ready, session.NeedsContinue, session.Exited, session.Reason, session.Recovery)
+			// The runner id names the record's directory under managed-claude,
+			// which manual recovery removes; the first 12 characters find it.
+			fmt.Printf("claude session=%s runner=%s pid=%d ready=%v continue=%v exited=%v reason=%s recovery=%s\n", session.SessionID, session.ID[:min(12, len(session.ID))], session.ChildPID, session.Ready, session.NeedsContinue, session.Exited, session.Reason, session.Recovery)
 		}
 		return 0
 	case "init":
