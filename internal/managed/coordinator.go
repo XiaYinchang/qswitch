@@ -15,9 +15,11 @@ type control struct {
 // remainingIDs keeps the participants that are still running. A runner that
 // ended without a generation after its Claude exited has nothing to drain: it
 // never joined this rotation (for example, the user closed a session whose
-// terminal could not be verified) or was released from it. Such a runner
-// removes its directory, or keeps a record if Claude failed. Any other lost
-// participant may still own a session and needs manual recovery.
+// terminal could not be verified), was released from it, or saw its Claude
+// end before the exit it was asked for (the user's own /exit, a hang-up, a
+// crash, or the runner itself stopped). Such a runner removes its directory,
+// or keeps a record for the user. Any other lost participant may still own a
+// session and needs manual recovery.
 func remainingIDs(ids []string, live []participant, stale []StatusInfo) ([]string, error) {
 	running := make(map[string]bool, len(live))
 	for _, p := range live {

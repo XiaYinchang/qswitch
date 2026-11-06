@@ -821,6 +821,151 @@ func TestRotationOutlivesARunnerThatNeverJoined(t *testing.T) {
 	}
 }
 
+// A session that ends while the switch waits for it leaves the switch instead
+// of holding it: once its Claude is gone the runner drops the generation, and
+// the coordinator goes on without the participant.
+func TestSessionEndingDuringDrainLeavesTheRotation(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		end  func(r *runner) bool // settles the ended session; reports whether the record is kept
+		kept bool
+	}{
+		{"user exit", func(r *runner) bool { r.status.Exited = true; return r.unmanagedExitLocked(nil) }, false},
+		{"crash", func(r *runner) bool {
+			r.status.Exited = true
+			return r.unmanagedExitLocked(errors.New("exit status 1"))
+		}, true},
+		{"runner stopped", func(r *runner) bool { return r.stoppedLocked() }, false},
+		{"runner stopped after the exit", func(r *runner) bool {
+			r.status.Exited, r.exitAcknowledged = true, true
+			return r.stoppedLocked()
+		}, true},
+		{"restart failed", func(r *runner) bool {
+			r.status.Exited, r.exitAcknowledged, r.released = true, true, true
+			r.restartFailedLocked(errors.New("cannot verify Rex terminal"))
+			return true
+		}, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dataDir := t.TempDir()
+			root, err := rootDir(dataDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			staying := testRunner(t)
+			serveRunner(t, root, staying)
+			ending := testRunner(t)
+			ending.reg.ID = strings.Repeat("c", 64)
+			ending.status.ID = ending.reg.ID
+			ending.status.SessionID = "session-two"
+			ending.status.Ready = false // the switch waits for this session
+			stop := serveRunner(t, root, ending)
+			if ready, waiting, err := Prepare(dataDir, "g", nil); err != nil || ready || len(waiting) != 1 || waiting[0].SessionID != "session-two" {
+				t.Fatalf("first prepare = %v, %v, %v", ready, waiting, err)
+			}
+			ending.mu.Lock()
+			joined := ending.status.Generation == "g"
+			keep := c.end(ending)
+			err = ending.persistLocked()
+			ending.mu.Unlock()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !joined {
+				t.Fatal("ending session had not joined the switch")
+			}
+			if keep != c.kept {
+				t.Fatalf("record kept = %v, want %v", keep, c.kept)
+			}
+			// The runner process ends: Run removes the directory unless the
+			// record is kept.
+			stop()
+			if !keep {
+				if err := os.RemoveAll(ending.dir); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ready, waiting, err := Prepare(dataDir, "g", nil)
+			if err != nil || ready || len(waiting) != 1 || waiting[0].Reason != "exiting" {
+				t.Fatalf("prepare after the session ended = %v, %v, %v", ready, waiting, err)
+			}
+			if got := callRunner(t, staying, "/exiting", stateFor(staying)); got.Code != 200 {
+				t.Fatal(got.Body.String())
+			}
+			staying.mu.Lock()
+			staying.status.Exited = true
+			staying.mu.Unlock()
+			if ready, _, err := Prepare(dataDir, "g", nil); err != nil || !ready {
+				t.Fatalf("drain did not finish: %v, %v", ready, err)
+			}
+			if err := Release(dataDir, "g", true); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(filepath.Join(root, "pending.json")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("rotation stayed pending: %v", err)
+			}
+			states, err := Status(dataDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !c.kept {
+				if len(states) != 1 {
+					t.Fatalf("ended session left a record: %+v", states)
+				}
+				return
+			}
+			if len(states) != 2 || states[1].Live || !states[1].Exited || states[1].Generation != "" || states[1].Recovery == "" {
+				t.Fatalf("ended session's record = %+v", states)
+			}
+		})
+	}
+}
+
+// A runner that SIGTERM or SIGHUP is ending reports its session busy, so the
+// switch waits the few seconds until the runner is gone instead of failing.
+func TestStoppingRunnerMakesTheSwitchWait(t *testing.T) {
+	dataDir := t.TempDir()
+	root, err := rootDir(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := testRunner(t)
+	serveRunner(t, root, r)
+	if ready, waiting, err := Prepare(dataDir, "g", nil); err != nil || ready || len(waiting) != 1 || waiting[0].Reason != "exiting" {
+		t.Fatalf("prepare = %v, %v, %v", ready, waiting, err)
+	}
+	r.mu.Lock()
+	r.stopping = true
+	r.exitRequested = false
+	r.mu.Unlock()
+	ready, waiting, err := Prepare(dataDir, "g", nil)
+	if err != nil || ready || len(waiting) != 1 || waiting[0].Reason != "runner stopping" {
+		t.Fatalf("prepare while stopping = %v, %v, %v", ready, waiting, err)
+	}
+	// A repeated /exit does not ask the stopping runner's child for anything.
+	if got := callRunner(t, r, "/exit", control{Generation: "g"}); got.Code != 200 {
+		t.Fatalf("exit while stopping: %d %s", got.Code, got.Body.String())
+	}
+	r.mu.Lock()
+	asked := r.exitRequested
+	r.mu.Unlock()
+	if asked {
+		t.Fatal("stopping runner was asked to exit its child")
+	}
+	// A stopping runner that never joined does not take the generation.
+	fresh := testRunner(t)
+	fresh.stopping = true
+	var state StatusInfo
+	if got := callRunner(t, fresh, "/prepare", control{Generation: "g"}); got.Code != 200 {
+		t.Fatalf("prepare on a stopping runner: %d %s", got.Code, got.Body.String())
+	} else if err := json.Unmarshal(got.Body.Bytes(), &state); err != nil {
+		t.Fatal(err)
+	}
+	if state.Ready || state.Reason != "runner stopping" || fresh.status.Generation != "" {
+		t.Fatalf("stopping runner answered %+v with generation %q", state, fresh.status.Generation)
+	}
+}
+
 func TestRestartContinuesOnlyAfterCommittedRelease(t *testing.T) {
 	const session = "0b7c3f9e-5d1a-4c2b-9e8f-1a2b3c4d5e6f"
 	stopped := []string{"background task bg1 (wait for the build)"}

@@ -259,7 +259,7 @@ func (r *runner) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.stopping || r.status.Recovery != "" {
+	if r.status.Recovery != "" {
 		http.Error(w, "runner requires manual recovery", http.StatusConflict)
 		return
 	}
@@ -272,6 +272,18 @@ func (r *runner) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			s.Ready = false
 			s.Generation = ""
 			s.Reason = "runner upgrading"
+			writeResponse(w, s)
+			return
+		}
+		if r.stopping {
+			// SIGTERM or SIGHUP is ending this runner and its Claude. Reported
+			// busy, the session makes the switch wait the few seconds until
+			// the runner is gone and dropped; an error would have the switch
+			// cancelled, and every session that already exited restarted
+			// without its continuation.
+			s := r.snapshotLocked()
+			s.Ready = false
+			s.Reason = "runner stopping"
 			writeResponse(w, s)
 			return
 		}
@@ -298,8 +310,10 @@ func (r *runner) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		// The coordinator repeats /exit on every tick until each child is gone.
 		// An acknowledged session goes quiet while Claude shuts down and is no
 		// longer fresh; refusing the repeat would fail the switch and restart
-		// every session that already exited, without its continuation.
-		if !r.status.Exited && !r.exitAcknowledged {
+		// every session that already exited, without its continuation. A
+		// stopping runner is ending its child itself; the switch sees the
+		// session exiting until the runner is gone.
+		if !r.status.Exited && !r.exitAcknowledged && !r.stopping {
 			if !r.freshLocked() {
 				http.Error(w, "session no longer ready", http.StatusConflict)
 				return
@@ -506,6 +520,49 @@ func (r *runner) overdueExitSignalLocked(now time.Time) syscall.Signal {
 	}
 	r.forcedAt = now
 	return syscall.SIGKILL
+}
+
+// unmanagedExitLocked settles a child that ended without a managed exit: the
+// user's own /exit, a hang-up or a crash, during a switch or not. Wait
+// returned, so nothing of this session can still use the credentials, and a
+// generation the session never acknowledged has nothing left to drain:
+// dropping it lets the coordinator go on without this participant, as it
+// does for a session that ended before the switch. Until 11-06 the generation
+// stayed in status.json, and every later switch stopped with "manual recovery
+// required" until someone removed the runner's directory by hand. It reports
+// whether the record is kept: a crash leaves one, so that qswitch sessions
+// shows how to resume the session.
+func (r *runner) unmanagedExitLocked(childErr error) bool {
+	r.status.Generation = ""
+	if childErr == nil || r.forcedExit {
+		return false
+	}
+	r.failLocked(fmt.Errorf("Claude exited: %v", childErr))
+	return true
+}
+
+// stoppedLocked settles a runner that SIGTERM or SIGHUP ended, once its child
+// is gone. A switch that was draining the session has nothing left to wait
+// for here, so the generation goes and the coordinator drops the participant.
+// A session that had already left Claude for the switch cannot be restarted
+// by this runner any more; its record stays, so that qswitch sessions shows
+// how to resume it. It reports whether the record is kept.
+func (r *runner) stoppedLocked() bool {
+	r.status.Exited = true
+	r.status.Generation = ""
+	if !r.exitAcknowledged {
+		return false
+	}
+	r.failLocked(errors.New("runner stopped before it restarted the session"))
+	return true
+}
+
+// restartFailedLocked records a session the runner could not restart after
+// its exit. Claude is gone, so the generation goes with it; the record stays
+// for the user.
+func (r *runner) restartFailedLocked(err error) {
+	r.status.Generation = ""
+	r.failLocked(err)
 }
 
 func (r *runner) restart(ctx context.Context, root string) (*exec.Cmd, error) {
@@ -826,10 +883,6 @@ func Run(ctx context.Context, options Options) error {
 			r.mu.Lock()
 			r.stopping = true
 			r.status.Ready = false
-			if r.status.Generation != "" {
-				r.failLocked(errors.New("runner stopped during rotation"))
-				keep = true
-			}
 			_ = r.persistLocked()
 			r.mu.Unlock()
 			if childRunning {
@@ -843,6 +896,10 @@ func Run(ctx context.Context, options Options) error {
 					<-childDone
 				}
 			}
+			r.mu.Lock()
+			keep = r.stoppedLocked()
+			_ = r.persistLocked()
+			r.mu.Unlock()
 			restore()
 			return runCtx.Err()
 		case <-watchdog.C:
@@ -903,10 +960,7 @@ func Run(ctx context.Context, options Options) error {
 			}
 			managedExit := r.exitAcknowledged && r.status.Generation != "" && exitOK
 			if !managedExit {
-				if r.status.Generation != "" || (childErr != nil && !r.forcedExit) {
-					r.failLocked(errors.New("Claude exited without a confirmed successful rotation exit"))
-					keep = true
-				}
+				keep = r.unmanagedExitLocked(childErr)
 				persistErr := r.persistLocked()
 				r.mu.Unlock()
 				if childErr != nil {
@@ -932,7 +986,7 @@ func Run(ctx context.Context, options Options) error {
 			cmd, err = r.restart(runCtx, root)
 			if err != nil {
 				r.mu.Lock()
-				r.failLocked(err)
+				r.restartFailedLocked(err)
 				_ = r.persistLocked()
 				r.mu.Unlock()
 				keep = true
