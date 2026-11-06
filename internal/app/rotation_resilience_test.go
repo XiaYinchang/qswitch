@@ -271,6 +271,33 @@ func TestSwitchProgressIsLoggedOncePerChange(t *testing.T) {
 	}
 }
 
+// A session whose acknowledged exit the runner has to end is logged as
+// overdue, as a change of its own: before, the log showed "exiting" until the
+// switch was done and the transcript was the only record of the forced end.
+func TestOverdueExitIsLogged(t *testing.T) {
+	a := pendingClaudeSwitch(t)
+	var lines []string
+	a.Log = func(format string, args ...any) { lines = append(lines, fmt.Sprintf(format, args...)) }
+	s := &fakeRunner{reason: managed.ReasonExiting}
+	startFakeRunner(t, a, 1, s)
+	for range 2 {
+		if err := applyTick(a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.mu.Lock()
+	s.reason = managed.ReasonExitOverdue
+	s.mu.Unlock()
+	for range 2 {
+		if err := applyTick(a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(lines) != 2 || !strings.Contains(lines[0], "session- (exiting)") || !strings.Contains(lines[1], "session- (exit overdue, ending it)") {
+		t.Fatalf("overdue exit logged as %q", lines)
+	}
+}
+
 // unansweredRunners reports the error the session listing gives when one
 // runner does not answer in time, as when its terminal check is slow.
 type unansweredRunners struct{ claude.Adapter }

@@ -46,6 +46,19 @@ type Waiting struct {
 	Reason    string
 }
 
+// The reasons of a session whose Claude is on its way out: the exit was
+// acknowledged, or its deadline passed and the runner is ending the child.
+// Every other reason describes a busy session.
+const (
+	ReasonExiting     = "exiting"
+	ReasonExitOverdue = "exit overdue, ending it"
+)
+
+// Exiting reports whether reason is one of a session on its way out.
+func Exiting(reason string) bool {
+	return reason == ReasonExiting || reason == ReasonExitOverdue
+}
+
 // Prepare is called while holding locks/claude.lock. A false result is a
 // pending drain: callers must retain the generation and poll on later ticks,
 // and the sessions it still waits for are listed. The durable participant set
@@ -151,7 +164,11 @@ func Prepare(dataDir, generation string, blockers []int) (bool, []Waiting, error
 			return false, nil, err
 		}
 		if state.Generation != generation || !state.Exited {
-			waiting = append(waiting, Waiting{SessionID: state.SessionID, Reason: "exiting"})
+			reason := ReasonExiting
+			if Exiting(state.Reason) {
+				reason = state.Reason
+			}
+			waiting = append(waiting, Waiting{SessionID: state.SessionID, Reason: reason})
 			continue
 		}
 		if state.Recovery != "" {

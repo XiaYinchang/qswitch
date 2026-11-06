@@ -158,7 +158,7 @@ func busySessions(dataDir string) ([]managed.Waiting, error) {
 
 func anyExiting(waiting []managed.Waiting) bool {
 	for _, w := range waiting {
-		if w.Reason == "exiting" {
+		if managed.Exiting(w.Reason) {
 			return true
 		}
 	}

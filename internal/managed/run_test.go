@@ -343,7 +343,7 @@ func TestExitAcknowledgementCanBeRevoked(t *testing.T) {
 		t.Fatal(got.Body.String())
 	}
 	// The switch log names an acknowledged session as exiting.
-	if s := statusOf(t, r); s.Reason != "exiting" {
+	if s := statusOf(t, r); s.Reason != ReasonExiting {
 		t.Fatalf("acknowledged session reported as %q", s.Reason)
 	}
 	state := stateFor(r)
@@ -437,6 +437,38 @@ func TestOverdueAcknowledgedExitIsEnded(t *testing.T) {
 	callRunner(t, other, "/state", revoked)
 	if got := other.overdueExitSignalLocked(time.Now().Add(2 * exitDeadline)); got != 0 {
 		t.Fatalf("revoked exit was ended with %v", got)
+	}
+}
+
+// The runner reports an exit it is ending as overdue, so the switch log shows
+// which session held the switch up. On 11-05 at 23:30 only the session's
+// transcript showed that.
+func TestOverdueExitIsReported(t *testing.T) {
+	r := testRunner(t)
+	r.status.Generation = "g"
+	r.exitRequested = true
+	if got := callRunner(t, r, "/exiting", stateFor(r)); got.Code != 200 {
+		t.Fatal(got.Body.String())
+	}
+	if s := statusOf(t, r); s.Reason != ReasonExiting {
+		t.Fatalf("acknowledged exit reported as %q", s.Reason)
+	}
+	if got := r.overdueExitSignalLocked(r.exitAckAt.Add(exitDeadline)); got != syscall.SIGTERM {
+		t.Fatalf("overdue exit signalled %v", got)
+	}
+	if s := statusOf(t, r); s.Reason != ReasonExitOverdue {
+		t.Fatalf("exit being ended reported as %q", s.Reason)
+	}
+	// The plugin is silent after acknowledging, so the session is no longer
+	// fresh, and the coordinator's waiting reason comes from the repeated
+	// /prepare.
+	r.lastState = time.Now().Add(-6 * time.Second)
+	var state StatusInfo
+	if err := json.Unmarshal(callRunner(t, r, "/prepare", control{Generation: "g"}).Body.Bytes(), &state); err != nil {
+		t.Fatal(err)
+	}
+	if state.Ready || state.Reason != ReasonExitOverdue {
+		t.Fatalf("prepare while the exit is being ended answered %+v", state)
 	}
 }
 
@@ -886,7 +918,7 @@ func TestSessionEndingDuringDrainLeavesTheRotation(t *testing.T) {
 				}
 			}
 			ready, waiting, err := Prepare(dataDir, "g", nil)
-			if err != nil || ready || len(waiting) != 1 || waiting[0].Reason != "exiting" {
+			if err != nil || ready || len(waiting) != 1 || waiting[0].Reason != ReasonExiting {
 				t.Fatalf("prepare after the session ended = %v, %v, %v", ready, waiting, err)
 			}
 			if got := callRunner(t, staying, "/exiting", stateFor(staying)); got.Code != 200 {
@@ -931,7 +963,7 @@ func TestStoppingRunnerMakesTheSwitchWait(t *testing.T) {
 	}
 	r := testRunner(t)
 	serveRunner(t, root, r)
-	if ready, waiting, err := Prepare(dataDir, "g", nil); err != nil || ready || len(waiting) != 1 || waiting[0].Reason != "exiting" {
+	if ready, waiting, err := Prepare(dataDir, "g", nil); err != nil || ready || len(waiting) != 1 || waiting[0].Reason != ReasonExiting {
 		t.Fatalf("prepare = %v, %v, %v", ready, waiting, err)
 	}
 	r.mu.Lock()

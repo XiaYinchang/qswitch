@@ -86,7 +86,7 @@ qswitch run claude --resume-continuation=continue --dangerously-skip-permissions
 - **所有号都用完时**会等最早重置的那个号；重置后自动切过去并让中断的会话继续。
 - **切号期间关掉某个会话**（自己 `/exit`、关终端、Claude 崩溃）不会卡住切号：runner 等 Claude 结束后退出本轮切号，其余会话照常切；这个会话不再被重启。
 - **出现异常**时，`qswitch sessions` 的 `recovery=` 会给出原因和恢复命令；确认旧进程已退出后按提示手动恢复。只有 runner 进程没来得及清理就没了（被 SIGKILL、OOM）时切号才会停下，日志里是 `runner <id> stopped during generation …; manual recovery required`：它的 Claude 可能还在跑，确认该进程已退出后删除 `~/.qswitch/managed-claude/<id>`，切号自动继续。
-- **切号过程**写在 qswitchd 的日志里，用 `journalctl --user -u qswitchd` 查看：每次切号何时排队、在等哪个会话及原因、何时切完或撤销及原因，每种状态只记一行。
+- **切号过程**写在 qswitchd 的日志里，用 `journalctl --user -u qswitchd` 查看：每次切号何时排队、在等哪个会话及原因、何时切完或撤销及原因，每种状态只记一行；会话确认退出后超时、被 runner 结束时另记一行（`exit overdue, ending it`）。
 
 ## 新增订阅
 

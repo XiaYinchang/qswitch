@@ -199,9 +199,15 @@ func (r *runner) snapshotLocked() StatusInfo {
 		s.Ready = false
 	}
 	// A child that acknowledged its exit is quiet until it is gone; its last
-	// reason, usually empty, would show a switch waiting on "not ready".
+	// reason, usually empty, would show a switch waiting on "not ready". Once
+	// the exit is overdue and the runner is ending the child, the switch log
+	// says so: on 11-05 at 23:30 a session held /exit in its input queue for
+	// 15 s, and only its transcript showed that the runner had ended it.
 	if r.exitAcknowledged && !s.Exited {
-		s.Reason = "exiting"
+		s.Reason = ReasonExiting
+		if r.forcedExit {
+			s.Reason = ReasonExitOverdue
+		}
 	}
 	return s
 }

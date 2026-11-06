@@ -2218,7 +2218,8 @@ func pendingKey(p state.Pending) string {
 
 // logWaiting names the sessions a queued switch waits for and why. A busy
 // session's reason changes every few seconds, so only a change in which
-// sessions it waits for, or in whether they are exiting, makes a new line.
+// sessions it waits for, or in whether they are exiting or overdue, makes a
+// new line.
 func (a *App) logWaiting(tool adapter.Tool, p state.Pending, waiting []managed.Waiting) {
 	keys := make([]string, 0, len(waiting))
 	parts := make([]string, 0, len(waiting))
@@ -2230,7 +2231,11 @@ func (a *App) logWaiting(tool adapter.Tool, p state.Pending, waiting []managed.W
 		if id == "" {
 			id = "a starting session"
 		}
-		keys = append(keys, fmt.Sprintf("%s/%v", id, w.Reason == "exiting"))
+		state := "busy"
+		if managed.Exiting(w.Reason) {
+			state = w.Reason
+		}
+		keys = append(keys, id+"/"+state)
 		parts = append(parts, fmt.Sprintf("%s (%s)", id, w.Reason))
 	}
 	sort.Strings(keys)

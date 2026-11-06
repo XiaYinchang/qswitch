@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"qswitch/internal/adapter"
+	"qswitch/internal/managed"
 	"qswitch/internal/quota"
 )
 
@@ -135,6 +136,24 @@ func TestExpiringSwitchLetsGoOfASessionThatGotBusy(t *testing.T) {
 	}
 	if pend, _ := a.State.GetPending("claude"); pend.Reason != reasonExpiring {
 		t.Fatalf("switch dropped: %+v", pend)
+	}
+}
+
+// A session whose exit is overdue is still on its way out, not busy: the
+// drain is kept while the runner ends it.
+func TestExpiringSwitchKeepsASessionWhoseExitIsOverdue(t *testing.T) {
+	a := expiringSetup(t, 30, 6*time.Hour)
+	s := &fakeRunner{ready: true, busyOnPrepare: true, reason: managed.ReasonExitOverdue}
+	startFakeRunner(t, a, 1, s)
+	a.considerExpiring(adapter.Claude)
+	if err := applyTick(a); err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	releases, generation := s.releases, s.generation
+	s.mu.Unlock()
+	if releases != 0 || generation == "" {
+		t.Fatalf("session being ended was let go: releases=%d generation=%q", releases, generation)
 	}
 }
 
