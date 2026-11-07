@@ -383,7 +383,6 @@ func TestBusySwitchNoWrite(t *testing.T) {
 	a.Capture(adapter.Codex)
 	writeCodex(t, a.UserHome, "acc-b", "b@x.com")
 	a.Capture(adapter.Codex)
-	a.Adapters[adapter.Codex] = a.Adapters[adapter.Codex] // keep
 	// replace list via new open
 	n := &notify.Log{}
 	busyApp, err := Open(a.UserHome, a.DataDir, a.Vault.Keys, nil, n, func() ([]adapter.Proc, error) {

@@ -388,16 +388,6 @@ func asUnix(v any) int64 {
 	return int64(f)
 }
 
-func clampUsed(n float64) float64 {
-	if n < 0 {
-		return 0
-	}
-	if n > 100 {
-		return 100
-	}
-	return n
-}
-
 func ParseCursorBot(body []byte) (Bucket, bool) {
 	var m map[string]any
 	if json.Unmarshal(body, &m) != nil {

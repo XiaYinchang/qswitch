@@ -20,8 +20,6 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const liveVSCDBSuffix = "Library/Application Support/Cursor/User/globalStorage/state.vscdb"
-
 var cursorAuthKeys = []string{
 	"cursorAuth/accessToken",
 	"cursorAuth/refreshToken",
@@ -272,10 +270,6 @@ func (a Adapter) Restore(home string, blob adapter.Blob, opts adapter.RestoreOpt
 		return err
 	}
 	return nil
-}
-
-func emptyDesktop(p payload) bool {
-	return str(p.Desktop["cursorAuth/accessToken"]) == ""
 }
 
 func incomplete(p payload) bool {

@@ -103,7 +103,7 @@ func TestManagedClaudeRotationWaitsForEverySessionBeforeCredentialCommit(t *test
 			mu.Lock()
 			defer mu.Unlock()
 			if r.Header.Get("Authorization") != "Bearer "+token {
-				http.Error(w, "unauthorized", 401)
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
 			var c struct {
