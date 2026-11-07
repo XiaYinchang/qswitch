@@ -381,3 +381,64 @@ func Resume(dataDir string) (int, error) {
 	}
 	return n, nil
 }
+
+// Forget removes the record a runner left behind: for a session whose Claude
+// crashed or could not be restarted, which only shows the resume command in
+// qswitch sessions, and for a runner killed in the middle of a switch, whose
+// record holds every switch until it is known that its Claude is gone.
+// prefix names the runner, as qswitch sessions shows it. running reports
+// whether a Claude Code process with that pid still runs; a record whose
+// child was never seen to exit is kept while it does. A running runner's
+// record is never forgotten: it removes its own when it ends.
+func Forget(dataDir, prefix string, running func(pid int) bool) (StatusInfo, error) {
+	root, err := rootDir(dataDir)
+	if err != nil {
+		return StatusInfo{}, err
+	}
+	if prefix == "" {
+		return StatusInfo{}, errors.New("forget needs a runner id")
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return StatusInfo{}, err
+	}
+	var matches []string
+	for _, entry := range entries {
+		if validID(entry.Name()) && strings.HasPrefix(entry.Name(), prefix) {
+			matches = append(matches, entry.Name())
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return StatusInfo{}, fmt.Errorf("no managed Claude runner matches %q", prefix)
+	case 1:
+	default:
+		return StatusInfo{}, fmt.Errorf("%d managed Claude runners match %q; give more of the id", len(matches), prefix)
+	}
+	dir := filepath.Join(root, matches[0])
+	lease, err := privateFile(filepath.Join(dir, "lease"), unix.O_RDWR)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return StatusInfo{}, err
+	}
+	if err == nil {
+		defer lease.Close()
+		if err := unix.Flock(int(lease.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+			if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
+				return StatusInfo{}, fmt.Errorf("runner %s is still running; it removes its own record when it ends", matches[0][:12])
+			}
+			return StatusInfo{}, err
+		}
+	}
+	var state StatusInfo
+	if err := readJSON(filepath.Join(dir, "status.json"), &state); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return StatusInfo{}, err
+	}
+	if !state.Exited && state.ChildPID > 0 && running(state.ChildPID) {
+		return StatusInfo{}, fmt.Errorf("Claude process %d of session %s may still be running; stop it before forgetting the record", state.ChildPID, state.SessionID)
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		return StatusInfo{}, err
+	}
+	state.ID = matches[0]
+	return state, nil
+}

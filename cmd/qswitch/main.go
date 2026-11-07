@@ -85,6 +85,34 @@ func run(args []string) int {
 		}
 		return fail(managed.Run(ctx, managed.Options{DataDir: a.DataDir, ClaudeBin: bin, Args: claudeArgs, InitialContinuation: initial}))
 	case "sessions":
+		if id, ok := flagVal(rest, "--forget"); ok || has(rest, "--forget") {
+			if id == "" {
+				fmt.Fprintln(os.Stderr, "usage: qswitch sessions --forget <runner>")
+				return 2
+			}
+			// A record whose child was never seen to exit may belong to a
+			// Claude that still runs; the process list decides, and a
+			// failure to read it keeps the record.
+			ad := a.Adapters[adapter.Claude]
+			running := func(pid int) bool {
+				h, err := ad.ManualBlockers(a.UserHome)
+				if err != nil {
+					return true
+				}
+				for _, p := range h.Manual {
+					if p.PID == pid {
+						return true
+					}
+				}
+				return false
+			}
+			s, err := managed.Forget(a.DataDir, id, running)
+			if err != nil {
+				return fail(err)
+			}
+			fmt.Printf("forgot the record of session %s (runner %s)\n", s.SessionID, s.ID[:min(12, len(s.ID))])
+			return 0
+		}
 		sessions, err := managed.Status(a.DataDir)
 		if err != nil {
 			return fail(err)
@@ -356,7 +384,7 @@ func usage() {
   qswitch login grok           # Device Code 加号，不登出当前 Grok 会话
   qswitch login claude         # 当前终端授权并自动收录，不改变当前登录
   qswitch run claude [args...] # 受管会话：安全切号后恢复原会话
-  qswitch sessions            # 查看受管会话及切换阻塞原因
+  qswitch sessions [--json] [--forget <runner>]  # 查看受管会话及切换阻塞原因；删掉已结束会话留下的记录
   qswitch list [--tool ...]
   qswitch status
   qswitch probe [--tool codex|grok|cursor|devin|zcode|kimi|claude]

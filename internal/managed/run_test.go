@@ -755,6 +755,97 @@ func TestScanSkipsADirectoryBeingRemoved(t *testing.T) {
 	}
 }
 
+// leaveRecord writes the record of a runner that is gone, as a runner leaves
+// it when its Claude crashed or when the runner itself was killed.
+func leaveRecord(t *testing.T, root string, state StatusInfo) string {
+	t.Helper()
+	dir := filepath.Join(root, state.ID)
+	if err := privateDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := privateFile(filepath.Join(dir, "lease"), unix.O_CREAT|unix.O_RDWR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease.Close()
+	if err := atomicJSON(filepath.Join(dir, "status.json"), state); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// Forget removes the record of a session that is over, and nothing else: not
+// a running runner's, and not one whose Claude may still run.
+func TestForgetRemovesOnlyRecordsOfSessionsThatAreOver(t *testing.T) {
+	dataDir := t.TempDir()
+	root, err := rootDir(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	never := func(int) bool { return false }
+	always := func(int) bool { return true }
+	// A running runner keeps its record.
+	live := testRunner(t)
+	serveRunner(t, root, live)
+	if _, err := Forget(dataDir, live.reg.ID[:12], never); err == nil {
+		t.Fatal("forgot a running runner's record")
+	}
+	if _, err := os.Stat(live.dir); err != nil {
+		t.Fatal("running runner's record removed")
+	}
+	// A crash record goes, however the process list reads: the runner saw
+	// the child exit.
+	crashed := StatusInfo{ID: strings.Repeat("c", 64), ChildPID: 4242, SessionID: "session-crashed", Exited: true, Recovery: "Claude exited: exit status 1"}
+	dir := leaveRecord(t, root, crashed)
+	got, err := Forget(dataDir, "cccc", always)
+	if err != nil || got.SessionID != "session-crashed" || got.ID != crashed.ID {
+		t.Fatalf("forget crash record = %+v, %v", got, err)
+	}
+	if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("crash record still there: %v", err)
+	}
+	// A runner killed mid-switch left a record with the generation and a
+	// child it never saw exit. While that Claude runs, the record stays and
+	// so does the hold on the switch; once it is gone, the switch goes on.
+	killed := StatusInfo{ID: strings.Repeat("d", 64), ChildPID: 4343, SessionID: "session-killed", Generation: "g"}
+	dir = leaveRecord(t, root, killed)
+	if err := atomicJSON(filepath.Join(root, "pending.json"), transaction{Generation: "g", IDs: []string{live.reg.ID, killed.ID}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Forget(dataDir, "dddd", func(pid int) bool { return pid == 4343 }); err == nil {
+		t.Fatal("forgot the record of a Claude that still runs")
+	}
+	if ok, _, err := Prepare(dataDir, "g", nil); err == nil || ok {
+		t.Fatal("switch went on while the killed runner's Claude may run")
+	}
+	if got, err := Forget(dataDir, "dddd", never); err != nil || got.SessionID != "session-killed" {
+		t.Fatalf("forget killed runner's record = %+v, %v", got, err)
+	}
+	if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("killed runner's record still there: %v", err)
+	}
+	// The switch goes on with the participant that is left.
+	if ok, waiting, err := Prepare(dataDir, "g", nil); err != nil || ok || len(waiting) != 1 || waiting[0].SessionID != live.status.SessionID {
+		t.Fatalf("switch after forgetting = %v, %v, %v", ok, waiting, err)
+	}
+	// The id must name one runner.
+	leaveRecord(t, root, StatusInfo{ID: strings.Repeat("e", 64), Exited: true})
+	leaveRecord(t, root, StatusInfo{ID: "e" + strings.Repeat("f", 63), Exited: true})
+	if _, err := Forget(dataDir, "e", never); err == nil {
+		t.Fatal("forgot with an ambiguous id")
+	}
+	if _, err := Forget(dataDir, "0000", never); err == nil {
+		t.Fatal("forgot a runner that does not exist")
+	}
+	if _, err := Forget(dataDir, "", never); err == nil {
+		t.Fatal("forgot with an empty id")
+	}
+	states, err := Status(dataDir)
+	if err != nil || len(states) != 3 {
+		t.Fatalf("records left = %+v, %v", states, err)
+	}
+}
+
 // serveRunner registers r under root the way Run does and serves its control
 // API. The returned function ends the runner process: it frees the lease.
 func serveRunner(t *testing.T, root string, r *runner) func() {
