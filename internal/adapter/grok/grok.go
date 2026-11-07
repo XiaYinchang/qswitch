@@ -576,11 +576,6 @@ func marshalAuthJSON(v any) []byte {
 	}
 }
 
-func mustJSONMap(m map[string]any) []byte {
-	b, _ := json.Marshal(m)
-	return b
-}
-
 func BlobFromAuthJSON(raw []byte, now time.Time) (adapter.Blob, error) {
 	id, err := identityFromRaw(raw)
 	if err != nil {
@@ -701,7 +696,7 @@ func MergeLiveTokens(blob adapter.Blob, liveAuth []byte) adapter.Blob {
 	}
 	tok := quota.GrokTokens{AccessToken: live.Key, RefreshToken: live.Refresh}
 	if !live.ExpiresAt.IsZero() {
-		tok.ExpiresIn = int(live.ExpiresAt.Sub(time.Now()).Seconds())
+		tok.ExpiresIn = int(time.Until(live.ExpiresAt).Seconds())
 		if tok.ExpiresIn < 1 {
 			tok.ExpiresIn = 1
 		}

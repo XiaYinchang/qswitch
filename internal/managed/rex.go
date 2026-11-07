@@ -61,7 +61,7 @@ func verifiedRexBlock(t rexTerminal) error {
 		return errors.New("cannot verify Rex terminal")
 	}
 	if info.Child == nil {
-		return errors.New("Rex terminal is missing or no longer alive")
+		return errors.New("rex terminal is missing or no longer alive")
 	}
 	if info.Child.PID <= 1 {
 		return errors.New("invalid Rex terminal process")

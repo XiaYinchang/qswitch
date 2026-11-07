@@ -434,7 +434,7 @@ func Forget(dataDir, prefix string, running func(pid int) bool) (StatusInfo, err
 		return StatusInfo{}, err
 	}
 	if !state.Exited && state.ChildPID > 0 && running(state.ChildPID) {
-		return StatusInfo{}, fmt.Errorf("Claude process %d of session %s may still be running; stop it before forgetting the record", state.ChildPID, state.SessionID)
+		return StatusInfo{}, fmt.Errorf("claude process %d of session %s may still be running; stop it before forgetting the record", state.ChildPID, state.SessionID)
 	}
 	if err := os.RemoveAll(dir); err != nil {
 		return StatusInfo{}, err

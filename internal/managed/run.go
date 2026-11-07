@@ -549,7 +549,7 @@ func (r *runner) unmanagedExitLocked(childErr error) bool {
 	if childErr == nil || r.forcedExit {
 		return false
 	}
-	r.failLocked(fmt.Errorf("Claude exited: %v", childErr))
+	r.failLocked(fmt.Errorf("claude exited: %v", childErr))
 	return true
 }
 

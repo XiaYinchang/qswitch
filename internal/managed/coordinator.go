@@ -101,7 +101,7 @@ func Prepare(dataDir, generation string, blockers []int) (bool, []Waiting, error
 	}
 	for _, pid := range blockers {
 		if !byPID[pid] {
-			return false, nil, fmt.Errorf("Claude process %d is not a live managed child", pid)
+			return false, nil, fmt.Errorf("claude process %d is not a live managed child", pid)
 		}
 	}
 	if txn.IDs, err = remainingIDs(txn.IDs, live, stale); err != nil {
