@@ -75,7 +75,7 @@ qswitch run claude --resume-continuation=continue --dangerously-skip-permissions
 ### 结束与升级
 
 - 任务做完在会话里 `/exit`，正常退出不会被自动拉起。
-- 升级 qswitch 只需按部署步骤替换程序；各会话在空闲时自动换成新版本并恢复原对话，不必手动重启。
+- 升级 qswitch 只需按部署步骤替换程序（日常用 `scripts/deploy.sh`，见「命令」一节）；各会话在空闲时自动换成新版本并恢复原对话，不必手动重启。
 
 ### 注意事项
 
@@ -171,6 +171,8 @@ qswitch switch codex <id-or-email>
 qswitch switch cursor <id-or-email>                # 会关掉并重启 Cursor.app
 qswitch doctor
 qswitch serve [--addr 127.0.0.1:7432]
+
+scripts/deploy.sh [--ref <commit>] [novix|macmini ...]   # 新 clone 构建并部署到两台机器，见下文
 ```
 
 本机页面默认 `http://127.0.0.1:7432`（只绑 loopback）。`qswitchd` 起来后也能开；这时再跑 `qswitch serve` 会打印现成地址然后退出，不会跟 daemon 抢端口。用来看余量、收录当前登录、ChatGPT / Grok Device Code 加号、删除仓库里的号。页面上不会出现 token。
@@ -193,6 +195,8 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.qswitch.plist
 ```
 
 launchd 样例见 `contrib/launchd/`（占位符，须用 `qswitch init` 生成带本机路径的 plist）。默认 `KeepAlive=false`，先确认 Keychain 无弹窗。
+
+日常升级两台机器用 `scripts/deploy.sh [--ref <commit>] [novix|macmini ...]`，在 Mac mini 上运行：从 origin 新 clone 指定提交（默认 `origin/main`）构建 linux/amd64 和 darwin/arm64，核对嵌入的提交号和校验和；目标机有排队的切号就停下；否则把两个程序放到 `~/.local/bin` 替换并重启 daemon，60 秒内健康接口没报出新版本就换回备份重启；之后等第一次额度探测再删备份，并报告 novix 上还没换到新程序的受管会话 runner（它们空闲时自己升级）。首次安装仍按下面的步骤手动做。
 
 Linux 服务器（如只跑 Claude Code 的 VPS）用 systemd，样例见 `contrib/systemd/`：
 
