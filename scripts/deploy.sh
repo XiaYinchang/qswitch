@@ -97,7 +97,7 @@ try:
 except Exception:
     print(0)
     raise SystemExit
-print(max([a.get("last_probe_at") or 0 for t in d.get("tools", []) for a in t.get("accounts", [])] or [0]))'
+print(max([a.get("last_probe_at") or 0 for t in d.get("tools") or [] for a in t.get("accounts") or []] or [0]))'
 }
 
 # Build from a fresh clone, never from a working copy or a worktree: a
@@ -196,7 +196,7 @@ for t in "${targets[@]}"; do
 	on "$t" "rm -f ~/.local/bin/qswitch.prev-$old ~/.local/bin/qswitchd.prev-$old"
 	echo "$t: first probe seen, backups removed"
 	if [ "$(goos "$t")" = linux ]; then
-		stale=$(on "$t" 'for p in $(pgrep -f "qswitch run claude"); do readlink /proc/$p/exe; done 2>/dev/null' | grep -c deleted || true)
+		stale=$(on "$t" 'for p in $(pgrep -f "^[^ ]*/qswitch run claude"); do readlink /proc/$p/exe; done 2>/dev/null' | grep -c deleted || true)
 		if [ "$stale" -gt 0 ]; then
 			echo "$t: $stale managed session runner(s) still on the old binary; they upgrade when idle"
 		else
