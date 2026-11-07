@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -1074,6 +1075,9 @@ func TestProbeLocalIgnoresTPM429(t *testing.T) {
 }
 
 func TestInitWritesStandardPlist(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Init writes a launchd plist on macOS only")
+	}
 	a, _ := setup(t)
 	if err := a.Init(); err != nil {
 		t.Fatal(err)
