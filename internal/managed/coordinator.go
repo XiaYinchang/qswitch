@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"golang.org/x/sys/unix"
 )
 
 type control struct {
@@ -38,6 +40,13 @@ func remainingIDs(ids []string, live []participant, stale []StatusInfo) ([]strin
 		}
 	}
 	return kept, nil
+}
+
+// processExists reports whether pid names a process. One owned by another
+// user counts, and so does a reused pid: when unsure, the switch stops.
+func processExists(pid int) bool {
+	err := unix.Kill(pid, 0)
+	return err == nil || errors.Is(err, unix.EPERM)
 }
 
 // Waiting is a session a switch still waits for, with the reason it gives.
@@ -99,8 +108,14 @@ func Prepare(dataDir, generation string, blockers []int) (bool, []Waiting, error
 			byPID[p.status.ChildPID] = true
 		}
 	}
+	// The caller read the blockers before this scan, and the quota check it
+	// runs in between can take seconds. A child that finished its exit in
+	// that time is gone and holds nothing; failing on it cancelled the drain
+	// and restarted every session that had already exited (11-08 06:54).
+	// Only a Claude that still runs outside the live runners, as one left
+	// by a killed runner, stops the switch.
 	for _, pid := range blockers {
-		if !byPID[pid] {
+		if !byPID[pid] && processExists(pid) {
 			return false, nil, fmt.Errorf("claude process %d is not a live managed child", pid)
 		}
 	}

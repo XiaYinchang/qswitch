@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -1120,6 +1121,69 @@ func TestStoppingRunnerMakesTheSwitchWait(t *testing.T) {
 	}
 	if state.Ready || state.Reason != "runner stopping" || fresh.status.Generation != "" {
 		t.Fatalf("stopping runner answered %+v with generation %q", state, fresh.status.Generation)
+	}
+}
+
+// The daemon reads the Claude processes that block a switch before its quota
+// check, and Prepare scans the runners after it. A child that finishes its
+// exit in between does not cancel the drain: on 11-08 at 06:54 that restarted
+// three sessions that had already exited, and they exited again. A Claude
+// that still runs outside the live runners, as one a killed runner left,
+// still stops the switch.
+func TestChildExitBeforePrepareDoesNotCancelTheDrain(t *testing.T) {
+	dataDir := t.TempDir()
+	root, err := rootDir(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// blockers reads them the way the Claude adapter's AutoBlockers does.
+	blockers := func() []int {
+		t.Helper()
+		states, err := Status(dataDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var pids []int
+		for _, s := range states {
+			if !s.Exited && s.ChildPID > 0 {
+				pids = append(pids, s.ChildPID)
+			}
+		}
+		return pids
+	}
+	// The child's pid names no process once it has ended and been reaped.
+	child := exec.Command("true")
+	if err := child.Run(); err != nil {
+		t.Fatal(err)
+	}
+	r := testRunner(t)
+	r.status.ChildPID = child.Process.Pid
+	serveRunner(t, root, r)
+	if ready, waiting, err := Prepare(dataDir, "g", blockers()); err != nil || ready || len(waiting) != 1 || waiting[0].Reason != ReasonExiting {
+		t.Fatalf("first prepare = %v, %v, %v", ready, waiting, err)
+	}
+	read := blockers()
+	if len(read) != 1 || read[0] != child.Process.Pid {
+		t.Fatalf("blockers while exiting = %v", read)
+	}
+	// The plugin acknowledges, Claude ends and the runner records it.
+	if got := callRunner(t, r, "/exiting", stateFor(r)); got.Code != 200 {
+		t.Fatal(got.Body.String())
+	}
+	r.mu.Lock()
+	r.status.Exited = true
+	err = r.persistLocked()
+	r.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ready, _, err := Prepare(dataDir, "g", read); err != nil || !ready {
+		t.Fatalf("prepare with blockers read before the exit = %v, %v", ready, err)
+	}
+	// A killed runner left its Claude running; this test process stands in.
+	leaveRecord(t, root, StatusInfo{ID: strings.Repeat("d", 64), ChildPID: os.Getpid(), SessionID: "session-orphan"})
+	if ready, _, err := Prepare(dataDir, "g", blockers()); err == nil || ready {
+		t.Fatal("switch went on past a Claude running outside the runners")
 	}
 }
 
