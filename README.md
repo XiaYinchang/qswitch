@@ -186,11 +186,11 @@ scripts/deploy.sh [--ref <commit>] [novix|macmini ...]   # 新 clone 构建并�
 
 ### 页面登录
 
-`qswitch web set-password <用户名>` 设置页面密码（至少 10 个字符；交互输入不回显，`--stdin` 从标准输入读一行给脚本用）。密码以 PBKDF2-SHA256 存在 `~/.qswitch/web-auth.json`（0600），daemon 在一秒内自动读到，不用重启。设了密码以后，页面和 `/api/*` 都先要登录，只有 `GET /api/health` 不用；脚本仍可用 `Authorization: Bearer <[web] token>`，`?token=` 不再接受。登录态是 30 天的 HttpOnly Cookie，由随密码一起轮换的密钥签名：改密码后所有浏览器都要重新登录，daemon 重启不掉线，「退出登录」只清当前浏览器。同一来源连续输错 5 次暂停登录 15 分钟，登录成功、失败暂停都记一行日志。没设密码时行为和以前一样：loopback 监听不要登录（SSH 隧道已经认过人），公网监听要 token。页面上不会出现密码和 token。
+`qswitch web set-password <用户名>` 设置页面密码（至少 10 个字符；交互输入不回显，`--stdin` 从标准输入读一行给脚本用）。密码以 PBKDF2-SHA256 存在 `~/.qswitch/web-auth.json`（0600），daemon 在一秒内自动读到，不用重启。密码只管经反向代理（Deck）和公网监听进来的请求：这些请求要先登录才能看页面和 `/api/*`，只有 `GET /api/health` 不用；脚本仍可用 `Authorization: Bearer <[web] token>`，`?token=` 不再接受。直接打到 loopback 监听的请求（本机页面、`ssh -N -L 7432:127.0.0.1:7432 <host>` 隧道）从不要密码：能到这里的人已经通过了本机或 SSH 登录，此时页面也不显示退出登录。登录态是 30 天的 HttpOnly Cookie，由随密码一起轮换的密钥签名：改密码后所有浏览器都要重新登录，daemon 重启不掉线，「退出登录」只清当前浏览器。同一来源连续输错 5 次暂停登录 15 分钟，登录成功、失败暂停都记一行日志。页面上不会出现密码和 token。
 
 ### 经 Deck 访问（novix）
 
-novix 的页面挂在 `https://deck.xiayinchang.top/qswitch/`，Deck 首页有入口卡片。链路是：novix 上的用户单元 `qswitch-tunnel.service`（`contrib/deck/qswitch-tunnel.service`）用专用密钥向 lisa-hk 建反向 SSH 隧道 `-R 127.0.0.1:7432:127.0.0.1:7432`，lisa-hk 上的 `qswitch-tunnel` 账号只允许这一个 remote forward（`contrib/deck/sshd-qswitch-tunnel.conf`），lisa-hk 的 nginx 把 `deck.xiayinchang.top/qswitch/` 代理到隧道并带上 `X-Forwarded-Host / -Proto / -Prefix / -For`（`contrib/deck/nginx-deck-qswitch.conf`）。qswitch 只信任来自 loopback 对端的这几个头，用它们判断同源、给 Cookie 加 `Secure` 和 `Path=/qswitch`、按真实来源计登录失败；页面里的请求都是相对路径，挂在任何前缀下都能用。经代理的请求在既没有密码也没有 token 时一律 403。本机仍可用 `ssh -N -L 7432:127.0.0.1:7432 novix` 打开 `http://127.0.0.1:7432`，同样要登录。
+novix 的页面挂在 `https://deck.xiayinchang.top/qswitch/`，Deck 首页有入口卡片。链路是：novix 上的用户单元 `qswitch-tunnel.service`（`contrib/deck/qswitch-tunnel.service`）用专用密钥向 lisa-hk 建反向 SSH 隧道 `-R 127.0.0.1:7432:127.0.0.1:7432`，lisa-hk 上的 `qswitch-tunnel` 账号只允许这一个 remote forward（`contrib/deck/sshd-qswitch-tunnel.conf`），lisa-hk 的 nginx 把 `deck.xiayinchang.top/qswitch/` 代理到隧道并带上 `X-Forwarded-Host / -Proto / -Prefix / -For`（`contrib/deck/nginx-deck-qswitch.conf`）。qswitch 只信任来自 loopback 对端的这几个头，用它们判断同源、给 Cookie 加 `Secure` 和 `Path=/qswitch`、按真实来源计登录失败；页面里的请求都是相对路径，挂在任何前缀下都能用。经代理的请求在既没有密码也没有 token 时一律 403。本机仍可用 `ssh -N -L 7432:127.0.0.1:7432 novix` 打开 `http://127.0.0.1:7432`，不要登录。
 
 公网暴露：`[web] addr` 设为非 loopback 地址时必须先设密码或 `[web] token`，否则拒绝启动；这时所有请求都要登录或 Bearer，Origin 同源校验照常生效。明文 HTTP 下密码会经过链路，只应放在 TLS 反向代理之后。
 

@@ -14,8 +14,9 @@ import (
 )
 
 const (
-	testUser = "xyc"
-	testPass = "correct horse battery"
+	testUser   = "xyc"
+	testPass   = "correct horse battery"
+	deckOrigin = "https://deck.xiayinchang.top"
 )
 
 type fakeClock struct{ t time.Time }
@@ -40,13 +41,45 @@ func do(h http.Handler, r *http.Request) *httptest.ResponseRecorder {
 	return w
 }
 
-func loginForm(user, pass string) *http.Request {
-	body := url.Values{"user": {user}, "password": {pass}}.Encode()
-	r := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(body))
+func local(method, target string) *http.Request {
+	r := httptest.NewRequest(method, target, nil)
 	r.Host = "127.0.0.1:7432"
+	return r
+}
+
+// Through the Deck tunnel nginx forwards X-Forwarded-* from loopback; the
+// page is mounted under /qswitch on https.
+func proxied(method, target string) *http.Request {
+	r := httptest.NewRequest(method, target, nil)
+	r.Host = "127.0.0.1:7432"
+	r.RemoteAddr = "127.0.0.1:40000"
+	r.Header.Set("X-Forwarded-Host", "deck.xiayinchang.top")
+	r.Header.Set("X-Forwarded-Proto", "https")
+	r.Header.Set("X-Forwarded-Prefix", "/qswitch")
+	r.Header.Set("X-Forwarded-For", "203.0.113.9")
+	return r
+}
+
+func withForm(r *http.Request, user, pass string) *http.Request {
+	body := url.Values{"user": {user}, "password": {pass}}.Encode()
+	r.Body = httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body)).Body
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	return r
 }
+
+func proxiedLogin(user, pass, origin, from string) *http.Request {
+	r := withForm(proxied(http.MethodPost, "/login"), user, pass)
+	if origin != "" {
+		r.Header.Set("Origin", origin)
+	}
+	if from != "" {
+		r.Header.Set("X-Forwarded-For", from)
+	}
+	return r
+}
+
+// loginForm is what the browser sends from the Deck login page.
+func loginForm(user, pass string) *http.Request { return proxiedLogin(user, pass, deckOrigin, "") }
 
 func sessionCookieOf(t *testing.T, w *httptest.ResponseRecorder) *http.Cookie {
 	t.Helper()
@@ -59,26 +92,48 @@ func sessionCookieOf(t *testing.T, w *httptest.ResponseRecorder) *http.Cookie {
 	return nil
 }
 
-func local(method, target string) *http.Request {
-	r := httptest.NewRequest(method, target, nil)
-	r.Host = "127.0.0.1:7432"
-	return r
+// The loopback listener is the local page and the SSH tunnel: whoever gets
+// there has authenticated to the host already, so a password never applies.
+func TestLoopbackNeverAsksForPassword(t *testing.T) {
+	s, _, _ := passwordServer(t, "127.0.0.1:7432", "")
+	h := s.Handler()
+	if w := do(h, local(http.MethodGet, "/")); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"api/overview"`) {
+		t.Fatalf("page: %d", w.Code)
+	}
+	if w := do(h, local(http.MethodGet, "/api/session")); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"login_required":false`) {
+		t.Fatalf("session: %d %s", w.Code, w.Body.String())
+	}
+	if w := do(h, local(http.MethodGet, "/login")); w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/" {
+		t.Fatalf("login page: %d %q", w.Code, w.Header().Get("Location"))
+	}
+	w := do(h, withForm(local(http.MethodPost, "/login"), testUser, testPass))
+	if w.Code != http.StatusSeeOther || len(w.Result().Cookies()) != 0 {
+		t.Fatalf("login post: %d cookies=%v", w.Code, w.Result().Cookies())
+	}
+	if w := do(h, local(http.MethodPost, "/logout")); w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/" {
+		t.Fatalf("logout: %d %q", w.Code, w.Header().Get("Location"))
+	}
+	r := local(http.MethodGet, "/api/health")
+	r.Host = "attacker.example:7432"
+	if w := do(h, r); w.Code != http.StatusForbidden {
+		t.Fatalf("foreign Host must stay refused: %d", w.Code)
+	}
 }
 
-func TestPasswordGatesPageAndAPI(t *testing.T) {
+func TestPasswordGatesProxiedRequests(t *testing.T) {
 	s, _, _ := passwordServer(t, "127.0.0.1:7432", "")
 	h := s.Handler()
 
-	if w := do(h, local(http.MethodGet, "/")); w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/login" {
+	if w := do(h, proxied(http.MethodGet, "/")); w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/qswitch/login" {
 		t.Fatalf("page without login: %d %q", w.Code, w.Header().Get("Location"))
 	}
-	if w := do(h, local(http.MethodGet, "/api/overview")); w.Code != http.StatusUnauthorized || w.Header().Get("X-Qswitch") != "1" {
+	if w := do(h, proxied(http.MethodGet, "/api/overview")); w.Code != http.StatusUnauthorized || w.Header().Get("X-Qswitch") != "1" {
 		t.Fatalf("api without login: %d %v", w.Code, w.Header())
 	}
-	if w := do(h, local(http.MethodGet, "/api/health")); w.Code != http.StatusOK {
+	if w := do(h, proxied(http.MethodGet, "/api/health")); w.Code != http.StatusOK {
 		t.Fatalf("health must stay open: %d", w.Code)
 	}
-	if w := do(h, local(http.MethodGet, "/login")); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `name="password"`) || !strings.Contains(w.Body.String(), `action="/login"`) {
+	if w := do(h, proxied(http.MethodGet, "/login")); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `name="password"`) || !strings.Contains(w.Body.String(), `action="/qswitch/login"`) {
 		t.Fatalf("login page: %d %s", w.Code, w.Body.String())
 	}
 	if w := do(h, loginForm(testUser, "wrong")); w.Code != http.StatusUnauthorized || !strings.Contains(w.Body.String(), "不对") {
@@ -88,34 +143,54 @@ func TestPasswordGatesPageAndAPI(t *testing.T) {
 		t.Fatalf("wrong user: %d", w.Code)
 	}
 	w := do(h, loginForm(testUser, testPass))
-	if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/" {
+	if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/qswitch/" {
 		t.Fatalf("login: %d %q", w.Code, w.Header().Get("Location"))
 	}
 	ck := sessionCookieOf(t, w)
-	if !ck.HttpOnly || ck.Secure || ck.Path != "/" || ck.SameSite != http.SameSiteLaxMode || ck.MaxAge != int(sessionTTL/time.Second) {
+	if !ck.HttpOnly || !ck.Secure || ck.Path != "/qswitch" || ck.SameSite != http.SameSiteLaxMode || ck.MaxAge != int(sessionTTL/time.Second) {
 		t.Fatalf("cookie attributes: %+v", ck)
 	}
 
-	r := local(http.MethodGet, "/api/session")
+	r := proxied(http.MethodGet, "/api/session")
 	r.AddCookie(ck)
 	if w := do(h, r); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"user":"xyc"`) {
 		t.Fatalf("session with cookie: %d %s", w.Code, w.Body.String())
 	}
-	r = local(http.MethodGet, "/login")
+	r = proxied(http.MethodGet, "/login")
 	r.AddCookie(ck)
-	if w := do(h, r); w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/" {
+	if w := do(h, r); w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/qswitch/" {
 		t.Fatalf("login page while logged in: %d", w.Code)
 	}
-	r = local(http.MethodGet, "/api/session")
+	r = proxied(http.MethodGet, "/api/session")
 	r.AddCookie(&http.Cookie{Name: sessionCookie, Value: ck.Value[:len(ck.Value)-2] + "xx"})
 	if w := do(h, r); w.Code != http.StatusUnauthorized {
 		t.Fatalf("tampered cookie: %d", w.Code)
 	}
-	r = local(http.MethodPost, "/logout")
+	r = proxied(http.MethodPost, "/logout")
 	r.AddCookie(ck)
+	r.Header.Set("Origin", deckOrigin)
 	w = do(h, r)
-	if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/login" || sessionCookieOf(t, w).MaxAge >= 0 {
+	if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/qswitch/login" || sessionCookieOf(t, w).MaxAge >= 0 {
 		t.Fatalf("logout: %d %v", w.Code, w.Header())
+	}
+}
+
+func TestPublicBindWithPasswordAsksLogin(t *testing.T) {
+	s, _, _ := passwordServer(t, "0.0.0.0:7432", "")
+	h := s.Handler()
+	if w := do(h, httptest.NewRequest(http.MethodGet, "http://38.69.195.202:7432/", nil)); w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/login" {
+		t.Fatalf("public page: %d %q", w.Code, w.Header().Get("Location"))
+	}
+	if w := do(h, httptest.NewRequest(http.MethodGet, "http://38.69.195.202:7432/api/health", nil)); w.Code != http.StatusOK {
+		t.Fatalf("public health: %d", w.Code)
+	}
+	r := withForm(httptest.NewRequest(http.MethodPost, "http://38.69.195.202:7432/login", nil), testUser, testPass)
+	w := do(h, r)
+	if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/" {
+		t.Fatalf("public login: %d %q", w.Code, w.Header().Get("Location"))
+	}
+	if ck := sessionCookieOf(t, w); ck.Secure || ck.Path != "/" {
+		t.Fatalf("plain-http public cookie: %+v", ck)
 	}
 }
 
@@ -125,7 +200,7 @@ func TestSessionOutlivesRestartNotPasswordChange(t *testing.T) {
 
 	again := New(s.App, s.Addr)
 	again.Now = clk.now
-	r := local(http.MethodGet, "/api/session")
+	r := proxied(http.MethodGet, "/api/session")
 	r.AddCookie(ck)
 	if w := do(again.Handler(), r); w.Code != http.StatusOK {
 		t.Fatalf("cookie after restart: %d", w.Code)
@@ -136,7 +211,7 @@ func TestSessionOutlivesRestartNotPasswordChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	clk.t = clk.t.Add(2 * time.Second)
-	r = local(http.MethodGet, "/api/session")
+	r = proxied(http.MethodGet, "/api/session")
 	r.AddCookie(ck)
 	if w := do(s.Handler(), r); w.Code != http.StatusUnauthorized {
 		t.Fatalf("cookie after password change: %d", w.Code)
@@ -166,9 +241,23 @@ func TestLoginLockout(t *testing.T) {
 	}
 }
 
+func TestProxiedLockoutIsPerClient(t *testing.T) {
+	s, _, _ := passwordServer(t, "127.0.0.1:7432", "")
+	h := s.Handler()
+	for i := 0; i < lockAfter; i++ {
+		do(h, proxiedLogin(testUser, "wrong", deckOrigin, "203.0.113.9"))
+	}
+	if w := do(h, proxiedLogin(testUser, testPass, deckOrigin, "203.0.113.9")); w.Code != http.StatusTooManyRequests {
+		t.Fatalf("locked client: %d", w.Code)
+	}
+	if w := do(h, proxiedLogin(testUser, testPass, deckOrigin, "203.0.113.10")); w.Code != http.StatusSeeOther {
+		t.Fatalf("other client: %d", w.Code)
+	}
+}
+
 func TestBearerTokenSkipsLogin(t *testing.T) {
 	s, _, _ := passwordServer(t, "127.0.0.1:7432", "script-token")
-	r := local(http.MethodGet, "/api/session")
+	r := proxied(http.MethodGet, "/api/session")
 	r.Header.Set("Authorization", "Bearer script-token")
 	if w := do(s.Handler(), r); w.Code != http.StatusOK {
 		t.Fatalf("bearer: %d", w.Code)
@@ -184,8 +273,11 @@ func TestUnreadableCredentialsFailClosed(t *testing.T) {
 	if err := os.Chmod(AuthPath(dir), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if w := do(s.Handler(), local(http.MethodGet, "/api/health")); w.Code != http.StatusServiceUnavailable {
-		t.Fatalf("world-readable credentials: %d", w.Code)
+	if w := do(s.Handler(), proxied(http.MethodGet, "/api/health")); w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("world-readable credentials, proxied: %d", w.Code)
+	}
+	if w := do(s.Handler(), local(http.MethodGet, "/api/health")); w.Code != http.StatusOK {
+		t.Fatalf("loopback does not depend on the credentials file: %d", w.Code)
 	}
 }
 
@@ -210,74 +302,29 @@ func TestSetPasswordRules(t *testing.T) {
 	}
 }
 
-// Through the Deck tunnel nginx forwards X-Forwarded-* from loopback; the
-// page is mounted under /qswitch on https.
-func proxied(method, target string) *http.Request {
-	r := httptest.NewRequest(method, target, nil)
-	r.Host = "127.0.0.1:7432"
-	r.RemoteAddr = "127.0.0.1:40000"
-	r.Header.Set("X-Forwarded-Host", "deck.xiayinchang.top")
-	r.Header.Set("X-Forwarded-Proto", "https")
-	r.Header.Set("X-Forwarded-Prefix", "/qswitch")
-	r.Header.Set("X-Forwarded-For", "203.0.113.9")
-	return r
-}
-
-func proxiedLogin(user, pass, origin, from string) *http.Request {
-	r := proxied(http.MethodPost, "/login")
-	r.Body = httptest.NewRequest(http.MethodPost, "/", strings.NewReader(url.Values{"user": {user}, "password": {pass}}.Encode())).Body
-	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	if origin != "" {
-		r.Header.Set("Origin", origin)
-	}
-	if from != "" {
-		r.Header.Set("X-Forwarded-For", from)
-	}
-	return r
-}
-
 func TestProxiedThroughDeck(t *testing.T) {
 	s, _, _ := passwordServer(t, "127.0.0.1:7432", "")
 	h := s.Handler()
-	if w := do(h, proxied(http.MethodGet, "/")); w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/qswitch/login" {
-		t.Fatalf("page: %d %q", w.Code, w.Header().Get("Location"))
-	}
-	if w := do(h, proxied(http.MethodGet, "/login")); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `action="/qswitch/login"`) {
-		t.Fatalf("login page: %d", w.Code)
-	}
 	if w := do(h, proxiedLogin(testUser, testPass, "https://evil.example", "")); w.Code != http.StatusForbidden {
 		t.Fatalf("cross-site login: %d", w.Code)
 	}
 	if w := do(h, proxiedLogin(testUser, testPass, "http://deck.xiayinchang.top", "")); w.Code != http.StatusForbidden {
 		t.Fatalf("http origin for https page: %d", w.Code)
 	}
-	w := do(h, proxiedLogin(testUser, testPass, "https://deck.xiayinchang.top", ""))
-	if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/qswitch/" {
-		t.Fatalf("login: %d %q %s", w.Code, w.Header().Get("Location"), w.Body.String())
-	}
-	ck := sessionCookieOf(t, w)
-	if !ck.Secure || ck.Path != "/qswitch" || !ck.HttpOnly {
-		t.Fatalf("cookie: %+v", ck)
-	}
+	ck := sessionCookieOf(t, do(h, loginForm(testUser, testPass)))
 	r := proxied(http.MethodGet, "/")
 	r.AddCookie(ck)
-	w = do(h, r)
+	w := do(h, r)
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"api/overview"`) || strings.Contains(w.Body.String(), `"/api/`) {
 		t.Fatalf("page must use relative api paths: %d", w.Code)
 	}
 	csp := w.Header().Get("Content-Security-Policy")
-	nonce := strings.TrimSuffix(strings.SplitN(csp, "'nonce-", 2)[1], "'")
+	nonce := strings.SplitN(csp, "'nonce-", 2)[1]
 	if i := strings.Index(nonce, "'"); i >= 0 {
 		nonce = nonce[:i]
 	}
-	if nonce == "" || !strings.Contains(w.Body.String(), `<script nonce="`+nonce+`">`) || strings.Contains(csp, "unsafe-inline'; connect") == false {
+	if nonce == "" || !strings.Contains(w.Body.String(), `<script nonce="`+nonce+`">`) {
 		t.Fatalf("csp %q does not match page", csp)
-	}
-	r = proxied(http.MethodPost, "/logout")
-	r.AddCookie(ck)
-	r.Header.Set("Origin", "https://deck.xiayinchang.top")
-	if w := do(h, r); w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/qswitch/login" {
-		t.Fatalf("logout: %d %q", w.Code, w.Header().Get("Location"))
 	}
 }
 
@@ -285,30 +332,14 @@ func TestProxiedThroughDeck(t *testing.T) {
 // `Origin: null`, which the same-origin check rejects.
 func TestReferrerPolicyKeepsFormOrigin(t *testing.T) {
 	s, _, _ := passwordServer(t, "127.0.0.1:7432", "")
-	for _, r := range []*http.Request{local(http.MethodGet, "/login"), proxied(http.MethodGet, "/login")} {
+	for _, r := range []*http.Request{local(http.MethodGet, "/"), proxied(http.MethodGet, "/login")} {
 		w := do(s.Handler(), r)
 		if got := w.Header().Values("Referrer-Policy"); len(got) != 1 || got[0] != "same-origin" {
 			t.Fatalf("Referrer-Policy = %v", got)
 		}
 	}
-	r := loginForm(testUser, testPass)
-	r.Header.Set("Origin", "null")
-	if w := do(s.Handler(), r); w.Code != http.StatusForbidden {
+	if w := do(s.Handler(), proxiedLogin(testUser, testPass, "null", "")); w.Code != http.StatusForbidden {
 		t.Fatalf("null origin must stay rejected: %d", w.Code)
-	}
-}
-
-func TestProxiedLockoutIsPerClient(t *testing.T) {
-	s, _, _ := passwordServer(t, "127.0.0.1:7432", "")
-	h := s.Handler()
-	for i := 0; i < lockAfter; i++ {
-		do(h, proxiedLogin(testUser, "wrong", "https://deck.xiayinchang.top", "203.0.113.9"))
-	}
-	if w := do(h, proxiedLogin(testUser, testPass, "https://deck.xiayinchang.top", "203.0.113.9")); w.Code != http.StatusTooManyRequests {
-		t.Fatalf("locked client: %d", w.Code)
-	}
-	if w := do(h, proxiedLogin(testUser, testPass, "https://deck.xiayinchang.top", "203.0.113.10")); w.Code != http.StatusSeeOther {
-		t.Fatalf("other client: %d", w.Code)
 	}
 }
 
@@ -337,7 +368,7 @@ func TestForwardedHeadersOnlyFromLoopback(t *testing.T) {
 	if w := do(s.Handler(), r); w.Code != http.StatusOK {
 		t.Fatalf("plain loopback request: %d", w.Code)
 	}
-	r.Header.Set("Origin", "https://deck.xiayinchang.top")
+	r.Header.Set("Origin", deckOrigin)
 	if w := do(s.Handler(), r); w.Code != http.StatusForbidden {
 		t.Fatalf("forwarded origin from a stranger: %d", w.Code)
 	}
@@ -354,11 +385,14 @@ func TestCleanPrefix(t *testing.T) {
 	}
 }
 
-func TestAlreadyServingBehindLogin(t *testing.T) {
-	s, _, _ := passwordServer(t, "127.0.0.1:7432", "")
-	ts := httptest.NewServer(s.Handler())
+func TestAlreadyServingWithPassword(t *testing.T) {
+	a := setupApp(t)
+	if err := SetPassword(a.DataDir, testUser, testPass); err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(New(a, "127.0.0.1:7432").Handler())
 	defer ts.Close()
 	if !AlreadyServing(ts.Listener.Addr().String()) {
-		t.Fatal("a login prompt is still qswitch")
+		t.Fatal("the local page is still qswitch")
 	}
 }

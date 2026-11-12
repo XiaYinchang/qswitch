@@ -28,9 +28,10 @@ import (
 )
 
 // Browser login for the page. `qswitch web set-password <user>` writes
-// web-auth.json into the data dir; from then on every request except
-// GET /api/health needs a session cookie from POST /login, or the Bearer
-// token for scripts. The cookie is an HMAC over its expiry under a key that
+// web-auth.json into the data dir; from then on every request that comes
+// through a reverse proxy or a public listener, except GET /api/health,
+// needs a session cookie from POST /login, or the Bearer token for scripts.
+// The loopback listener itself (the local page, an SSH tunnel) never asks. The cookie is an HMAC over its expiry under a key that
 // changes with the password, so a new password logs every browser out and a
 // daemon restart logs nobody out. Five wrong passwords in a row from one
 // address pause its logins for fifteen minutes.
@@ -379,6 +380,17 @@ func (s *Server) logf(format string, args ...any) {
 	}
 }
 
+// loginRequired reports whether this request must carry a session: a
+// password is set and the request came through the proxy or a public
+// listener. The loopback listener (the local page, the SSH tunnel) never asks.
+func (s *Server) loginRequired(r *http.Request) (*Credentials, bool) {
+	c, err := s.credentials()
+	if err != nil || c == nil {
+		return nil, false
+	}
+	return c, CheckLoopback(s.Addr) != nil || externalOf(r).proxied
+}
+
 func (s *Server) sessionOK(r *http.Request, c *Credentials) bool {
 	ck, err := r.Cookie(sessionCookie)
 	return err == nil && c.valid(ck.Value, s.now())
@@ -411,22 +423,22 @@ func (s *Server) unauthorized(w http.ResponseWriter, r *http.Request, x external
 }
 
 func (s *Server) getSession(w http.ResponseWriter, r *http.Request) {
-	c, _ := s.credentials()
-	out := map[string]any{"login_required": c != nil}
-	if c != nil {
+	c, need := s.loginRequired(r)
+	out := map[string]any{"login_required": need}
+	if need {
 		out["user"] = c.User
 	}
 	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) getLoginPage(w http.ResponseWriter, r *http.Request) {
-	c, err := s.credentials()
-	if err != nil || c == nil {
+	c, need := s.loginRequired(r)
+	if c == nil {
 		http.NotFound(w, r)
 		return
 	}
 	x := externalOf(r)
-	if s.sessionOK(r, c) {
+	if !need || s.sessionOK(r, c) {
 		http.Redirect(w, r, x.path("/"), http.StatusSeeOther)
 		return
 	}
@@ -434,12 +446,16 @@ func (s *Server) getLoginPage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) postLogin(w http.ResponseWriter, r *http.Request) {
-	c, err := s.credentials()
-	if err != nil || c == nil {
+	c, need := s.loginRequired(r)
+	if c == nil {
 		http.NotFound(w, r)
 		return
 	}
 	x := externalOf(r)
+	if !need {
+		http.Redirect(w, r, x.path("/"), http.StatusSeeOther)
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 	if err := r.ParseForm(); err != nil {
 		s.loginPage(w, http.StatusBadRequest, x, "", "表单无法读取")
@@ -470,7 +486,7 @@ func (s *Server) postLogin(w http.ResponseWriter, r *http.Request) {
 func (s *Server) postLogout(w http.ResponseWriter, r *http.Request) {
 	x := externalOf(r)
 	s.setSession(w, x, "", -1)
-	if c, _ := s.credentials(); c != nil {
+	if _, need := s.loginRequired(r); need {
 		http.Redirect(w, r, x.path("/login"), http.StatusSeeOther)
 		return
 	}

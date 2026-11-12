@@ -96,10 +96,12 @@ func (s *Server) Handler() http.Handler {
 //     a reverse proxy on loopback names the real host in X-Forwarded-Host;
 //   - a request that carries an Origin must be same-origin as the browser
 //     sees it (writes from other sites);
-//   - with a password set, everything but GET /api/health and the login page
-//     needs the session cookie, or the Bearer token for scripts;
-//   - without one, a public listener or a proxied request needs the Bearer
-//     token; a plain loopback listener stays open to the SSH tunnel.
+//   - with a password set, a proxied request or one on a public listener
+//     needs the session cookie (everything but GET /api/health and the login
+//     page), or the Bearer token for scripts;
+//   - without one, those requests need the Bearer token;
+//   - the loopback listener itself stays open either way: whoever reaches it
+//     (the local page, the SSH tunnel) has already authenticated to the host.
 func (s *Server) admit(w http.ResponseWriter, r *http.Request) bool {
 	public := CheckLoopback(s.Addr) != nil
 	x := externalOf(r)
@@ -110,6 +112,9 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request) bool {
 	if o := r.Header.Get("Origin"); o != "" && !validOrigin(r, o) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return false
+	}
+	if !public && !x.proxied {
+		return true
 	}
 	creds, err := s.credentials()
 	if err != nil {
@@ -129,7 +134,7 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request) bool {
 		s.unauthorized(w, r, x)
 		return false
 	}
-	if public || x.proxied {
+	{
 		if tok == "" {
 			w.Header().Set("Cache-Control", "no-store")
 			http.Error(w, "forbidden: set a page password (qswitch web set-password) or [web] token", http.StatusForbidden)
