@@ -3,6 +3,9 @@
 # deck.xiayinchang.top/qswitch/ -> lisa-hk 127.0.0.1:7432 -> novix 127.0.0.1:7432.
 # Key: ~/.ssh/qswitch-tunnel_ed25519 (no passphrase, used for nothing else);
 # the matching entry on lisa-hk is restricted to this one forward.
+# -F /dev/null: the host ssh_config is not read (systemd's symlinked include
+# fails ssh's ownership check from inside a user service); every option the
+# tunnel needs is on the command line.
 #   systemctl --user daemon-reload && systemctl --user enable --now qswitch-tunnel
 [Unit]
 Description=qswitch page tunnel to lisa-hk (Deck)
@@ -10,7 +13,7 @@ After=network-online.target qswitchd.service
 Wants=network-online.target
 
 [Service]
-ExecStart=/usr/bin/ssh -NT \
+ExecStart=/usr/bin/ssh -F /dev/null -NT \
   -o BatchMode=yes \
   -o ExitOnForwardFailure=yes \
   -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
