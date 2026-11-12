@@ -17,7 +17,7 @@ const fs=require('fs'),vm=require('vm');
 const source=fs.readFileSync('static/index.html','utf8');
 const elements={root:{children:[],innerHTML:'',appendChild(x){this.children.push(x)}},msg:{textContent:'',className:''}};
 let result={class:'unknown',updated:false,source:'http'};
-const ctx={document:{getElementById:id=>elements[id],createElement:()=>({children:[],appendChild(x){this.children.push(x)}})},fetch:async path=>({ok:true,json:async()=>path==='/api/probe'?result:{tools:[]}})};
+const ctx={document:{getElementById:id=>elements[id],createElement:()=>({children:[],appendChild(x){this.children.push(x)}})},fetch:async path=>({ok:true,json:async()=>path==='api/probe'?result:{tools:[]}})};
 vm.createContext(ctx);
 vm.runInContext(source.slice(source.indexOf('const $ ='),source.indexOf('$("loginCancel").onclick')),ctx);
 for(const cls of ['unknown','expired']){

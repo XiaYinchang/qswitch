@@ -171,6 +171,7 @@ qswitch switch codex <id-or-email>
 qswitch switch cursor <id-or-email>                # 会关掉并重启 Cursor.app
 qswitch doctor
 qswitch serve [--addr 127.0.0.1:7432]
+qswitch web set-password <用户名> [--stdin]     # 页面登录密码，见「页面登录」
 
 scripts/deploy.sh [--ref <commit>] [novix|macmini ...]   # 新 clone 构建并部署到两台机器，见下文
 ```
@@ -183,9 +184,15 @@ scripts/deploy.sh [--ref <commit>] [novix|macmini ...]   # 新 clone 构建并�
 
 页面显示阻塞切换的 PID、待切换目标账号及排队状态。Kimi 会话运行时必须先退出，仅等待 30 秒空闲不会解除阻塞；普通非受管 Claude 不阻断自动或手动切号。通过 `qswitch run claude` 启动的受管会话会在空闲时自动退出、切号并恢复。排队目标仍需在执行前通过最新用量和安全检查。
 
-远程服务器（如 novix）建议保持默认 loopback 监听，通过 SSH 隧道访问：`ssh -N -L 7432:127.0.0.1:7432 <host>`，然后本机打开 `http://127.0.0.1:7432`。流量由 SSH 加密，不需要 token。
+### 页面登录
 
-公网暴露：`[web] addr` 设为非 loopback 地址时必须同时设置 `[web] token`，否则拒绝启动。此时所有请求要求 token —— 打开 `http://<addr>/?token=<token>` 一次种下 HttpOnly Cookie，之后同浏览器直接访问；脚本可用 `Authorization: Bearer <token>`。Origin 同源校验在 token 之上仍然生效。明文 HTTP 下 token 会经过链路，只应放在 TLS 反向代理之后。
+`qswitch web set-password <用户名>` 设置页面密码（至少 10 个字符；交互输入不回显，`--stdin` 从标准输入读一行给脚本用）。密码以 PBKDF2-SHA256 存在 `~/.qswitch/web-auth.json`（0600），daemon 在一秒内自动读到，不用重启。设了密码以后，页面和 `/api/*` 都先要登录，只有 `GET /api/health` 不用；脚本仍可用 `Authorization: Bearer <[web] token>`，`?token=` 不再接受。登录态是 30 天的 HttpOnly Cookie，由随密码一起轮换的密钥签名：改密码后所有浏览器都要重新登录，daemon 重启不掉线，「退出登录」只清当前浏览器。同一来源连续输错 5 次暂停登录 15 分钟，登录成功、失败暂停都记一行日志。没设密码时行为和以前一样：loopback 监听不要登录（SSH 隧道已经认过人），公网监听要 token。页面上不会出现密码和 token。
+
+### 经 Deck 访问（novix）
+
+novix 的页面挂在 `https://deck.xiayinchang.top/qswitch/`，Deck 首页有入口卡片。链路是：novix 上的用户单元 `qswitch-tunnel.service`（`contrib/deck/qswitch-tunnel.service`）用专用密钥向 lisa-hk 建反向 SSH 隧道 `-R 127.0.0.1:7432:127.0.0.1:7432`，lisa-hk 上的 `qswitch-tunnel` 账号只允许这一个 remote forward（`contrib/deck/sshd-qswitch-tunnel.conf`），lisa-hk 的 nginx 把 `deck.xiayinchang.top/qswitch/` 代理到隧道并带上 `X-Forwarded-Host / -Proto / -Prefix / -For`（`contrib/deck/nginx-deck-qswitch.conf`）。qswitch 只信任来自 loopback 对端的这几个头，用它们判断同源、给 Cookie 加 `Secure` 和 `Path=/qswitch`、按真实来源计登录失败；页面里的请求都是相对路径，挂在任何前缀下都能用。经代理的请求在既没有密码也没有 token 时一律 403。本机仍可用 `ssh -N -L 7432:127.0.0.1:7432 novix` 打开 `http://127.0.0.1:7432`，同样要登录。
+
+公网暴露：`[web] addr` 设为非 loopback 地址时必须先设密码或 `[web] token`，否则拒绝启动；这时所有请求都要登录或 Bearer，Origin 同源校验照常生效。明文 HTTP 下密码会经过链路，只应放在 TLS 反向代理之后。
 
 Cursor 切号会同时写入 IDE 和 CLI 的登录字段。
 

@@ -40,6 +40,8 @@
     gap: 12px;
     min-width: 0;
   }
+  #logoutForm { display: flex; align-items: center; gap: 8px; margin: 0; }
+  #logoutForm[hidden] { display: none; }
   main { padding: 18px 24px 40px; display: grid; gap: 22px; }
   .sec-head {
     display: flex;
@@ -215,6 +217,7 @@
   <div class="header-right">
     <p class="msg" id="msg"></p>
     <button id="reload" data-act="reload-all">刷新</button>
+    <form method="post" action="logout" id="logoutForm" hidden><span class="meta" id="who"></span><button class="ghost" type="submit">退出登录</button></form>
   </div>
 </header>
 <main id="root"></main>
@@ -232,6 +235,7 @@
 const $ = (id) => document.getElementById(id);
 const msg = (t, err) => { const el = $("msg"); el.textContent = t || ""; el.className = "msg" + (err ? " err" : ""); };
 const api = (path, opt) => fetch(path, Object.assign({ cache: "no-store", headers: { "Content-Type": "application/json" } }, opt)).then(async r => {
+  if (r.status === 401) { location.replace("login"); throw new Error("需要登录"); }
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j.error || r.statusText);
   return j;
@@ -475,7 +479,7 @@ function render(ov) {
 async function loadVersion() {
   const el = $("daemonVersion");
   try {
-    const health = await api("/api/health");
+    const health = await api("api/health");
     if (typeof health.version !== "string" || !health.version.trim()) throw new Error("接口未返回版本号");
     el.textContent = "守护进程版本：" + health.version;
     el.title = "当前连接的 qswitch 守护进程";
@@ -486,7 +490,7 @@ async function loadVersion() {
 }
 async function load() {
   try {
-    render(await api("/api/overview"));
+    render(await api("api/overview"));
     msg("");
   } catch (e) { msg(e.message, true); }
 }
@@ -504,7 +508,7 @@ async function onClick(e) {
   try {
     if (act === "capture") {
       b.disabled = true;
-      const r = await api("/api/capture", { method: "POST", body: JSON.stringify({ tool }) });
+      const r = await api("api/capture", { method: "POST", body: JSON.stringify({ tool }) });
       await load();
       msg("已收录 " + (r.captured || []).map(accountLabel).join(", "));
     } else if (act === "reload-all" || act === "probe" || act === "probe-tool") {
@@ -512,7 +516,7 @@ async function onClick(e) {
       if (act === "reload-all") loadVersion();
       msg("正在查用量…");
       const body = act === "reload-all" ? {} : { tool, id: act === "probe" ? id : "" };
-      const ov = await api("/api/probe", { method: "POST", body: JSON.stringify(body) });
+      const ov = await api("api/probe", { method: "POST", body: JSON.stringify(body) });
       if (ov && ov.tools) {
         render(ov);
         const uncertain = ov.tools.filter(t => !tool || t.tool === tool).some(t => (t.accounts || []).some(ac => ac.quota_stale));
@@ -527,7 +531,7 @@ async function onClick(e) {
     } else if (act === "forget") {
       if (!confirm("从仓库删掉这个账号？当前登录不会动。")) return;
       b.disabled = true;
-      await api("/api/forget", { method: "POST", body: JSON.stringify({ tool, id }) });
+      await api("api/forget", { method: "POST", body: JSON.stringify({ tool, id }) });
       await load();
     } else if (act === "switch") {
       const prompt = {
@@ -540,7 +544,7 @@ async function onClick(e) {
       }[tool] || "切换到这个账号？空闲的 CLI 会先结束。";
       if (!confirm(prompt)) return;
       b.disabled = true;
-      await api("/api/switch", { method: "POST", body: JSON.stringify({ tool, id, kill_cli: true }) });
+      await api("api/switch", { method: "POST", body: JSON.stringify({ tool, id, kill_cli: true }) });
       await load();
       msg(["kimi", "devin", "claude"].includes(tool) ? "已切换。新的 CLI 进程将使用新账号。" : "已切换。对应的 App 会用新号打开。");
     } else if (act === "login-codex" || act === "login-grok") {
@@ -568,13 +572,13 @@ async function startLogin(tool) {
   $("loginDlg").showModal();
   let r;
   try {
-    r = await api("/api/login/" + tool, { method: "POST", body: "{}" });
+    r = await api("api/login/" + tool, { method: "POST", body: "{}" });
   } catch (e) {
     if (generation === loginGeneration) $("loginMsg").textContent = e.message;
     return;
   }
   if (generation !== loginGeneration) {
-    await api("/api/login/" + tool + "/cancel", { method: "POST", body: JSON.stringify({ id: r.id }) }).catch(() => {});
+    await api("api/login/" + tool + "/cancel", { method: "POST", body: JSON.stringify({ id: r.id }) }).catch(() => {});
     return;
   }
   loginId = r.id;
@@ -588,7 +592,7 @@ async function pollLogin() {
   if (!loginId) return;
   const generation = loginGeneration;
   try {
-    const r = await api("/api/login/" + loginTool + "?id=" + encodeURIComponent(loginId));
+    const r = await api("api/login/" + loginTool + "?id=" + encodeURIComponent(loginId));
     if (generation !== loginGeneration) return;
     if (r.status === "ok") {
       clearInterval(loginTimer);
@@ -607,11 +611,21 @@ async function cancelLogin() {
   const id = loginId, tool = loginTool;
   loginId = "";
   $("loginDlg").close();
-  if (id) await api("/api/login/" + tool + "/cancel", { method: "POST", body: JSON.stringify({ id }) }).catch(() => {});
+  if (id) await api("api/login/" + tool + "/cancel", { method: "POST", body: JSON.stringify({ id }) }).catch(() => {});
 }
 $("loginCancel").onclick = cancelLogin;
 $("loginDlg").addEventListener("cancel", e => { e.preventDefault(); cancelLogin(); });
+async function loadSession() {
+  try {
+    const sess = await api("api/session");
+    if (sess.login_required) {
+      $("who").textContent = sess.user || "";
+      $("logoutForm").hidden = false;
+    }
+  } catch (e) { /* no login configured, or the redirect above is under way */ }
+}
 document.addEventListener("click", onClick);
+loadSession();
 loadVersion();
 load();
 </script>

@@ -3,7 +3,7 @@ package web
 import (
 	"context"
 	"crypto/rand"
-	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -26,11 +26,15 @@ import (
 type Server struct {
 	App  *app.App
 	Addr string
+	// Now stands in for time.Now in tests.
+	Now func() time.Time
 
 	mu      sync.Mutex
 	logins  map[string]*loginSess
 	httpSrv *http.Server
 	ctx     context.Context
+	auth    authCache
+	fails   failTable
 }
 
 type loginSess struct {
@@ -44,7 +48,11 @@ type loginSess struct {
 }
 
 func New(a *app.App, addr string) *Server {
-	return &Server{App: a, Addr: addr, logins: map[string]*loginSess{}, ctx: context.Background()}
+	s := &Server{App: a, Addr: addr, logins: map[string]*loginSess{}, ctx: context.Background()}
+	if a != nil && a.DataDir != "" {
+		s.auth.path = AuthPath(a.DataDir)
+	}
+	return s
 }
 
 func (s *Server) Handler() http.Handler {
@@ -52,6 +60,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": buildinfo.Version})
 	})
+	mux.HandleFunc("GET /api/session", s.getSession)
 	mux.HandleFunc("GET /api/overview", s.getOverview)
 	mux.HandleFunc("POST /api/capture", s.postCapture)
 	mux.HandleFunc("POST /api/probe", s.postProbe)
@@ -63,23 +72,78 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/login/grok", s.postLoginGrok)
 	mux.HandleFunc("GET /api/login/grok", s.getLogin)
 	mux.HandleFunc("POST /api/login/grok/cancel", s.postLoginCancel)
+	mux.HandleFunc("GET /login", s.getLoginPage)
+	mux.HandleFunc("POST /login", s.postLogin)
+	mux.HandleFunc("POST /logout", s.postLogout)
 	mux.HandleFunc("GET /", s.static)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Loopback listeners rely on the Host check below (DNS rebinding);
-		// the token gates public binds only.
-		if tok := s.token(); tok != "" && CheckLoopback(s.Addr) != nil {
-			if !s.authorized(w, r, tok) {
-				return
-			}
-		} else if !localRequest(r) {
-			http.Error(w, "forbidden", http.StatusForbidden)
+		h := w.Header()
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("Referrer-Policy", "no-referrer")
+		h.Set("X-Frame-Options", "DENY")
+		if !s.admit(w, r) {
 			return
 		}
 		mux.ServeHTTP(w, r)
 	})
 }
 
-// token is the shared secret required when the listener is not loopback-only.
+// admit decides whether a request reaches the handlers:
+//   - on a loopback listener the Host must be loopback (DNS rebinding) unless
+//     a reverse proxy on loopback names the real host in X-Forwarded-Host;
+//   - a request that carries an Origin must be same-origin as the browser
+//     sees it (writes from other sites);
+//   - with a password set, everything but GET /api/health and the login page
+//     needs the session cookie, or the Bearer token for scripts;
+//   - without one, a public listener or a proxied request needs the Bearer
+//     token; a plain loopback listener stays open to the SSH tunnel.
+func (s *Server) admit(w http.ResponseWriter, r *http.Request) bool {
+	public := CheckLoopback(s.Addr) != nil
+	x := externalOf(r)
+	if !public && !x.proxied && !loopbackHost(r.Host) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return false
+	}
+	if o := r.Header.Get("Origin"); o != "" && !validOrigin(r, o) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return false
+	}
+	creds, err := s.credentials()
+	if err != nil {
+		s.logf("%v", err)
+		w.Header().Set("Cache-Control", "no-store")
+		http.Error(w, "login configuration unreadable; see the daemon log", http.StatusServiceUnavailable)
+		return false
+	}
+	tok := s.token()
+	if creds != nil {
+		if r.URL.Path == "/login" || (r.Method == http.MethodGet && r.URL.Path == "/api/health") {
+			return true
+		}
+		if (tok != "" && bearerOK(r, tok)) || s.sessionOK(r, creds) {
+			return true
+		}
+		s.unauthorized(w, r, x)
+		return false
+	}
+	if public || x.proxied {
+		if tok == "" {
+			w.Header().Set("Cache-Control", "no-store")
+			http.Error(w, "forbidden: set a page password (qswitch web set-password) or [web] token", http.StatusForbidden)
+			return false
+		}
+		if !bearerOK(r, tok) {
+			w.Header().Set("Cache-Control", "no-store")
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return false
+		}
+	}
+	return true
+}
+
+// token is the shared secret for scripts (Authorization: Bearer). It is the
+// only way in on a public listener or through the proxy when no password is
+// set; it is ignored on a plain loopback listener.
 func (s *Server) token() string {
 	if s.App == nil {
 		return ""
@@ -87,49 +151,10 @@ func (s *Server) token() string {
 	return strings.TrimSpace(s.App.Cfg.Web.Token)
 }
 
-// authorized gates public deployments: every request needs the configured
-// token (cookie, Bearer header, or ?token= on the page URL, which plants the
-// cookie). Same-origin rules for writes still apply on top.
-func (s *Server) authorized(w http.ResponseWriter, r *http.Request, tok string) bool {
-	ok := false
-	if c, err := r.Cookie("qswitch_auth"); err == nil {
-		ok = subtle.ConstantTimeCompare([]byte(c.Value), []byte(tok)) == 1
-	}
-	if !ok {
-		if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
-			ok = subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(h, "Bearer ")), []byte(tok)) == 1
-		}
-	}
-	if !ok {
-		if q := r.URL.Query().Get("token"); q != "" && subtle.ConstantTimeCompare([]byte(q), []byte(tok)) == 1 {
-			ok = true
-			if r.Method == http.MethodGet && r.URL.Path == "/" {
-				http.SetCookie(w, &http.Cookie{
-					Name:     "qswitch_auth",
-					Value:    tok,
-					Path:     "/",
-					HttpOnly: true,
-					SameSite: http.SameSiteLaxMode,
-				})
-			}
-		}
-	}
-	if !ok {
-		w.Header().Set("Cache-Control", "no-store")
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return false
-	}
-	if o := r.Header.Get("Origin"); o != "" && !validOrigin(r, o) {
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return false
-	}
-	return true
-}
-
 func (s *Server) Run(ctx context.Context) error {
 	if err := CheckLoopback(s.Addr); err != nil {
-		if s.token() == "" {
-			return fmt.Errorf("%w (set [web] token in config to bind a public address)", err)
+		if creds, cerr := s.credentials(); s.token() == "" && (cerr != nil || creds == nil) {
+			return fmt.Errorf("%w (set a page password with qswitch web set-password, or [web] token, to bind a public address)", err)
 		}
 	}
 	ctx, cancel := context.WithCancel(ctx)
@@ -161,6 +186,8 @@ func (s *Server) Run(ctx context.Context) error {
 	return err
 }
 
+// AlreadyServing reports whether a qswitch page answers on addr; a login
+// prompt counts.
 func AlreadyServing(addr string) bool {
 	if CheckLoopback(addr) != nil {
 		return false
@@ -171,11 +198,14 @@ func AlreadyServing(addr string) bool {
 		return false
 	}
 	defer res.Body.Close()
-	if res.StatusCode != 200 {
+	if res.StatusCode != 200 && res.StatusCode != http.StatusUnauthorized {
 		return false
 	}
 	if res.Header.Get("X-Qswitch") == "1" {
 		return true
+	}
+	if res.StatusCode != 200 {
+		return false
 	}
 	var body struct {
 		Tools json.RawMessage `json:"tools"`
@@ -202,11 +232,7 @@ func CheckLoopback(addr string) error {
 }
 
 func localRequest(r *http.Request) bool {
-	h := r.Host
-	if host, _, err := net.SplitHostPort(h); err == nil {
-		h = host
-	}
-	if h != "127.0.0.1" && h != "localhost" && h != "::1" {
+	if !loopbackHost(r.Host) {
 		return false
 	}
 	if o := r.Header.Get("Origin"); o != "" {
@@ -215,16 +241,15 @@ func localRequest(r *http.Request) bool {
 	return true
 }
 
+// validOrigin compares an Origin header with the origin the browser used,
+// which behind the proxy is the forwarded one.
 func validOrigin(r *http.Request, o string) bool {
 	u, err := url.Parse(o)
 	if err != nil || u.User != nil || u.Path != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
 		return false
 	}
-	scheme := "http"
-	if r.TLS != nil {
-		scheme = "https"
-	}
-	return u.Scheme == scheme && strings.EqualFold(u.Host, r.Host)
+	x := externalOf(r)
+	return u.Scheme == x.scheme && strings.EqualFold(u.Host, x.host)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -525,10 +550,20 @@ func (s *Server) static(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "ui missing", 500)
 		return
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("X-Qswitch", "1")
-	_, _ = w.Write(b)
+	nonce := newNonce()
+	page := strings.Replace(string(b), "<script>", `<script nonce="`+nonce+`">`, 1)
+	h := w.Header()
+	h.Set("Content-Type", "text/html; charset=utf-8")
+	h.Set("Cache-Control", "no-store")
+	h.Set("X-Qswitch", "1")
+	h.Set("Content-Security-Policy", "default-src 'none'; script-src 'nonce-"+nonce+"'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
+	_, _ = io.WriteString(w, page)
+}
+
+func newNonce() string {
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	return base64.RawStdEncoding.EncodeToString(b[:])
 }
 
 func newID() string {

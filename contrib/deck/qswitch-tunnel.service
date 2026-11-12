@@ -1,0 +1,29 @@
+# ~/.config/systemd/user/qswitch-tunnel.service on novix (user xyc).
+# Reverse SSH tunnel that lets lisa-hk's nginx reach the qswitch page:
+# deck.xiayinchang.top/qswitch/ -> lisa-hk 127.0.0.1:7432 -> novix 127.0.0.1:7432.
+# Key: ~/.ssh/qswitch-tunnel_ed25519 (no passphrase, used for nothing else);
+# the matching entry on lisa-hk is restricted to this one forward.
+#   systemctl --user daemon-reload && systemctl --user enable --now qswitch-tunnel
+[Unit]
+Description=qswitch page tunnel to lisa-hk (Deck)
+After=network-online.target qswitchd.service
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/ssh -NT \
+  -o BatchMode=yes \
+  -o ExitOnForwardFailure=yes \
+  -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
+  -o StrictHostKeyChecking=yes \
+  -o UserKnownHostsFile=%h/.ssh/qswitch-tunnel_known_hosts \
+  -o IdentitiesOnly=yes -i %h/.ssh/qswitch-tunnel_ed25519 \
+  -o ControlMaster=no -o ControlPath=none \
+  -p 3733 -R 127.0.0.1:7432:127.0.0.1:7432 qswitch-tunnel@154.37.216.134
+Restart=always
+RestartSec=5s
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

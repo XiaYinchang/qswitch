@@ -44,28 +44,12 @@ func TestPublicTokenAccepted(t *testing.T) {
 		t.Fatalf("bearer: status=%d", w.Code)
 	}
 
-	// Query token on the page plants a cookie that later requests reuse.
+	// The token never travels in a URL: no cookie is planted from a query.
 	r = httptest.NewRequest(http.MethodGet, "http://38.69.195.202:7432/?token=secret-token", nil)
 	w = httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, r)
-	if w.Code != http.StatusOK {
-		t.Fatalf("query token: status=%d", w.Code)
-	}
-	var cookie *http.Cookie
-	for _, c := range w.Result().Cookies() {
-		if c.Name == "qswitch_auth" {
-			cookie = c
-		}
-	}
-	if cookie == nil || cookie.Value != "secret-token" || !cookie.HttpOnly {
-		t.Fatalf("cookie not planted: %+v", cookie)
-	}
-	r = httptest.NewRequest(http.MethodGet, "http://38.69.195.202:7432/api/health", nil)
-	r.AddCookie(cookie)
-	w = httptest.NewRecorder()
-	s.Handler().ServeHTTP(w, r)
-	if w.Code != http.StatusOK {
-		t.Fatalf("cookie: status=%d", w.Code)
+	if w.Code != http.StatusUnauthorized || len(w.Result().Cookies()) != 0 {
+		t.Fatalf("query token: status=%d cookies=%v", w.Code, w.Result().Cookies())
 	}
 }
 

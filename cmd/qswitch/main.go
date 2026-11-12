@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -279,6 +281,8 @@ func run(args []string) int {
 			return 2
 		}
 		return fail(a.Forget(t, rest[1]))
+	case "web":
+		return webCmd(a, rest)
 	case "version", "--version":
 		fmt.Println("qswitch 0.1.0")
 		return 0
@@ -286,6 +290,42 @@ func run(args []string) int {
 		usage()
 		return 2
 	}
+}
+
+// webCmd sets the page login. The password is asked twice with echo off, or
+// read as one line from stdin with --stdin for scripts.
+func webCmd(a *app.App, rest []string) int {
+	if len(rest) < 2 || rest[0] != "set-password" {
+		fmt.Fprintln(os.Stderr, "usage: qswitch web set-password <用户名> [--stdin]")
+		return 2
+	}
+	user := rest[1]
+	var password string
+	if len(rest) > 2 && rest[2] == "--stdin" {
+		b, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			return fail(err)
+		}
+		password = strings.TrimSuffix(strings.TrimSuffix(string(b), "\n"), "\r")
+	} else {
+		first, err := readSecret("新密码：")
+		if err != nil {
+			return fail(err)
+		}
+		again, err := readSecret("再输一次：")
+		if err != nil {
+			return fail(err)
+		}
+		if first != again {
+			return fail(errors.New("两次输入不一致"))
+		}
+		password = first
+	}
+	if err := web.SetPassword(a.DataDir, user, password); err != nil {
+		return fail(err)
+	}
+	fmt.Printf("已设置页面登录：用户 %s。所有已登录的浏览器需要重新登录。\n", user)
+	return 0
 }
 
 func setAuto(a *app.App, rest []string, on bool) int {
@@ -395,5 +435,6 @@ func usage() {
   qswitch forget <tool> <id|account>
   qswitch doctor
   qswitch serve [--addr 127.0.0.1:7432]
+  qswitch web set-password <用户名> [--stdin]   # 页面登录密码；改密码后所有浏览器重新登录
 `)
 }
