@@ -281,6 +281,23 @@ func TestProxiedThroughDeck(t *testing.T) {
 	}
 }
 
+// A no-referrer policy would make browsers post the login form with
+// `Origin: null`, which the same-origin check rejects.
+func TestReferrerPolicyKeepsFormOrigin(t *testing.T) {
+	s, _, _ := passwordServer(t, "127.0.0.1:7432", "")
+	for _, r := range []*http.Request{local(http.MethodGet, "/login"), proxied(http.MethodGet, "/login")} {
+		w := do(s.Handler(), r)
+		if got := w.Header().Values("Referrer-Policy"); len(got) != 1 || got[0] != "same-origin" {
+			t.Fatalf("Referrer-Policy = %v", got)
+		}
+	}
+	r := loginForm(testUser, testPass)
+	r.Header.Set("Origin", "null")
+	if w := do(s.Handler(), r); w.Code != http.StatusForbidden {
+		t.Fatalf("null origin must stay rejected: %d", w.Code)
+	}
+}
+
 func TestProxiedLockoutIsPerClient(t *testing.T) {
 	s, _, _ := passwordServer(t, "127.0.0.1:7432", "")
 	h := s.Handler()

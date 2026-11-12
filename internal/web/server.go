@@ -79,7 +79,10 @@ func (s *Server) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
 		h.Set("X-Content-Type-Options", "nosniff")
-		h.Set("Referrer-Policy", "no-referrer")
+		// Not no-referrer: under that policy browsers send `Origin: null`
+		// with form posts (login, logout), which the same-origin check
+		// below would reject. same-origin keeps the Referer on this site.
+		h.Set("Referrer-Policy", "same-origin")
 		h.Set("X-Frame-Options", "DENY")
 		if !s.admit(w, r) {
 			return
