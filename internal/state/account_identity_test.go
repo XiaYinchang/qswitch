@@ -40,9 +40,9 @@ INSERT INTO live_pointer VALUES ('kimi','fixture',3,0,170,'fixture',1);
 	}
 	defer db.Close()
 	got, err := db.GetAccount("kimi", "fixture")
-	want := Account{Tool: "kimi", StableID: "fixture", Email: "fixture@example.test", PlanHint: "Pro", StaleCLI: true, CoolingUntil: 110, LastQuotaClass: "soft", LastUsedPct: 95, LastResetsAt: 120, LastProbedAt: 130, LastHTTPAt: 140, HTTPBackoffUntil: 150, LastCapturedAt: 160, VaultGen: 7, QuotaDetail: `[{"id":"weekly","used_pct":95}]`}
+	want := Account{Tool: "kimi", StableID: "fixture", Email: "fixture@example.test", PlanHint: "Pro", StaleCLI: true, CoolingUntil: 0, LastQuotaClass: "unknown", LastUsedPct: 95, LastResetsAt: 120, LastProbedAt: 130, LastHTTPAt: 140, HTTPBackoffUntil: 150, LastCapturedAt: 160, VaultGen: 7, QuotaDetail: `[{"id":"weekly","used_pct":95}]`}
 	if err != nil || got != want {
-		t.Fatalf("migration changed existing account or quota: got=%+v err=%v", got, err)
+		t.Fatalf("migration changed identity/history or retained obsolete quota evidence: got=%+v err=%v", got, err)
 	}
 	p, err := db.GetPointer("kimi")
 	if err != nil || p != (Pointer{Tool: "kimi", StableID: "fixture", Gen: 3, LastApplyAt: 170, LastApplyTo: "fixture", WritebackRetries: 1}) {

@@ -89,7 +89,7 @@ func TestCandidateRankRequiresRecentSuccessfulObservation(t *testing.T) {
 			calls := 0
 			a.HTTP.Client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 				calls++
-				return &http.Response{StatusCode: tc.status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"rate_limit":{"primary_window":{"used_percent":17}}}`)), Request: req}, nil
+				return &http.Response{StatusCode: tc.status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"rate_limit":{"primary_window":{"used_percent":17},"secondary_window":{"used_percent":0}}}`)), Request: req}, nil
 			})}
 			ac, err := a.State.GetAccount("codex", "acc-a")
 			if err != nil {
@@ -198,7 +198,7 @@ func TestLimitHitProbesCurrentAccountBeforeScheduledInterval(t *testing.T) {
 	calls := 0
 	a.HTTP.Client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		calls++
-		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"rate_limit":{"primary_window":{"used_percent":100}}}`)), Request: req}, nil
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"rate_limit":{"primary_window":{"used_percent":100},"secondary_window":{"used_percent":0}}}`)), Request: req}, nil
 	})}
 	a.ProbeHTTP(context.Background(), adapter.Codex, false)
 	if p, _ := a.State.GetPointer("codex"); calls != 0 || p.StableID != "acc-b" {
@@ -259,7 +259,7 @@ func TestEnrollingUsableAccountSwitchesFromExhausted(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.HTTP.Client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"rate_limit":{"primary_window":{"used_percent":51}}}`)), Request: req}, nil
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"rate_limit":{"primary_window":{"used_percent":51},"secondary_window":{"used_percent":0}}}`)), Request: req}, nil
 	})}
 	raw, err := json.Marshal(map[string]any{"auth_mode": "chatgpt", "tokens": map[string]any{
 		"account_id": "acc-new", "access_token": "t-new", "id_token": jwt("new@example.test"), "refresh_token": "r-new",
@@ -353,9 +353,9 @@ func TestPendingRechecksStaleQuotaBeforeRestoring(t *testing.T) {
 				if current, err := os.ReadFile(filepath.Join(a.UserHome, ".codex", "auth.json")); err != nil || string(current) != string(before) {
 					t.Fatal("credentials were restored before quota validation")
 				}
-				body := `{"rate_limit":{"primary_window":{"used_percent":17}}}`
+				body := `{"rate_limit":{"primary_window":{"used_percent":17},"secondary_window":{"used_percent":0}}}`
 				if tc.used == 100 {
-					body = `{"rate_limit":{"primary_window":{"used_percent":100}}}`
+					body = `{"rate_limit":{"primary_window":{"used_percent":100},"secondary_window":{"used_percent":0}}}`
 				}
 				return &http.Response{StatusCode: tc.status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
 			})}
@@ -425,7 +425,7 @@ func TestPendingQuotaValidationPrecedesDesktopChanges(t *testing.T) {
 					a.Cfg.General.AutoSwitch = false
 					a.cfgMu.Unlock()
 				}
-				return &http.Response{StatusCode: status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"rate_limit":{"primary_window":{"used_percent":17}}}`)), Request: req}, nil
+				return &http.Response{StatusCode: status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"rate_limit":{"primary_window":{"used_percent":17},"secondary_window":{"used_percent":0}}}`)), Request: req}, nil
 			})}
 			if err := a.TryApply(adapter.Codex, true); err != nil {
 				t.Fatal(err)

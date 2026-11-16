@@ -35,6 +35,9 @@ func findCodexBin() string {
 }
 
 func (a *App) LoginCodex(ctx context.Context, announce func(userCode, verifyURL string)) (adapter.Identity, error) {
+	if err := a.CheckAction(adapter.Codex, "login"); err != nil {
+		return adapter.Identity{}, err
+	}
 	if !secutil.InTest() {
 		if bin := findCodexBin(); bin != "" {
 			return a.loginCodexOfficial(ctx, bin)
@@ -96,6 +99,9 @@ func (a *App) loginCodexHTTP(ctx context.Context, announce func(userCode, verify
 }
 
 func (a *App) BeginCodexDeviceLogin(ctx context.Context) (quota.CodexDeviceStart, error) {
+	if err := a.CheckAction(adapter.Codex, "login"); err != nil {
+		return quota.CodexDeviceStart{}, err
+	}
 	if a.HTTP.Client == nil && secutil.InTest() {
 		return quota.CodexDeviceStart{}, errors.New("codex login: no http client")
 	}
@@ -103,6 +109,9 @@ func (a *App) BeginCodexDeviceLogin(ctx context.Context) (quota.CodexDeviceStart
 }
 
 func (a *App) CompleteCodexDeviceLogin(ctx context.Context, st quota.CodexDeviceStart) (adapter.Identity, error) {
+	if err := a.CheckAction(adapter.Codex, "login"); err != nil {
+		return adapter.Identity{}, err
+	}
 	deadline := st.ExpiresAt
 	if deadline.IsZero() {
 		deadline = a.now().Add(15 * time.Minute)
@@ -160,6 +169,9 @@ func (a *App) enrollCodexBlob(ctx context.Context, blob adapter.Blob) (adapter.I
 		return adapter.Identity{}, err
 	}
 	err = a.saveBlob(blob)
+	if err == nil {
+		err = a.recordRefreshResult(adapter.Codex, blob.Identity.StableID, false, nil)
+	}
 	closeErr := lock.Close()
 	if err != nil {
 		return adapter.Identity{}, err

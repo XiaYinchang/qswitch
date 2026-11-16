@@ -19,7 +19,6 @@ import (
 
 	"qswitch/internal/adapter"
 	"qswitch/internal/app"
-	"qswitch/internal/buildinfo"
 	"qswitch/internal/quota"
 )
 
@@ -38,6 +37,7 @@ type Server struct {
 }
 
 type loginSess struct {
+	Tool      adapter.Tool
 	ID        string
 	Start     quota.CodexDeviceStart
 	GrokStart quota.GrokDeviceStart
@@ -58,8 +58,12 @@ func New(a *app.App, addr string) *Server {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": buildinfo.Version})
+		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "version": s.App.Instance().Version, "instance": s.App.Instance()})
 	})
+	mux.HandleFunc("POST /api/auto", s.postAuto)
+	mux.HandleFunc("GET /api/diagnostics", s.getDiagnostics)
+	mux.HandleFunc("GET /api/environments", s.getEnvironments)
+	mux.HandleFunc("POST /api/environments", s.postEnvironments)
 	mux.HandleFunc("GET /api/session", s.getSession)
 	mux.HandleFunc("GET /api/overview", s.getOverview)
 	mux.HandleFunc("POST /api/capture", s.postCapture)
@@ -88,6 +92,9 @@ func (s *Server) Handler() http.Handler {
 		h.Set("Referrer-Policy", "same-origin")
 		h.Set("X-Frame-Options", "DENY")
 		if !s.admit(w, r) {
+			return
+		}
+		if !s.checkInstance(w, r) {
 			return
 		}
 		mux.ServeHTTP(w, r)
@@ -162,7 +169,7 @@ func (s *Server) token() string {
 	if s.App == nil {
 		return ""
 	}
-	return strings.TrimSpace(s.App.Cfg.Web.Token)
+	return strings.TrimSpace(s.App.WebToken())
 }
 
 func (s *Server) Run(ctx context.Context) error {
@@ -316,6 +323,9 @@ func (s *Server) postCapture(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
+	if !s.requireTool(w, t, "capture") {
+		return
+	}
 	blobs, warn, err := s.App.Capture(t)
 	if err != nil {
 		writeErr(w, 400, err.Error())
@@ -348,7 +358,7 @@ func (s *Server) postProbe(w http.ResponseWriter, r *http.Request) {
 	if req.ID == "" {
 		var tools []adapter.Tool
 		if strings.TrimSpace(req.Tool) == "" {
-			tools = adapter.AllTools()
+			tools = s.App.ManagedTools()
 		} else {
 			t, err := adapter.ParseTool(req.Tool)
 			if err != nil {
@@ -356,6 +366,11 @@ func (s *Server) postProbe(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			tools = []adapter.Tool{t}
+		}
+		for _, t := range tools {
+			if !s.requireTool(w, t, "probe") {
+				return
+			}
 		}
 		for _, t := range tools {
 			s.App.KeepAlive(ctx, t)
@@ -371,7 +386,14 @@ func (s *Server) postProbe(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	res := s.App.ProbeAccount(ctx, t, req.ID)
+	if !s.requireTool(w, t, "probe") {
+		return
+	}
+	res, err := s.App.ProbeAccountRef(ctx, t, req.ID)
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
 	writeJSON(w, 200, map[string]any{
 		"buckets": res.Buckets,
 		"updated": res.Class == quota.OK || res.Class == quota.Soft || res.Class == quota.Exhausted,
@@ -390,6 +412,9 @@ func (s *Server) postForget(w http.ResponseWriter, r *http.Request) {
 	t, err := adapter.ParseTool(req.Tool)
 	if err != nil {
 		writeErr(w, 400, err.Error())
+		return
+	}
+	if !s.requireTool(w, t, "") {
 		return
 	}
 	if strings.TrimSpace(req.ID) == "" {
@@ -418,6 +443,9 @@ func (s *Server) postSwitch(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
+	if !s.requireTool(w, t, "switch") {
+		return
+	}
 	opts := adapter.RestoreOpts{CLIOnly: req.CLIOnly}
 	if err := s.App.Switch(t, req.ID, opts, req.KillCLI); err != nil {
 		writeErr(w, 400, err.Error())
@@ -427,6 +455,9 @@ func (s *Server) postSwitch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) postLoginCodex(w http.ResponseWriter, r *http.Request) {
+	if !s.requireTool(w, adapter.Codex, "login") {
+		return
+	}
 	var req struct{}
 	if !readJSON(w, r, &req) {
 		return
@@ -439,7 +470,7 @@ func (s *Server) postLoginCodex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := newID()
-	sess := &loginSess{ID: id, Start: st, Status: "pending", cancel: cancel}
+	sess := &loginSess{ID: id, Tool: adapter.Codex, Start: st, Status: "pending", cancel: cancel}
 	s.mu.Lock()
 	s.logins[id] = sess
 	s.mu.Unlock()
@@ -457,6 +488,9 @@ func (s *Server) postLoginCodex(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) postLoginGrok(w http.ResponseWriter, r *http.Request) {
+	if !s.requireTool(w, adapter.Grok, "login") {
+		return
+	}
 	var req struct{}
 	if !readJSON(w, r, &req) {
 		return
@@ -469,7 +503,7 @@ func (s *Server) postLoginGrok(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := newID()
-	sess := &loginSess{ID: id, GrokStart: st, Status: "pending", cancel: cancel}
+	sess := &loginSess{ID: id, Tool: adapter.Grok, GrokStart: st, Status: "pending", cancel: cancel}
 	s.mu.Lock()
 	s.logins[id] = sess
 	s.mu.Unlock()
@@ -513,10 +547,13 @@ func (s *Server) finishLogin(id string, ident adapter.Identity, err error) {
 }
 
 func (s *Server) getLogin(w http.ResponseWriter, r *http.Request) {
+	if !s.requireTool(w, loginTool(r), "login") {
+		return
+	}
 	id := r.URL.Query().Get("id")
 	s.mu.Lock()
 	sess := s.logins[id]
-	if sess == nil {
+	if sess == nil || (sess.Tool != "" && sess.Tool != loginTool(r)) {
 		s.mu.Unlock()
 		writeErr(w, 404, "login session not found")
 		return
@@ -537,6 +574,9 @@ func (s *Server) getLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) postLoginCancel(w http.ResponseWriter, r *http.Request) {
+	if !s.requireTool(w, loginTool(r), "login") {
+		return
+	}
 	var req struct {
 		ID string `json:"id"`
 	}
@@ -545,7 +585,7 @@ func (s *Server) postLoginCancel(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	sess := s.logins[req.ID]
-	if sess != nil && sess.Status == "pending" && sess.cancel != nil {
+	if sess != nil && (sess.Tool == "" || sess.Tool == loginTool(r)) && sess.Status == "pending" && sess.cancel != nil {
 		sess.cancel()
 		sess.Status = "error"
 		sess.Err = "cancelled"

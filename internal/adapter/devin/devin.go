@@ -8,15 +8,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	toml "github.com/pelletier/go-toml/v2"
 
 	"qswitch/internal/adapter"
 	"qswitch/internal/busy"
-	"qswitch/internal/livefile"
 	"qswitch/internal/quota"
+	"qswitch/internal/snapshot"
 )
 
 type Adapter struct {
@@ -136,6 +135,9 @@ func credsTOML(blob adapter.Blob) ([]byte, error) {
 	if err := json.Unmarshal(blob.Payload, &p); err != nil {
 		return nil, err
 	}
+	if blob.Identity.StableID != "" && p.Identity.StableID != "" && blob.Identity.StableID != p.Identity.StableID {
+		return nil, errors.New("devin: snapshot identity mismatch")
+	}
 	if strings.TrimSpace(p.Credentials) == "" {
 		return nil, errors.New("devin: empty credentials")
 	}
@@ -184,25 +186,27 @@ func (a Adapter) IdentityOf(blob adapter.Blob) (adapter.Identity, error) {
 	return adapter.Identity{Tool: adapter.Devin, StableID: keyID(c.APIKey)}, nil
 }
 
-func (a Adapter) Restore(home string, blob adapter.Blob, _ adapter.RestoreOpts) error {
+func (a Adapter) Restore(home string, blob adapter.Blob, opts adapter.RestoreOpts) error {
+	_, err := a.RestoreWithRollback(home, blob, opts)
+	return err
+}
+
+func (a Adapter) RestoreWithRollback(home string, blob adapter.Blob, _ adapter.RestoreOpts) (func() error, error) {
 	h, err := a.ManualBlockers(home)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if h.ManualBusy() {
-		return &adapter.BusyError{Holders: h}
+		return nil, &adapter.BusyError{Holders: h}
 	}
 	raw, err := credsTOML(blob)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if _, err := ParseCreds(raw); err != nil {
-		return err
+		return nil, err
 	}
-	if err := os.MkdirAll(filepath.Dir(credPath(home)), 0o700); err != nil {
-		return err
-	}
-	return livefile.AtomicWrite(credPath(home), raw, 0o600)
+	return snapshot.WriteFiles(snapshot.FileWrite{Path: credPath(home), Data: raw, Mode: 0600})
 }
 
 func (a Adapter) Idle(home string, grace time.Duration) bool {
@@ -223,7 +227,7 @@ func (a Adapter) KillCLI(home string) error {
 	}
 	var first error
 	for _, p := range h.Manual {
-		if err := syscall.Kill(p.PID, syscall.SIGTERM); err != nil && first == nil {
+		if err := busy.Terminate(p.PID); err != nil && first == nil {
 			first = err
 		}
 	}

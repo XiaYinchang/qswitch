@@ -44,7 +44,7 @@ func TestCurrentCodexRecoverySchedule(t *testing.T) {
 			hits := 0
 			a.HTTP.Client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 				hits++
-				return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"rate_limit":{"primary_window":{"used_percent":8}}}`)), Header: make(http.Header), Request: req}, nil
+				return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"rate_limit":{"primary_window":{"used_percent":8},"secondary_window":{"used_percent":0}}}`)), Header: make(http.Header), Request: req}, nil
 			})}
 			a.Clock = clock.Fixed{T: start.Add(tc.wait - time.Minute)}
 			a.ProbeHTTP(context.Background(), adapter.Codex, false)
@@ -74,7 +74,7 @@ func TestSuccessfulForcedProbeClearsBackoff(t *testing.T) {
 	hits := 0
 	a.HTTP.Client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		hits++
-		status, body := 200, `{"rate_limit":{"primary_window":{"used_percent":98}}}`
+		status, body := 200, `{"rate_limit":{"primary_window":{"used_percent":98},"secondary_window":{"used_percent":0}}}`
 		if hits == 1 {
 			status, body = 500, `{"error":"temporary failure"}`
 		}

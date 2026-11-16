@@ -26,6 +26,9 @@ jobs:
         # Newest release that builds with go.mod's Go version, so CI never
         # downloads another toolchain. Bump it together with the go line.
         run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
+      - name: deployment transaction tests
+        if: matrix.os == 'ubuntu-latest'
+        run: python3 scripts/deploy_test.py
       - name: test
         # The tests read and write tool login files under $HOME; keep them
         # away from the runner's real home.
@@ -33,3 +36,96 @@ jobs:
           HOME: ${{ runner.temp }}/home
           XDG_CONFIG_HOME: ${{ runner.temp }}/home/.config
         run: mkdir -p "$HOME" && go test ./...
+
+  windows:
+    # Use a disposable GitHub runner: HOME isolation does not redirect the
+    # current Windows user's Credential Manager or DPAPI identity.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: build native Windows commands
+        run: go build ./cmd/qswitch ./cmd/qswitchd
+      - name: test Windows platform, Antigravity credentials, and quota behavior
+        env:
+          USERPROFILE: ${{ runner.temp }}/qswitch-test-home
+          HOME: ${{ runner.temp }}/qswitch-test-home
+          APPDATA: ${{ runner.temp }}/qswitch-test-home/AppData/Roaming
+          LOCALAPPDATA: ${{ runner.temp }}/qswitch-test-home/AppData/Local
+          XDG_CONFIG_HOME: ${{ runner.temp }}/qswitch-test-home/.config
+          QSWITCH_DIR: ${{ runner.temp }}/qswitch-test-data
+        run: |
+          New-Item -ItemType Directory -Force $env:USERPROFILE, $env:APPDATA, $env:LOCALAPPDATA, $env:XDG_CONFIG_HOME, $env:QSWITCH_DIR | Out-Null
+          try {
+            go test ./internal/livefile ./internal/busy ./internal/hostapp ./internal/secutil ./internal/quota ./internal/adapter/antigravity ./internal/adapter/cursoradp
+            if ($LASTEXITCODE -ne 0) { throw 'Windows native tests failed' }
+          } finally {
+            Remove-Item -Recurse -Force $env:USERPROFILE, $env:QSWITCH_DIR
+          }
+      - name: smoke test isolated Antigravity daemon
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sandbox = Join-Path $env:RUNNER_TEMP ('qswitch-smoke-' + [guid]::NewGuid())
+          $userDir = Join-Path $sandbox 'home'
+          $dataDir = Join-Path $sandbox 'data'
+          New-Item -ItemType Directory -Force $userDir, $dataDir | Out-Null
+          $binary = Join-Path $sandbox 'qswitchd.exe'
+          go build -o $binary ./cmd/qswitchd
+          if ($LASTEXITCODE -ne 0) { throw 'qswitchd build failed' }
+          $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+          $listener.Start()
+          $port = $listener.LocalEndpoint.Port
+          $listener.Stop()
+          @"
+          [general]
+          auto_switch = false
+          [notify]
+          enabled = false
+          [web]
+          enabled = true
+          addr = "127.0.0.1:$port"
+          "@ | Set-Content -Encoding utf8NoBOM (Join-Path $dataDir 'config.toml')
+          $start = [System.Diagnostics.ProcessStartInfo]::new($binary)
+          $start.ArgumentList.Add('--tool')
+          $start.ArgumentList.Add('antigravity')
+          $start.UseShellExecute = $false
+          $start.WorkingDirectory = $sandbox
+          $start.Environment['USERPROFILE'] = $userDir
+          $start.Environment['HOME'] = $userDir
+          $start.Environment['APPDATA'] = Join-Path $userDir 'AppData/Roaming'
+          $start.Environment['LOCALAPPDATA'] = Join-Path $userDir 'AppData/Local'
+          $start.Environment['XDG_CONFIG_HOME'] = Join-Path $userDir '.config'
+          $start.Environment['QSWITCH_DIR'] = $dataDir
+          $start.Environment['ANTIGRAVITY_GEMINI_DIR'] = Join-Path $userDir '.gemini'
+          $start.Environment['ANTIGRAVITY_APP_DATA_DIR'] = Join-Path $userDir '.gemini/antigravity'
+          $start.Environment.Remove('QSWITCH_IN_TEST') | Out-Null
+          $daemon = $null
+          try {
+            $daemon = [System.Diagnostics.Process]::Start($start)
+            $health = $null
+            for ($attempt = 0; $attempt -lt 30; $attempt++) {
+              if ($daemon.HasExited) { throw 'isolated daemon exited before becoming healthy' }
+              try {
+                $health = Invoke-RestMethod -TimeoutSec 2 "http://127.0.0.1:$port/api/health"
+                if ($health.status -eq 'ok') { break }
+              } catch { }
+              Start-Sleep -Milliseconds 500
+            }
+            if ($health.status -ne 'ok') { throw 'isolated daemon health timed out' }
+            $overview = Invoke-RestMethod -TimeoutSec 15 "http://127.0.0.1:$port/api/overview"
+            $antigravity = @($overview.tools | Where-Object tool -eq 'antigravity')
+            if ($antigravity.Count -ne 1) { throw 'Antigravity was missing from the daemon overview' }
+            if (($null -ne $antigravity[0].accounts -and $antigravity[0].accounts.Count -ne 0) -or $antigravity[0].live_id) {
+              throw 'isolated Antigravity first-start state was not empty'
+            }
+            Write-Host 'Isolated Antigravity daemon health and empty account state passed.'
+          } finally {
+            if ($null -ne $daemon -and -not $daemon.HasExited) {
+              $daemon.Kill()
+              $daemon.WaitForExit()
+            }
+            Remove-Item -Recurse -Force $sandbox
+          }

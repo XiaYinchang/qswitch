@@ -15,9 +15,11 @@ import (
 	"time"
 
 	"qswitch/internal/adapter"
+	"qswitch/internal/adapter/antigravity"
 	"qswitch/internal/app"
 	"qswitch/internal/buildinfo"
 	"qswitch/internal/managed"
+	"qswitch/internal/paths"
 	"qswitch/internal/web"
 )
 
@@ -34,7 +36,15 @@ func run(args []string) int {
 		usage()
 		return 2
 	}
+	selected, err := validateArguments(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
 	home, _ := os.UserHomeDir()
+	if args[0] == "web" {
+		return webCmd(paths.DataDir(home), args[1:])
+	}
 	bins := []string{lookSelf(), lookSibling("qswitchd")}
 	a, err := app.Open(home, os.Getenv("QSWITCH_DIR"), nil, bins, nil, nil)
 	if err != nil {
@@ -42,13 +52,35 @@ func run(args []string) int {
 		return 1
 	}
 	defer a.Close()
+	if selected != "" {
+		if err := a.SetManagedTools([]adapter.Tool{selected}); err != nil {
+			return fail(err)
+		}
+	}
 
 	cmd := args[0]
 	rest := args[1:]
 	switch cmd {
 	case "run":
+		if err := a.CheckAction(selected, "run"); err != nil {
+			return fail(err)
+		}
+		if len(rest) > 0 && (rest[0] == "antigravity" || rest[0] == "agy") {
+			bin, err := exec.LookPath("agy")
+			if err != nil {
+				return fail(fmt.Errorf("antigravity: official agy CLI not found: %w", err))
+			}
+			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGHUP)
+			defer stop()
+			err = antigravity.RunCLI(ctx, a.DataDir, bin, rest[1:])
+			var exited *exec.ExitError
+			if errors.As(err, &exited) && exited.ExitCode() >= 0 {
+				return exited.ExitCode()
+			}
+			return fail(err)
+		}
 		if len(rest) == 0 || rest[0] != "claude" {
-			fmt.Fprintln(os.Stderr, "usage: qswitch run claude [--resume-continuation=idle|continue] [Claude arguments...]")
+			fmt.Fprintln(os.Stderr, "usage: qswitch run antigravity [agy arguments...] | qswitch run claude [--resume-continuation=idle|continue] [Claude arguments...]")
 			return 2
 		}
 		bin, err := exec.LookPath("claude")
@@ -131,7 +163,8 @@ func run(args []string) int {
 	case "init":
 		return fail(a.Init())
 	case "capture":
-		tools := adapter.AllTools()
+		failed := false
+		tools := a.ManagedTools()
 		if t, ok := flagTool(rest); ok {
 			tools = []adapter.Tool{t}
 		}
@@ -139,6 +172,7 @@ func run(args []string) int {
 			blobs, warn, err := a.Capture(t)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "%s: %v\n", t, err)
+				failed = true
 				continue
 			}
 			for _, b := range blobs {
@@ -147,6 +181,9 @@ func run(args []string) int {
 			for _, w := range warn {
 				fmt.Fprintf(os.Stderr, "warning: %s\n", w)
 			}
+		}
+		if failed {
+			return 1
 		}
 		return 0
 	case "list":
@@ -157,6 +194,9 @@ func run(args []string) int {
 		fmt.Print(a.List(tool))
 		return 0
 	case "status":
+		if has(rest, "--json") {
+			return fail(json.NewEncoder(os.Stdout).Encode(a.Overview()))
+		}
 		fmt.Print(a.Status())
 		return 0
 	case "doctor":
@@ -168,7 +208,10 @@ func run(args []string) int {
 			a.Cfg.Web.Addr = v
 			addr = v
 		}
-		if web.AlreadyServing(addr) {
+		if existing, err := web.ServingInstance(addr); err == nil {
+			if existing.ID != a.Instance().ID {
+				return fail(errors.New("address is serving a different qswitch instance; select this instance’s configured address"))
+			}
 			fmt.Printf("页面已经在跑：http://%s\n（一般是 qswitchd 占着这个端口，直接打开即可）\n", addr)
 			return 0
 		}
@@ -177,29 +220,39 @@ func run(args []string) int {
 		defer cancel()
 		err := web.New(a, addr).Run(ctx)
 		if err != nil && strings.Contains(err.Error(), "address already in use") {
-			fmt.Printf("端口被占用。若 daemon 已启动，打开 http://%s 即可。\n", addr)
+			fmt.Printf("端口 %s 被占用，未能核实目标实例，请检查该实例的监听地址。\n", addr)
 			return 1
 		}
 		return fail(err)
 	case "probe":
-		tools := adapter.AllTools()
+		tools := a.ManagedTools()
 		if t, ok := flagTool(rest); ok {
 			tools = []adapter.Tool{t}
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
+		if ref, ok := flagVal(rest, "--account"); ok {
+			res, err := a.ProbeAccountRef(ctx, selected, ref)
+			if err != nil {
+				return fail(err)
+			}
+			return fail(json.NewEncoder(os.Stdout).Encode(res))
+		}
 		for _, t := range tools {
 			a.KeepAlive(ctx, t)
 			a.ProbeLocal(t)
 			a.ProbeHTTP(ctx, t, true)
 			a.ProbeRecovered(ctx, t, true)
 		}
+		if has(rest, "--json") {
+			return fail(json.NewEncoder(os.Stdout).Encode(a.Overview()))
+		}
 		fmt.Print(a.Status())
 		return 0
 	case "switch":
 		if len(rest) < 2 {
 			fmt.Fprintln(os.Stderr, "usage: qswitch switch <tool> <id|account> [--force-align] [--allow-stale-cli] [--kill-cli] [--cli-only]")
-			fmt.Fprintln(os.Stderr, "  会关掉并重启 ChatGPT.app / Cursor.app / Grok Bot.app；空闲 CLI 一并结束")
+			fmt.Fprintln(os.Stderr, "  桌面空闲无法确认时阻止切换；请先退出关联桌面 App")
 			fmt.Fprintln(os.Stderr, "  --cli-only 只写 CLI 登录文件，不动桌面 App")
 			fmt.Fprintln(os.Stderr, "  same email with personal+team workspaces: pass chatgpt_account_id")
 			return 2
@@ -282,7 +335,7 @@ func run(args []string) int {
 		}
 		return fail(a.Forget(t, rest[1]))
 	case "web":
-		return webCmd(a, rest)
+		return webCmd(a.DataDir, rest)
 	case "version", "--version":
 		fmt.Println("qswitch 0.1.0")
 		return 0
@@ -294,7 +347,7 @@ func run(args []string) int {
 
 // webCmd sets the page login. The password is asked twice with echo off, or
 // read as one line from stdin with --stdin for scripts.
-func webCmd(a *app.App, rest []string) int {
+func webCmd(dataDir string, rest []string) int {
 	if len(rest) < 2 || rest[0] != "set-password" {
 		fmt.Fprintln(os.Stderr, "usage: qswitch web set-password <用户名> [--stdin]")
 		return 2
@@ -321,7 +374,7 @@ func webCmd(a *app.App, rest []string) int {
 		}
 		password = first
 	}
-	if err := web.SetPassword(a.DataDir, user, password); err != nil {
+	if err := web.SetPassword(dataDir, user, password); err != nil {
 		return fail(err)
 	}
 	fmt.Printf("已设置页面登录：用户 %s。所有已登录的浏览器需要重新登录。\n", user)
@@ -329,29 +382,22 @@ func webCmd(a *app.App, rest []string) int {
 }
 
 func setAuto(a *app.App, rest []string, on bool) int {
-	name := ""
+	var tool adapter.Tool
 	if t, ok := flagTool(rest); ok {
-		name = string(t)
+		tool = t
 	}
-	if on && name == "cursor" {
-		p, _ := a.State.GetPointer("cursor")
-		if p.Desync {
-			fmt.Fprintln(os.Stderr, "cursor still DESYNC; quit Cursor.app then switch --force-align from desktop")
-			return 1
+	if err := a.SetAuto(tool, on); err != nil {
+		return fail(err)
+	}
+	for _, tv := range a.Overview().Tools {
+		if tool == "" || tv.Tool == string(tool) {
+			fmt.Printf("%s auto=%v configured=%v\n", tv.Tool, tv.Auto, tv.Enabled)
+			if on && !tv.Auto {
+				fmt.Println("自动切换尚未生效：全局开关已关闭，或当前平台不支持此操作")
+			}
 		}
 	}
-	if name == "" {
-		a.Cfg.General.AutoSwitch = on
-	} else {
-		if err := a.Cfg.SetToolEnabled(name, on); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			return 2
-		}
-		if on {
-			a.Cfg.General.AutoSwitch = true
-		}
-	}
-	return fail(a.SaveConfig())
+	return 0
 }
 
 func flagVal(args []string, name string) (string, bool) {
@@ -419,22 +465,26 @@ func usage() {
 	fmt.Fprintf(os.Stderr, `qswitch — 多账号配额轮换器
 
   qswitch init
-  qswitch capture [--tool codex|grok|cursor]
+  qswitch capture [--tool codex|grok|cursor|devin|zcode|kimi|claude|antigravity]
   qswitch login codex          # Device Code 加号，不登出当前 ChatGPT 会话
   qswitch login grok           # Device Code 加号，不登出当前 Grok 会话
   qswitch login claude         # 当前终端授权并自动收录，不改变当前登录
   qswitch run claude [args...] # 受管会话：安全切号后恢复原会话
+  qswitch run antigravity [args...] # 启动原生 agy，会话空闲时与桌面共用账号切换
   qswitch sessions [--json] [--forget <runner>]  # 查看受管会话及切换阻塞原因；删掉已结束会话留下的记录
   qswitch list [--tool ...]
-  qswitch status
-  qswitch probe [--tool codex|grok|cursor|devin|zcode|kimi|claude]
+  qswitch status [--tool ...] [--json]  # JSON 含账号额度明细
+  qswitch probe [--tool ...] [--account <id|account>] [--json]
   qswitch switch <tool> <id|account> [--force-align] [--allow-stale-cli] [--kill-cli]
   qswitch apply [--tool ...] [--kill-cli]
   qswitch enable-auto [--tool ...]
   qswitch disable-auto [--tool ...]
   qswitch forget <tool> <id|account>
-  qswitch doctor
-  qswitch serve [--addr 127.0.0.1:7432]
+  qswitch doctor [--tool ...]
+  qswitch serve [--tool ...] [--addr 127.0.0.1:7432]
   qswitch web set-password <用户名> [--stdin]   # 页面登录密码；改密码后所有浏览器重新登录
+
+Antigravity：统一管理本机桌面 App 和 CLI 账号，等待会话空闲后切换。
+只有 Gemini 与第三方模型两组额度都耗尽时才自动切号；单组耗尽时保留当前账号。
 `)
 }

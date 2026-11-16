@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>com.qswitch.tunnel</string>
+<key>ProgramArguments</key><array>
+<string>/usr/bin/ssh</string><string>-F</string><string>/dev/null</string><string>-NT</string>
+<string>-o</string><string>BatchMode=yes</string>
+<string>-o</string><string>ExitOnForwardFailure=yes</string>
+<string>-o</string><string>ServerAliveInterval=30</string>
+<string>-o</string><string>ServerAliveCountMax=3</string>
+<string>-o</string><string>StrictHostKeyChecking=yes</string>
+<string>-o</string><string>UserKnownHostsFile=@HOME@/.ssh/qswitch-tunnel_known_hosts</string>
+<string>-o</string><string>IdentitiesOnly=yes</string><string>-i</string><string>@HOME@/.ssh/qswitch-tunnel_ed25519</string>
+<string>-o</string><string>ControlMaster=no</string><string>-o</string><string>ControlPath=none</string>
+<string>-p</string><string>3733</string><string>-R</string><string>127.0.0.1:@PORT@:127.0.0.1:7432</string>
+<string>qswitch-tunnel@154.37.216.134</string>
+</array>
+<key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
+<key>ThrottleInterval</key><integer>15</integer>
+<key>StandardErrorPath</key><string>@HOME@/.qswitch/tunnel.log</string>
+</dict></plist>

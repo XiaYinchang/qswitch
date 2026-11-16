@@ -27,10 +27,12 @@ const (
 )
 
 type Bucket struct {
-	ID       string  `json:"id"`
-	UsedPct  float64 `json:"used_pct"`
-	ResetsAt int64   `json:"resets_at,omitempty"`
-	Plan     string  `json:"plan,omitempty"`
+	Class      Class   `json:"class,omitempty"`
+	ObservedAt int64   `json:"observed_at,omitempty"`
+	ID         string  `json:"id"`
+	UsedPct    float64 `json:"used_pct"`
+	ResetsAt   int64   `json:"resets_at,omitempty"`
+	Plan       string  `json:"plan,omitempty"`
 }
 
 type Result struct {
@@ -150,7 +152,7 @@ func classifyValue(v any, source string, kind Kind) Result {
 	if resets == 0 {
 		resets = findReset(v)
 	}
-	includedGone := limitReached || (pctOK && pct >= 99.5) || (remOK && limOK && limit > 0 && remaining <= 0)
+	includedGone := limitReached || (pctOK && pct >= 100) || (remOK && limOK && limit > 0 && remaining <= 0)
 	if includedGone {
 		if !pctOK {
 			pct = 100
@@ -188,6 +190,12 @@ func classifyCursorPeriod(v any) (Result, bool) {
 	}
 	auto, autoOK := asFloat(pu["autoPercentUsed"])
 	api, apiOK := asFloat(pu["apiPercentUsed"])
+	if autoOK && (auto < 0 || math.IsNaN(auto) || math.IsInf(auto, 0)) {
+		return Result{Class: Unknown, Source: "http"}, true
+	}
+	if apiOK && (api < 0 || math.IsNaN(api) || math.IsInf(api, 0)) {
+		return Result{Class: Unknown, Source: "http"}, true
+	}
 	total, totalOK := asFloat(pu["totalPercentUsed"])
 	if !autoOK && !apiOK && !totalOK {
 		return Result{}, false
@@ -216,14 +224,14 @@ func classifyCursorPeriod(v any) (Result, bool) {
 	}
 	class := OK
 	switch {
-	case autoOK && apiOK && auto >= 99.5 && api >= 99.5:
+	case autoOK && apiOK && auto >= 100 && api >= 100:
 		class = Exhausted
-	case (!autoOK || !apiOK) && used >= 99.5:
-		class = Exhausted
+	case (!autoOK || !apiOK):
+		class = Unknown
 	case (autoOK && auto >= 90) || (apiOK && api >= 90) || used >= 90:
 		class = Soft
 	}
-	if class == Exhausted && cursorOnDemandAvailable(v) {
+	if (class == Exhausted || class == Unknown) && cursorOnDemandAvailable(v) {
 		class = Soft
 	}
 	return Result{Class: class, UsedPct: used, ResetsAt: resets, Source: "http", Buckets: buckets}, true
@@ -304,12 +312,12 @@ func ParseDevinStatus(body []byte) (Result, bool) {
 	}
 	class := OK
 	switch {
-	case used >= 99.5:
+	case used >= 100:
 		class = Exhausted
 		// Every exhausted window must reset before included usage is available.
 		resets = 0
 		for _, b := range buckets {
-			if b.UsedPct < 99.5 {
+			if b.UsedPct < 100 {
 				continue
 			}
 			if b.ResetsAt == 0 {
@@ -394,10 +402,15 @@ func ParseCursorBot(body []byte) (Bucket, bool) {
 		return Bucket{}, false
 	}
 	p, ok := asFloat(m["usagePercent"])
-	if !ok {
+	if !ok || math.IsNaN(p) || math.IsInf(p, 0) || p < 0 {
 		return Bucket{}, false
 	}
-	b := Bucket{ID: "bot", UsedPct: p}
+	b := Bucket{ID: "bot", UsedPct: p, Class: OK}
+	if p >= 100 {
+		b.Class = Exhausted
+	} else if p >= 90 {
+		b.Class = Soft
+	}
 	if s, _ := m["nextResetTimestampUtc"].(string); s != "" {
 		if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
 			b.ResetsAt = t.Unix()
@@ -481,45 +494,61 @@ func classifyCodexWindows(v any, source string) (Result, bool) {
 	if m == nil {
 		return Result{}, false
 	}
-	var primary, secondary map[string]any
-	if w := asMap(m["primary_window"]); w != nil {
-		primary = w
-		secondary = asMap(m["secondary_window"])
-	} else if w := asMap(m["primary"]); w != nil {
-		primary = w
+	primary := asMap(m["primary_window"])
+	secondary := asMap(m["secondary_window"])
+	if primary == nil {
+		primary = asMap(m["primary"])
+	}
+	if secondary == nil {
 		secondary = asMap(m["secondary"])
 	}
-	if primary == nil || secondary == nil {
+	if primary == nil && secondary == nil {
 		return Result{}, false
 	}
-	pUsed, pOK := windowUsed(primary)
-	sUsed, sOK := windowUsed(secondary)
-	if !pOK || !sOK {
-		return Result{}, false
+	r := Result{Class: Unknown, Source: source}
+	for _, w := range []struct {
+		m  map[string]any
+		id string
+	}{{primary, "5h"}, {secondary, "weekly"}} {
+		if used, ok := windowUsed(w.m); ok {
+			r.Buckets = append(r.Buckets, Bucket{ID: windowBucketID(w.m, w.id), UsedPct: used, ResetsAt: windowReset(w.m)})
+		}
 	}
-	buckets := []Bucket{
-		{ID: windowBucketID(primary, "5h"), UsedPct: pUsed, ResetsAt: windowReset(primary)},
-		{ID: windowBucketID(secondary, "weekly"), UsedPct: sUsed, ResetsAt: windowReset(secondary)},
-	}
-	used := pUsed
-	if sUsed > used {
-		used = sUsed
-	}
-	resets := buckets[0].ResetsAt
-	if buckets[1].UsedPct >= buckets[0].UsedPct && buckets[1].ResetsAt > 0 {
-		resets = buckets[1].ResetsAt
-	} else if resets == 0 {
-		resets = buckets[1].ResetsAt
-	}
-	class := OK
 	limitReached := findBool(m, "limit_reached")
-	switch {
-	case limitReached || used >= 99.5:
-		class = Exhausted
-	case used >= 90:
-		class = Soft
+	if typ, ok := findString(m, []string{"rate_limit_reached_type"}); ok && planReachedType(typ) {
+		limitReached = true
 	}
-	return Result{Class: class, UsedPct: used, ResetsAt: resets, Source: source, Buckets: buckets}, true
+	for i, b := range r.Buckets {
+		if i == 0 || b.UsedPct >= r.UsedPct {
+			r.UsedPct = b.UsedPct
+			r.ResetsAt = b.ResetsAt
+		}
+	}
+	if len(r.Buckets) != 2 && !limitReached {
+		return r, true
+	}
+	r.Class = OK
+	if r.UsedPct >= 90 {
+		r.Class = Soft
+	}
+	if limitReached || r.UsedPct >= 100 {
+		r.Class = Exhausted
+		// Every currently blocking window must reset before this account recovers.
+		r.ResetsAt = 0
+		for _, b := range r.Buckets {
+			if b.UsedPct < 100 {
+				continue
+			}
+			if b.ResetsAt == 0 {
+				r.ResetsAt = 0
+				break
+			}
+			if b.ResetsAt > r.ResetsAt {
+				r.ResetsAt = b.ResetsAt
+			}
+		}
+	}
+	return r, true
 }
 
 func windowBucketID(w map[string]any, fallback string) string {
@@ -566,10 +595,10 @@ func planUsage(v any) (float64, bool, int64) {
 }
 
 func windowUsed(w map[string]any) (float64, bool) {
-	if n, ok := asFloat(w["used_percent"]); ok {
+	if n, ok := asFloat(w["used_percent"]); ok && !math.IsNaN(n) && !math.IsInf(n, 0) && n >= 0 {
 		return n, true
 	}
-	if n, ok := asFloat(w["usedPercent"]); ok {
+	if n, ok := asFloat(w["usedPercent"]); ok && !math.IsNaN(n) && !math.IsInf(n, 0) && n >= 0 {
 		return n, true
 	}
 	return 0, false

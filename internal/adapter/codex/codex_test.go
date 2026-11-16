@@ -48,7 +48,13 @@ func TestCaptureRestoreBusy(t *testing.T) {
 	b2, _ := json.Marshal(map[string]any{"kind": "codex.auth.json.v1", "identity": adapter.Identity{StableID: "acc-2"}, "auth_json": json.RawMessage(mustJSON(auth))})
 	other.Payload = b2
 	other.Identity.StableID = "acc-2"
-	if err := ad.Restore(home, other, adapter.RestoreOpts{}); err != nil {
+	if err := ad.Restore(home, other, adapter.RestoreOpts{}); err == nil {
+		t.Fatal("running desktop with unknown turn state must block full switching")
+	}
+	if got, _ := os.ReadFile(authPath(home)); string(got) != string(orig) {
+		t.Fatal("blocked switch wrote credentials")
+	}
+	if err := ad.Restore(home, other, adapter.RestoreOpts{CLIOnly: true}); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := os.ReadFile(filepath.Join(home, ".codex", "auth.json"))
@@ -57,7 +63,7 @@ func TestCaptureRestoreBusy(t *testing.T) {
 	}
 }
 
-func TestCaptureDesktop(t *testing.T) {
+func TestCaptureDoesNotBindDesktop(t *testing.T) {
 	t.Setenv("QSWITCH_IN_TEST", "1")
 	home := t.TempDir()
 	os.MkdirAll(filepath.Join(home, ".codex"), 0o700)
@@ -73,20 +79,20 @@ func TestCaptureDesktop(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(blobs) != 1 || blobs[0].Identity.StableID != "acc-1" {
-		t.Fatalf("want one cli blob with desktop zip, got %#v", blobs)
+		t.Fatalf("want one CLI identity, got %#v", blobs)
 	}
 	var env struct {
 		DesktopZip []byte `json:"desktop_zip"`
 	}
-	if json.Unmarshal(blobs[0].Payload, &env) != nil || len(env.DesktopZip) == 0 {
-		t.Fatal("missing desktop_zip on cli blob")
+	if json.Unmarshal(blobs[0].Payload, &env) != nil || len(env.DesktopZip) != 0 {
+		t.Fatal("unverified desktop_zip on CLI blob")
 	}
 	os.WriteFile(filepath.Join(root, "Cookies"), []byte("old"), 0o600)
 	if err := ad.Restore(home, blobs[0], adapter.RestoreOpts{}); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := os.ReadFile(filepath.Join(root, "Cookies"))
-	if string(got) != "ck" {
+	if string(got) != "old" {
 		t.Fatalf("cookies %q", got)
 	}
 }
@@ -178,7 +184,7 @@ func jwtPlan(email, account, plan string) string {
 	return h + "." + p + ".x"
 }
 
-func TestFingerprintTracksCookies(t *testing.T) {
+func TestFingerprintIgnoresUnboundCookies(t *testing.T) {
 	t.Setenv("QSWITCH_IN_TEST", "1")
 	home := t.TempDir()
 	os.MkdirAll(filepath.Join(home, ".codex"), 0o700)
@@ -192,8 +198,8 @@ func TestFingerprintTracksCookies(t *testing.T) {
 	os.MkdirAll(root, 0o700)
 	os.WriteFile(filepath.Join(root, "Cookies"), []byte("session-a"), 0o600)
 	b, err := ad.Fingerprint(home)
-	if err != nil || a == b {
-		t.Fatalf("cookie change should change fingerprint a=%x b=%x err=%v", a, b, err)
+	if err != nil || a != b {
+		t.Fatalf("independent cookie change altered fingerprint a=%x b=%x err=%v", a, b, err)
 	}
 }
 

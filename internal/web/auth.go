@@ -416,7 +416,7 @@ func (s *Server) setSession(w http.ResponseWriter, x external, value string, max
 func (s *Server) unauthorized(w http.ResponseWriter, r *http.Request, x external) {
 	w.Header().Set("Cache-Control", "no-store")
 	if r.Method == http.MethodGet && (r.URL.Path == "/" || strings.Contains(r.Header.Get("Accept"), "text/html")) {
-		http.Redirect(w, r, x.path("/login"), http.StatusSeeOther)
+		http.Redirect(w, r, preserveExpected(x.path("/login"), r.URL.Query().Get("expected_instance")), http.StatusSeeOther)
 		return
 	}
 	writeErr(w, http.StatusUnauthorized, "unauthorized")
@@ -432,6 +432,10 @@ func (s *Server) getSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getLoginPage(w http.ResponseWriter, r *http.Request) {
+	if expected := r.URL.Query().Get("expected_instance"); expected != "" && expected != s.App.Instance().ID {
+		http.Error(w, "目标实例不一致，已阻止登录。请返回环境管理核对地址。", http.StatusConflict)
+		return
+	}
 	c, need := s.loginRequired(r)
 	if c == nil {
 		http.NotFound(w, r)
@@ -439,13 +443,17 @@ func (s *Server) getLoginPage(w http.ResponseWriter, r *http.Request) {
 	}
 	x := externalOf(r)
 	if !need || s.sessionOK(r, c) {
-		http.Redirect(w, r, x.path("/"), http.StatusSeeOther)
+		http.Redirect(w, r, preserveExpected(x.path("/"), r.URL.Query().Get("expected_instance")), http.StatusSeeOther)
 		return
 	}
-	s.loginPage(w, http.StatusOK, x, "", "")
+	s.loginPage(w, http.StatusOK, x, "", "", r.URL.Query().Get("expected_instance"))
 }
 
 func (s *Server) postLogin(w http.ResponseWriter, r *http.Request) {
+	if expected := r.URL.Query().Get("expected_instance"); expected != "" && expected != s.App.Instance().ID {
+		http.Error(w, "目标实例不一致，已阻止登录。请返回环境管理核对地址。", http.StatusConflict)
+		return
+	}
 	c, need := s.loginRequired(r)
 	if c == nil {
 		http.NotFound(w, r)
@@ -453,44 +461,44 @@ func (s *Server) postLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	x := externalOf(r)
 	if !need {
-		http.Redirect(w, r, x.path("/"), http.StatusSeeOther)
+		http.Redirect(w, r, preserveExpected(x.path("/"), r.URL.Query().Get("expected_instance")), http.StatusSeeOther)
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 	if err := r.ParseForm(); err != nil {
-		s.loginPage(w, http.StatusBadRequest, x, "", "表单无法读取")
+		s.loginPage(w, http.StatusBadRequest, x, "", "表单无法读取", r.URL.Query().Get("expected_instance"))
 		return
 	}
 	user := strings.TrimSpace(r.PostForm.Get("user"))
 	password := r.PostForm.Get("password")
 	now := s.now()
 	if wait := s.fails.locked(x.client, now); wait > 0 {
-		s.loginPage(w, http.StatusTooManyRequests, x, user, lockMessage(wait))
+		s.loginPage(w, http.StatusTooManyRequests, x, user, lockMessage(wait), r.URL.Query().Get("expected_instance"))
 		return
 	}
 	if !c.verify(user, password) {
 		if lock := s.fails.fail(x.client, now); lock > 0 {
 			s.logf("login paused for %s after %d wrong passwords", x.client, lockAfter)
-			s.loginPage(w, http.StatusTooManyRequests, x, user, lockMessage(lock))
+			s.loginPage(w, http.StatusTooManyRequests, x, user, lockMessage(lock), r.URL.Query().Get("expected_instance"))
 			return
 		}
-		s.loginPage(w, http.StatusUnauthorized, x, user, "用户名或密码不对")
+		s.loginPage(w, http.StatusUnauthorized, x, user, "用户名或密码不对", r.URL.Query().Get("expected_instance"))
 		return
 	}
 	s.fails.reset(x.client)
 	s.setSession(w, x, c.issue(now), int(sessionTTL/time.Second))
 	s.logf("login ok user=%s from %s", c.User, x.client)
-	http.Redirect(w, r, x.path("/"), http.StatusSeeOther)
+	http.Redirect(w, r, preserveExpected(x.path("/"), r.URL.Query().Get("expected_instance")), http.StatusSeeOther)
 }
 
 func (s *Server) postLogout(w http.ResponseWriter, r *http.Request) {
 	x := externalOf(r)
 	s.setSession(w, x, "", -1)
 	if _, need := s.loginRequired(r); need {
-		http.Redirect(w, r, x.path("/login"), http.StatusSeeOther)
+		http.Redirect(w, r, preserveExpected(x.path("/login"), r.URL.Query().Get("expected_instance")), http.StatusSeeOther)
 		return
 	}
-	http.Redirect(w, r, x.path("/"), http.StatusSeeOther)
+	http.Redirect(w, r, preserveExpected(x.path("/"), r.URL.Query().Get("expected_instance")), http.StatusSeeOther)
 }
 
 func lockMessage(wait time.Duration) string {
@@ -501,7 +509,11 @@ func lockMessage(wait time.Duration) string {
 	return fmt.Sprintf("连续输错 %d 次，%d 分钟后再试", lockAfter, m)
 }
 
-func (s *Server) loginPage(w http.ResponseWriter, status int, x external, user, msg string) {
+func (s *Server) loginPage(w http.ResponseWriter, status int, x external, user, msg string, expected ...string) {
+	expectedID := ""
+	if len(expected) > 0 {
+		expectedID = expected[0]
+	}
 	h := w.Header()
 	h.Set("Content-Type", "text/html; charset=utf-8")
 	h.Set("Cache-Control", "no-store")
@@ -510,9 +522,9 @@ func (s *Server) loginPage(w http.ResponseWriter, status int, x external, user, 
 	w.WriteHeader(status)
 	errLine := ""
 	if msg != "" {
-		errLine = `<p class="err" role="alert">` + html.EscapeString(msg) + `</p>`
+		errLine = `<p class="err" id="loginError" role="alert">` + html.EscapeString(msg) + `</p>`
 	}
-	page := fmt.Sprintf(loginHTML, x.path("/login"), html.EscapeString(user), errLine, lockAfter, int(lockFor/time.Minute))
+	page := fmt.Sprintf(loginHTML, html.EscapeString(preserveExpected(x.path("/login"), expectedID)), html.EscapeString(user), errLine, lockAfter, int(lockFor/time.Minute), html.EscapeString(s.App.Instance().Name))
 	fmt.Fprint(w, strings.Replace(page, iconPlaceholder, iconLinks(x), 1))
 }
 
@@ -521,38 +533,26 @@ const loginHTML = `<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
 <title>登录 · qswitch</title>
 <!-- qswitch-icons -->
 <style>
-  :root { --bg: #111318; --card: #1a1d24; --line: #2a2e38; --text: #e8eaed; --muted: #9aa0a6; --bad: #f07178; --live: #7aa2f7; }
-  * { box-sizing: border-box; }
-  body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: var(--bg); color: var(--text);
-    font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, "PingFang SC", sans-serif; }
-  main { width: min(360px, calc(100vw - 32px)); background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 22px 22px 18px; }
-  h1 { margin: 0 0 4px; font-size: 18px; }
-  .lead { margin: 0 0 16px; color: var(--muted); font-size: 13px; }
-  label { display: block; margin-bottom: 12px; color: var(--muted); font-size: 12px; }
-  input { display: block; width: 100%%; margin-top: 4px; padding: 8px 10px; font: inherit; font-size: 14px; color: var(--text);
-    background: var(--bg); border: 1px solid var(--line); border-radius: 8px; }
-  input:focus { outline: none; border-color: var(--live); }
-  button { width: 100%%; margin-top: 4px; padding: 8px 10px; font: inherit; color: var(--live); background: transparent;
-    border: 1px solid var(--live); border-radius: 8px; cursor: pointer; }
-  button:hover { background: #7aa2f71a; }
-  .err { margin: 0 0 12px; color: var(--bad); font-size: 13px; }
-  .note { margin: 14px 0 0; color: var(--muted); font-size: 12px; }
+:root{color-scheme:dark;--bg:#10141c;--surface:#161c27;--raised:#1b2330;--line:#2a3547;--text:#e6edf7;--muted:#98a7bd;--accent:#83afff;--accent-bg:#213654;--bad:#ff9aa5}
+@media(prefers-color-scheme:light){:root{color-scheme:light;--bg:#f4f6fa;--surface:#fff;--raised:#f0f3f8;--line:#dce3ee;--text:#202d40;--muted:#5d6c81;--accent:#245fbd;--accent-bg:#e7efff;--bad:#b63148}}
+*{box-sizing:border-box}body{margin:0;min-height:100dvh;display:grid;place-items:center;padding:24px 16px;background:var(--bg);color:var(--text);font:14px/1.5 ui-sans-serif,system-ui,-apple-system,"PingFang SC",sans-serif}main{width:min(380px,100%%);padding:30px;border:1px solid var(--line);border-radius:16px;background:var(--surface)}.brand{display:flex;align-items:center;gap:10px;font-size:22px;font-weight:700;letter-spacing:-.04em}.brand img{width:36px;height:36px}.instance{color:var(--muted);font-size:13px;margin:12px 0 28px;overflow-wrap:anywhere}h1{font-size:16px;font-weight:600;margin:0 0 20px}label{display:block;font-size:12px;color:var(--muted);margin-bottom:16px}input{display:block;width:100%%;margin-top:7px;padding:11px 12px;min-height:44px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--text);font:inherit;font-size:16px}button{width:100%%;min-height:44px;padding:10px 12px;border:1px solid var(--accent);border-radius:8px;color:var(--accent);background:var(--accent-bg);font:inherit;cursor:pointer;margin-top:6px}button:hover{filter:brightness(1.08)}:focus-visible{outline:2px solid var(--accent);outline-offset:3px}.err{color:var(--bad);font-size:13px;margin:4px 0 14px;overflow-wrap:anywhere}.err:empty{display:none}
 </style>
 </head>
 <body>
 <main>
-  <h1>qswitch</h1>
-  <p class="lead">账号余量页面。登录后继续。</p>
-  <form method="post" action="%s">
-    <label>用户名<input name="user" value="%s" autocomplete="username" autocapitalize="none" spellcheck="false" required autofocus></label>
-    <label>密码<input type="password" name="password" autocomplete="current-password" required></label>
-    %s
+  <div class="brand"><img src="favicon.svg" alt="" width="36" height="36">qswitch</div>
+  <p class="instance">登录到 %[6]s</p>
+  <h1>登录管理页面</h1>
+  <form method="post" action="%[1]s">
+    <label>用户名<input name="user" value="%[2]s" autocomplete="username" autocapitalize="none" spellcheck="false" required autofocus aria-describedby="loginError"></label>
+    <label>密码<input type="password" name="password" autocomplete="current-password" required aria-describedby="loginError"></label>
+    %[3]s
     <button type="submit">登录</button>
   </form>
-  <p class="note">同一来源连续输错 %d 次密码会暂停登录 %d 分钟。</p>
 </main>
 </body>
 </html>

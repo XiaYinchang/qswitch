@@ -2,6 +2,7 @@ package adapter
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -10,13 +11,14 @@ import (
 type Tool string
 
 const (
-	Codex  Tool = "codex"
-	Grok   Tool = "grok"
-	Cursor Tool = "cursor"
-	Devin  Tool = "devin"
-	ZCode  Tool = "zcode"
-	Kimi   Tool = "kimi"
-	Claude Tool = "claude"
+	Codex       Tool = "codex"
+	Grok        Tool = "grok"
+	Cursor      Tool = "cursor"
+	Devin       Tool = "devin"
+	ZCode       Tool = "zcode"
+	Kimi        Tool = "kimi"
+	Claude      Tool = "claude"
+	Antigravity Tool = "antigravity"
 )
 
 func ParseTool(s string) (Tool, error) {
@@ -35,12 +37,14 @@ func ParseTool(s string) (Tool, error) {
 		return Kimi, nil
 	case "claude":
 		return Claude, nil
+	case "antigravity", "agy":
+		return Antigravity, nil
 	default:
 		return "", fmt.Errorf("unknown tool %q", s)
 	}
 }
 
-func AllTools() []Tool { return []Tool{Codex, Grok, Cursor, Devin, ZCode, Kimi, Claude} }
+func AllTools() []Tool { return []Tool{Codex, Grok, Cursor, Devin, ZCode, Kimi, Claude, Antigravity} }
 
 type Identity struct {
 	Tool        Tool   `json:"tool"`
@@ -132,11 +136,19 @@ type Adapter interface {
 	KillCLI(home string) error
 }
 
+// ErrRestorePrecondition means a guarded automatic switch lost its admission
+// before any native credential write. Callers must cancel, not commit, it.
+var ErrRestorePrecondition = errors.New("account switch precondition changed")
+
 type RestoreOpts struct {
 	ForceAlign    bool
 	AllowStaleCLI bool
 	AllowChatGPT  bool // unused; ChatGPT is not a manual blocker
 	CLIOnly       bool // Cursor: write ~/.cursor only, leave state.vscdb / Cursor.app alone
+	// Antigravity automatic switches revalidate their admission after native
+	// identity/activity RPCs and immediately before the credential transaction.
+	BeforeWrite          func() error `json:"-"`
+	ExpectedCurrentEmail string       `json:"-"`
 }
 
 type Lister interface {

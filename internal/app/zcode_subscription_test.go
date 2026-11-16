@@ -175,7 +175,7 @@ func TestZCodeSubscriptionBlocksManualAndAutomaticSwitches(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, opts := range []adapter.RestoreOpts{{}, {ForceAlign: true, CLIOnly: true}} {
-		if err := a.Switch(adapter.ZCode, "available", opts, true); err == nil || !strings.Contains(err.Error(), "subscription monitoring only") {
+		if err := a.Switch(adapter.ZCode, "available", opts, true); err == nil || !strings.Contains(err.Error(), "仅支持订阅监控") {
 			t.Fatalf("public switch should explain its read-only boundary: %v", err)
 		}
 	}

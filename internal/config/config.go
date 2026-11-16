@@ -36,17 +36,23 @@ const (
 )
 
 type Config struct {
-	General General `toml:"general"`
-	Quota   Quota   `toml:"quota"`
-	Notify  Notify  `toml:"notify"`
-	Codex   Tool    `toml:"codex"`
-	Grok    Tool    `toml:"grok"`
-	Cursor  Tool    `toml:"cursor"`
-	Devin   Tool    `toml:"devin"`
-	ZCode   Tool    `toml:"zcode"`
-	Kimi    Tool    `toml:"kimi"`
-	Claude  Tool    `toml:"claude"`
-	Web     Web     `toml:"web"`
+	Instance    Instance `toml:"instance"`
+	General     General  `toml:"general"`
+	Quota       Quota    `toml:"quota"`
+	Notify      Notify   `toml:"notify"`
+	Codex       Tool     `toml:"codex"`
+	Grok        Tool     `toml:"grok"`
+	Cursor      Tool     `toml:"cursor"`
+	Devin       Tool     `toml:"devin"`
+	ZCode       Tool     `toml:"zcode"`
+	Kimi        Tool     `toml:"kimi"`
+	Claude      Tool     `toml:"claude"`
+	Antigravity Tool     `toml:"antigravity"`
+	Web         Web      `toml:"web"`
+}
+
+type Instance struct {
+	Name string `toml:"name"`
 }
 
 type General struct {
@@ -97,15 +103,16 @@ func Default() Config {
 			ProbeIdleAccounts: true,
 			HTTPBackoff:       "2h",
 		},
-		Notify: Notify{Enabled: true},
-		Codex:  Tool{Enabled: true},
-		Grok:   Tool{Enabled: true},
-		Cursor: Tool{Enabled: true},
-		Devin:  Tool{Enabled: true},
-		ZCode:  Tool{Enabled: true},
-		Kimi:   Tool{Enabled: true},
-		Claude: Tool{Enabled: true},
-		Web:    Web{Enabled: true, Addr: DefaultWebAddr},
+		Notify:      Notify{Enabled: true},
+		Codex:       Tool{Enabled: true},
+		Grok:        Tool{Enabled: true},
+		Cursor:      Tool{Enabled: true},
+		Devin:       Tool{Enabled: true},
+		ZCode:       Tool{Enabled: true},
+		Kimi:        Tool{Enabled: true},
+		Claude:      Tool{Enabled: true},
+		Antigravity: Tool{Enabled: true},
+		Web:         Web{Enabled: true, Addr: DefaultWebAddr},
 	}
 }
 
@@ -198,6 +205,8 @@ func (c Config) ToolEnabled(name string) bool {
 		return c.Kimi.Enabled
 	case "claude":
 		return c.Claude.Enabled
+	case "antigravity":
+		return c.Antigravity.Enabled
 	default:
 		return false
 	}
@@ -219,6 +228,8 @@ func (c *Config) SetToolEnabled(name string, on bool) error {
 		c.Kimi.Enabled = on
 	case "claude":
 		c.Claude.Enabled = on
+	case "antigravity":
+		c.Antigravity.Enabled = on
 	case "", "all":
 		c.Codex.Enabled = on
 		c.Grok.Enabled = on
@@ -227,6 +238,7 @@ func (c *Config) SetToolEnabled(name string, on bool) error {
 		c.ZCode.Enabled = on
 		c.Kimi.Enabled = on
 		c.Claude.Enabled = on
+		c.Antigravity.Enabled = on
 	default:
 		return fmt.Errorf("unknown tool %q", name)
 	}

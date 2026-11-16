@@ -7,15 +7,14 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"qswitch/internal/adapter"
 	"qswitch/internal/busy"
 	"qswitch/internal/identityjwt"
-	"qswitch/internal/livefile"
 	"qswitch/internal/quota"
 	"qswitch/internal/snapshot"
 )
@@ -38,12 +37,7 @@ func (a Adapter) Fingerprint(home string) ([32]byte, error) {
 func lockPath(home string) string { return filepath.Join(home, ".grok", "auth.json.lock") }
 func sessPath(home string) string { return filepath.Join(home, ".grok", "active_sessions.json") }
 
-func (a Adapter) LivePaths(home string) []string {
-	return []string{
-		authPath(home),
-		filepath.Join(home, snapshot.GrokBotRelRoot, "Cookies"),
-	}
-}
+func (a Adapter) LivePaths(home string) []string { return []string{authPath(home)} }
 
 func (a Adapter) procs() ([]adapter.Proc, error) {
 	if a.List != nil {
@@ -82,23 +76,7 @@ func (a Adapter) ManualBlockers(home string) (adapter.Holders, error) {
 	return h, nil
 }
 
-func (a Adapter) AutoBlockers(home string) (adapter.Holders, error) {
-	h, err := a.ManualBlockers(home)
-	if err != nil {
-		return h, err
-	}
-	list, err := a.procs()
-	if err != nil {
-		return h, err
-	}
-	apps := busy.GrokBotApp(list)
-	if len(apps) > 0 {
-		h.AutoExtra = apps
-		h.GrokBotApp = true
-		h.Why = append(h.Why, "grok bot.app running")
-	}
-	return h, nil
-}
+func (a Adapter) AutoBlockers(home string) (adapter.Holders, error) { return a.ManualBlockers(home) }
 
 func parsePIDFile(path string) (int, bool) {
 	b, err := os.ReadFile(path)
@@ -140,9 +118,6 @@ func liveSessionPIDs(home string) []int {
 func (a Adapter) Capture(home string) ([]adapter.Blob, []adapter.Warning, error) {
 	raw, err := os.ReadFile(authPath(home))
 	if err != nil {
-		if desk, e2 := captureDesktop(home); e2 == nil {
-			return []adapter.Blob{desk}, nil, nil
-		}
 		return nil, nil, err
 	}
 	id, err := identityFromRaw(raw)
@@ -153,37 +128,11 @@ func (a Adapter) Capture(home string) ([]adapter.Blob, []adapter.Warning, error)
 	if dualBinary(home) {
 		warn = append(warn, adapter.WarnGrokDualBinary)
 	}
-	env := map[string]any{"kind": "grok.auth.json.v1", "identity": id, "auth_json": json.RawMessage(raw)}
-	if z, zerr := snapshot.Pack(filepath.Join(home, snapshot.GrokBotRelRoot), snapshot.GrokBotRels); zerr == nil {
-		env["desktop_zip"] = z
-		env["desktop_rel_root"] = snapshot.GrokBotRelRoot
-	}
-	payload, err := json.Marshal(env)
+	payload, err := json.Marshal(map[string]any{"kind": "grok.auth.json.v1", "identity": id, "auth_json": json.RawMessage(raw)})
 	if err != nil {
 		return nil, warn, err
 	}
-	blobs := []adapter.Blob{{Tool: adapter.Grok, Identity: id, CapturedAt: time.Now(), Payload: payload}}
-	if desk, err := captureDesktop(home); err == nil {
-		blobs = append(blobs, desk)
-	}
-	return blobs, warn, nil
-}
-
-func captureDesktop(home string) (adapter.Blob, error) {
-	root := filepath.Join(home, snapshot.GrokBotRelRoot)
-	z, err := snapshot.Pack(root, snapshot.GrokBotRels)
-	if err != nil {
-		return adapter.Blob{}, err
-	}
-	id := adapter.Identity{Tool: adapter.Grok, StableID: "desktop:grokbot", Email: "grok-bot.app", PlanHint: "desktop"}
-	raw, err := json.Marshal(map[string]any{
-		"kind": snapshot.KindDesktop, "identity": id, "app": "grokbot",
-		"rel_root": snapshot.GrokBotRelRoot, "zip": z,
-	})
-	if err != nil {
-		return adapter.Blob{}, err
-	}
-	return adapter.Blob{Tool: adapter.Grok, Identity: id, CapturedAt: time.Now(), Payload: raw}, nil
+	return []adapter.Blob{{Tool: adapter.Grok, Identity: id, CapturedAt: time.Now(), Payload: payload}}, warn, nil
 }
 
 func dualBinary(home string) bool {
@@ -193,33 +142,18 @@ func dualBinary(home string) bool {
 }
 
 func identityFromRaw(raw []byte) (adapter.Identity, error) {
-	var root map[string]any
-	if err := json.Unmarshal(raw, &root); err != nil {
+	auth, err := parseAuthJSON(raw, "")
+	if err != nil {
 		return adapter.Identity{}, err
 	}
-	for _, v := range root {
-		m, ok := v.(map[string]any)
-		if !ok {
-			continue
-		}
-		id := adapter.Identity{Tool: adapter.Grok}
-		if s, ok := m["principal_id"].(string); ok {
-			id.StableID = s
-		}
-		if id.StableID == "" {
-			if s, ok := m["user_id"].(string); ok {
-				id.StableID = s
-			}
-		}
-		if s, ok := m["email"].(string); ok {
-			id.Email = s
-		}
-		if id.StableID == "" {
-			continue
-		}
-		return id, nil
+	id := auth.PrincipalID
+	if id == "" {
+		id = auth.UserID
 	}
-	return adapter.Identity{}, errors.New("grok: no principal_id")
+	if id == "" {
+		return adapter.Identity{}, errors.New("grok: no principal_id")
+	}
+	return adapter.Identity{Tool: adapter.Grok, StableID: id, Email: auth.Email}, nil
 }
 
 func (a Adapter) IdentityOf(blob adapter.Blob) (adapter.Identity, error) {
@@ -241,90 +175,63 @@ func (a Adapter) IdentityOf(blob adapter.Blob) (adapter.Identity, error) {
 }
 
 func (a Adapter) Restore(home string, blob adapter.Blob, opts adapter.RestoreOpts) error {
-	var head struct {
-		Kind string `json:"kind"`
-	}
-	_ = json.Unmarshal(blob.Payload, &head)
-	if head.Kind == snapshot.KindDesktop {
-		if opts.CLIOnly {
-			return errors.New("grok: cannot restore a desktop-only snapshot with --cli-only")
-		}
-		list, err := a.procs()
-		if err != nil {
-			return err
-		}
-		if apps := busy.GrokBotApp(list); len(apps) > 0 {
-			return &adapter.BusyError{Holders: adapter.Holders{Manual: apps, Why: []string{"quit Grok Bot.app to restore desktop session"}}}
-		}
-		var env struct {
-			RelRoot string `json:"rel_root"`
-			Zip     []byte `json:"zip"`
-		}
-		if err := json.Unmarshal(blob.Payload, &env); err != nil {
-			return err
-		}
-		if env.RelRoot == "" || len(env.Zip) == 0 {
-			return errors.New("grok: empty desktop snapshot")
-		}
-		if env.RelRoot != snapshot.GrokBotRelRoot {
-			return errors.New("grok: invalid desktop snapshot root")
-		}
-		return snapshot.Unpack(filepath.Join(home, env.RelRoot), env.Zip)
-	}
-	h, err := a.ManualBlockers(home)
-	if err != nil {
-		return err
-	}
-	if h.ManualBusy() {
-		return &adapter.BusyError{Holders: h}
-	}
+	_, err := a.RestoreWithRollback(home, blob, opts)
+	return err
+}
+
+func (a Adapter) RestoreWithRollback(home string, blob adapter.Blob, _ adapter.RestoreOpts) (func() error, error) {
 	var env struct {
+		Kind     string          `json:"kind"`
 		AuthJSON json.RawMessage `json:"auth_json"`
 	}
 	if err := json.Unmarshal(blob.Payload, &env); err != nil {
-		return err
+		return nil, err
+	}
+	if env.Kind == snapshot.KindDesktop {
+		return nil, errors.New("grok: Sand desktop snapshots have no verified Grok CLI account binding")
 	}
 	if len(env.AuthJSON) == 0 {
-		return errors.New("grok: empty auth_json")
+		return nil, errors.New("grok: empty auth_json")
 	}
-	writeAuth := func() error {
-		return livefile.AtomicWrite(authPath(home), env.AuthJSON, 0o600)
+	if blob.Identity.StableID == "" {
+		return nil, errors.New("grok: missing snapshot identity")
 	}
-	if opts.CLIOnly {
-		return writeAuth()
-	}
-	return restoreAttachedDesktop(home, blob, a, writeAuth)
-}
-
-func restoreAttachedDesktop(home string, blob adapter.Blob, a Adapter, writeAuth func() error) error {
-	var env struct {
-		DesktopZip []byte `json:"desktop_zip"`
-		RelRoot    string `json:"desktop_rel_root"`
-	}
-	if err := json.Unmarshal(blob.Payload, &env); err != nil {
-		return err
-	}
-	if len(env.DesktopZip) == 0 {
-		return writeAuth()
-	}
-	list, err := a.procs()
+	auth, err := parseAuthJSON(env.AuthJSON, blob.Identity.StableID)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if apps := busy.GrokBotApp(list); len(apps) > 0 {
-		return &adapter.BusyError{Holders: adapter.Holders{Manual: apps, Why: []string{"quit Grok Bot.app to restore desktop session"}}}
+	if auth.Key == "" && auth.Refresh == "" {
+		return nil, errors.New("grok: snapshot has no usable credentials")
 	}
-	if env.RelRoot == "" {
-		env.RelRoot = snapshot.GrokBotRelRoot
+	// Finding a requested slot in a legacy multi-account snapshot does not
+	// establish which account the native CLI will select after restoring it.
+	nativeID, err := identityFromRaw(env.AuthJSON)
+	if err != nil {
+		return nil, err
 	}
-	if env.RelRoot != snapshot.GrokBotRelRoot {
-		return errors.New("grok: invalid desktop snapshot root")
+	if nativeID.StableID != blob.Identity.StableID {
+		return nil, errors.New("grok: native credential identity does not match the selected account")
 	}
-	return snapshot.Restore(filepath.Join(home, env.RelRoot), env.DesktopZip, writeAuth)
+
+	h, err := a.ManualBlockers(home)
+	if err != nil {
+		return nil, err
+	}
+	if h.ManualBusy() {
+		return nil, &adapter.BusyError{Holders: h}
+	}
+	return snapshot.WriteFiles(snapshot.FileWrite{Path: authPath(home), Data: env.AuthJSON, Mode: 0600})
 }
 
 func (a Adapter) Idle(home string, grace time.Duration) bool {
-	return quota.DirIdle(filepath.Join(home, ".grok", "sessions"), grace, time.Now())
+	list, err := a.procs()
+	if err != nil {
+		return false
+	}
+	if len(busy.GrokCLI(list)) == 0 {
+		return true
+	}
+	return busy.FilesIdle(filepath.Join(home, ".grok", "sessions"), grace, time.Now())
 }
 
 func (a Adapter) KillCLI(home string) error {
@@ -349,7 +256,7 @@ func (a Adapter) KillCLI(home string) error {
 	}
 	var first error
 	for _, p := range h.Manual {
-		if err := syscall.Kill(p.PID, syscall.SIGTERM); err != nil && first == nil {
+		if err := busy.Terminate(p.PID); err != nil && first == nil {
 			first = err
 		}
 	}
@@ -370,6 +277,8 @@ func Bearer(blob adapter.Blob) (string, error) {
 const accessSkew = 5 * time.Minute
 
 const grokIssuer = "https://auth.x.ai"
+
+var ErrIdentityNotFound = errors.New("grok: requested account identity is absent from credentials")
 
 type AuthFile struct {
 	Slot        string
@@ -413,28 +322,44 @@ func parseAuthJSON(raw []byte, preferID string) (AuthFile, error) {
 	if err := json.Unmarshal(raw, &root); err != nil {
 		return AuthFile{}, err
 	}
-	var first, preferred AuthFile
-	for slot, v := range root {
-		m, ok := v.(map[string]any)
+	keys := make([]string, 0, len(root))
+	for key := range root {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	var selected AuthFile
+	for _, slot := range keys {
+		m, ok := root[slot].(map[string]any)
 		if !ok {
 			continue
 		}
 		a := authFromMap(slot, m)
-		if a.PrincipalID == "" && a.Key == "" {
+		if a.PrincipalID == "" && a.UserID == "" {
 			continue
 		}
-		if first.Slot == "" {
-			first = a
+		if preferID != "" && a.PrincipalID != preferID && a.UserID != preferID {
+			continue
 		}
-		if preferID != "" && (a.PrincipalID == preferID || a.UserID == preferID) {
-			preferred = a
+		if selected.Slot == "" {
+			selected = a
+			continue
+		}
+		selectedID, candidateID := selected.PrincipalID, a.PrincipalID
+		if selectedID == "" {
+			selectedID = selected.UserID
+		}
+		if candidateID == "" {
+			candidateID = a.UserID
+		}
+		if preferID == "" && selectedID != candidateID {
+			return AuthFile{}, errors.New("grok: multiple account identities; native active account is ambiguous")
 		}
 	}
-	if preferred.Slot != "" {
-		return preferred, nil
+	if selected.Slot != "" {
+		return selected, nil
 	}
-	if first.Slot != "" {
-		return first, nil
+	if preferID != "" {
+		return AuthFile{}, ErrIdentityNotFound
 	}
 	return AuthFile{}, errors.New("grok: no principal_id")
 }
@@ -484,9 +409,9 @@ func (a AuthFile) Refreshable() bool {
 	}
 	iss := strings.TrimRight(strings.ToLower(a.Issuer), "/")
 	if iss == "" {
-		iss = strings.ToLower(a.Slot)
+		iss, _, _ = strings.Cut(strings.ToLower(a.Slot), "::")
 	}
-	return strings.HasPrefix(iss, grokIssuer)
+	return strings.TrimRight(iss, "/") == grokIssuer
 }
 
 func (a AuthFile) NeedsRefresh(now time.Time) bool {

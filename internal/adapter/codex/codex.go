@@ -7,13 +7,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"qswitch/internal/adapter"
 	"qswitch/internal/busy"
 	"qswitch/internal/identityjwt"
-	"qswitch/internal/livefile"
 	"qswitch/internal/quota"
 	"qswitch/internal/snapshot"
 )
@@ -24,35 +22,16 @@ type Adapter struct {
 
 func (a Adapter) Name() adapter.Tool { return adapter.Codex }
 
-func (a Adapter) LivePaths(home string) []string {
-	return []string{
-		filepath.Join(home, ".codex", "auth.json"),
-		filepath.Join(home, snapshot.ChatGPTRelRoot, "Cookies"),
-	}
-}
+func (a Adapter) LivePaths(home string) []string { return []string{authPath(home)} }
 
 func authPath(home string) string { return filepath.Join(home, ".codex", "auth.json") }
 
 func (a Adapter) Fingerprint(home string) ([32]byte, error) {
-	h := sha256.New()
-	n := 0
-	for _, p := range []string{
-		authPath(home),
-		filepath.Join(home, snapshot.ChatGPTRelRoot, "Cookies"),
-	} {
-		b, err := os.ReadFile(p)
-		if err != nil {
-			continue
-		}
-		h.Write(b)
-		n++
+	raw, err := os.ReadFile(authPath(home))
+	if err != nil {
+		return [32]byte{}, err
 	}
-	if n == 0 {
-		return [32]byte{}, os.ErrNotExist
-	}
-	var out [32]byte
-	copy(out[:], h.Sum(nil))
-	return out, nil
+	return sha256.Sum256(raw), nil
 }
 
 func (a Adapter) procs() ([]adapter.Proc, error) {
@@ -96,9 +75,6 @@ func (a Adapter) AutoBlockers(home string) (adapter.Holders, error) {
 func (a Adapter) Capture(home string) ([]adapter.Blob, []adapter.Warning, error) {
 	raw, err := os.ReadFile(authPath(home))
 	if err != nil {
-		if desk, e2 := captureDesktop(home); e2 == nil {
-			return []adapter.Blob{desk}, nil, nil
-		}
 		return nil, nil, err
 	}
 	id, warn, err := identityFromRaw(raw)
@@ -110,16 +86,6 @@ func (a Adapter) Capture(home string) ([]adapter.Blob, []adapter.Warning, error)
 		return nil, warn, err
 	}
 	b.Identity = id
-	if z, zerr := snapshot.Pack(filepath.Join(home, snapshot.ChatGPTRelRoot), snapshot.ChatGPTRels); zerr == nil {
-		var env map[string]any
-		if json.Unmarshal(b.Payload, &env) == nil {
-			env["desktop_zip"] = z
-			env["desktop_rel_root"] = snapshot.ChatGPTRelRoot
-			if payload, merr := json.Marshal(env); merr == nil {
-				b.Payload = payload
-			}
-		}
-	}
 	return []adapter.Blob{b}, warn, nil
 }
 
@@ -139,23 +105,6 @@ func BlobFromAuthJSON(raw []byte, now time.Time) (adapter.Blob, error) {
 	return adapter.Blob{Tool: adapter.Codex, Identity: id, CapturedAt: now, Payload: payload}, nil
 }
 
-func captureDesktop(home string) (adapter.Blob, error) {
-	root := filepath.Join(home, snapshot.ChatGPTRelRoot)
-	z, err := snapshot.Pack(root, snapshot.ChatGPTRels)
-	if err != nil {
-		return adapter.Blob{}, err
-	}
-	id := adapter.Identity{Tool: adapter.Codex, StableID: "desktop:chatgpt", Email: "chatgpt.app", PlanHint: "desktop"}
-	raw, err := json.Marshal(map[string]any{
-		"kind": snapshot.KindDesktop, "identity": id, "app": "chatgpt",
-		"rel_root": snapshot.ChatGPTRelRoot, "zip": z,
-	})
-	if err != nil {
-		return adapter.Blob{}, err
-	}
-	return adapter.Blob{Tool: adapter.Codex, Identity: id, CapturedAt: time.Now(), Payload: raw}, nil
-}
-
 func identityFromRaw(raw []byte) (adapter.Identity, []adapter.Warning, error) {
 	var warn []adapter.Warning
 	var root map[string]any
@@ -164,7 +113,7 @@ func identityFromRaw(raw []byte) (adapter.Identity, []adapter.Warning, error) {
 	}
 	mode, _ := root["auth_mode"].(string)
 	if mode == "ApiKey" || mode == "api_key" {
-		warn = append(warn, adapter.WarnApiKeyMode)
+		return adapter.Identity{}, nil, errors.New("codex: API key authentication cannot participate in subscription switching")
 	}
 	tokens, _ := root["tokens"].(map[string]any)
 	id := adapter.Identity{Tool: adapter.Codex}
@@ -231,89 +180,58 @@ func (a Adapter) IdentityOf(blob adapter.Blob) (adapter.Identity, error) {
 }
 
 func (a Adapter) Restore(home string, blob adapter.Blob, opts adapter.RestoreOpts) error {
-	if isDesktop(blob) {
-		if opts.CLIOnly {
-			return errors.New("codex: cannot restore a desktop-only snapshot with --cli-only")
-		}
-		list, err := a.procs()
-		if err != nil {
-			return err
-		}
-		if apps := busy.ChatGPTApp(list); len(apps) > 0 {
-			return &adapter.BusyError{Holders: adapter.Holders{Manual: apps, ChatGPTApp: true, Why: []string{"quit ChatGPT.app to restore desktop session"}}}
-		}
-		return restoreDesktop(home, blob)
+	_, err := a.RestoreWithRollback(home, blob, opts)
+	return err
+}
+
+func (a Adapter) RestoreWithRollback(home string, blob adapter.Blob, opts adapter.RestoreOpts) (func() error, error) {
+	var head struct {
+		Kind string `json:"kind"`
+	}
+	if err := json.Unmarshal(blob.Payload, &head); err != nil {
+		return nil, err
+	}
+	if head.Kind == snapshot.KindDesktop {
+		return nil, errors.New("codex: desktop snapshot has no verified account binding; sign in through the native client")
 	}
 	h, err := a.ManualBlockers(home)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if h.ManualBusy() {
-		return &adapter.BusyError{Holders: h}
+		return nil, &adapter.BusyError{Holders: h}
+	}
+	if !opts.CLIOnly {
+		list, err := a.procs()
+		if err != nil {
+			return nil, err
+		}
+		if apps := busy.ChatGPTApp(list); len(apps) > 0 {
+			return nil, &adapter.BusyError{Holders: adapter.Holders{Manual: apps, ChatGPTApp: true, Why: []string{"desktop turn state is unknown; close the app before switching"}}}
+		}
 	}
 	raw, err := authJSON(blob)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	writeAuth := func() error {
-		return livefile.AtomicWrite(authPath(home), raw, 0o600)
-	}
-	if opts.CLIOnly {
-		return writeAuth()
-	}
-	return restoreAttachedDesktop(home, blob, a, writeAuth)
-}
-
-func restoreAttachedDesktop(home string, blob adapter.Blob, a Adapter, writeAuth func() error) error {
-	var env struct {
-		DesktopZip []byte `json:"desktop_zip"`
-		RelRoot    string `json:"desktop_rel_root"`
-	}
-	if err := json.Unmarshal(blob.Payload, &env); err != nil {
-		return err
-	}
-	if len(env.DesktopZip) == 0 {
-		return writeAuth()
-	}
-	list, err := a.procs()
+	id, _, err := identityFromRaw(raw)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if apps := busy.ChatGPTApp(list); len(apps) > 0 {
-		return &adapter.BusyError{Holders: adapter.Holders{Manual: apps, ChatGPTApp: true, Why: []string{"quit ChatGPT.app to restore desktop session"}}}
+	if blob.Identity.StableID == "" || id.StableID != blob.Identity.StableID {
+		return nil, errors.New("codex: snapshot credential identity mismatch")
 	}
-	if env.RelRoot == "" {
-		env.RelRoot = snapshot.ChatGPTRelRoot
+	auth, err := ReadAuthBytes(raw)
+	if err != nil {
+		return nil, err
 	}
-	if env.RelRoot != snapshot.ChatGPTRelRoot {
-		return errors.New("codex: invalid desktop snapshot root")
+	if auth.Access == "" && auth.Refresh == "" {
+		return nil, errors.New("codex: snapshot has no usable OAuth credentials")
 	}
-	return snapshot.Restore(filepath.Join(home, env.RelRoot), env.DesktopZip, writeAuth)
-}
 
-func isDesktop(blob adapter.Blob) bool {
-	var h struct {
-		Kind string `json:"kind"`
-	}
-	_ = json.Unmarshal(blob.Payload, &h)
-	return h.Kind == snapshot.KindDesktop
-}
-
-func restoreDesktop(home string, blob adapter.Blob) error {
-	var env struct {
-		RelRoot string `json:"rel_root"`
-		Zip     []byte `json:"zip"`
-	}
-	if err := json.Unmarshal(blob.Payload, &env); err != nil {
-		return err
-	}
-	if env.RelRoot == "" || len(env.Zip) == 0 {
-		return errors.New("codex: empty desktop snapshot")
-	}
-	if env.RelRoot != snapshot.ChatGPTRelRoot {
-		return errors.New("codex: invalid desktop snapshot root")
-	}
-	return snapshot.Unpack(filepath.Join(home, env.RelRoot), env.Zip)
+	// Legacy browser attachments have no verified identity binding. Only the
+	// native Codex OAuth file participates in this transaction.
+	return snapshot.WriteFiles(snapshot.FileWrite{Path: authPath(home), Data: raw, Mode: 0600})
 }
 
 func authJSON(blob adapter.Blob) ([]byte, error) {
@@ -330,7 +248,14 @@ func authJSON(blob adapter.Blob) ([]byte, error) {
 }
 
 func (a Adapter) Idle(home string, grace time.Duration) bool {
-	return quota.DirIdle(filepath.Join(home, ".codex", "sessions"), grace, time.Now())
+	list, err := a.procs()
+	if err != nil || len(busy.ChatGPTApp(list)) > 0 {
+		return false
+	}
+	if len(busy.CodexCLI(list)) == 0 {
+		return true
+	}
+	return busy.FilesIdle(filepath.Join(home, ".codex", "sessions"), grace, time.Now())
 }
 
 func (a Adapter) KillCLI(home string) error {
@@ -340,7 +265,7 @@ func (a Adapter) KillCLI(home string) error {
 	}
 	var first error
 	for _, p := range h.Manual {
-		if err := syscall.Kill(p.PID, syscall.SIGTERM); err != nil && first == nil {
+		if err := busy.Terminate(p.PID); err != nil && first == nil {
 			first = err
 		}
 	}

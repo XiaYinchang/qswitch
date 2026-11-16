@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -9,13 +10,40 @@ import (
 	"path/filepath"
 	"syscall"
 
+	"qswitch/internal/adapter"
 	"qswitch/internal/app"
 	"qswitch/internal/buildinfo"
 	"qswitch/internal/web"
 )
 
 func main() {
-	if len(os.Args) == 2 && os.Args[1] == "--version" {
+	version := flag.Bool("version", false, "print version")
+	toolName := flag.String("tool", "", "manage only this tool (default: all configured tools)")
+	flag.Parse()
+	if flag.NArg() != 0 {
+		fmt.Fprintln(os.Stderr, "usage: qswitchd [--tool <tool>] [--version]")
+		os.Exit(2)
+	}
+	toolSpecified := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "tool" {
+			toolSpecified = true
+		}
+	})
+	if toolSpecified && *toolName == "" {
+		fmt.Fprintln(os.Stderr, "--tool requires a value")
+		os.Exit(2)
+	}
+	selected := adapter.AllTools()
+	if *toolName != "" {
+		tool, err := adapter.ParseTool(*toolName)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		selected = []adapter.Tool{tool}
+	}
+	if *version {
 		fmt.Println(buildinfo.Version)
 		return
 	}
@@ -30,6 +58,10 @@ func main() {
 		os.Exit(1)
 	}
 	defer a.Close()
+	if err := a.SetManagedTools(selected); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
 	// journald stamps each line; one line per change in a switch's progress.
 	a.Log = log.New(os.Stderr, "", 0).Printf
 	if err := a.Init(); err != nil {
@@ -47,7 +79,7 @@ func main() {
 			}
 		}()
 	}
-	if err := a.RunDaemon(ctx); err != nil {
+	if err := a.RunDaemonTools(ctx, selected); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

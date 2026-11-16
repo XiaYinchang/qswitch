@@ -28,7 +28,7 @@ func TestTailCodex(t *testing.T) {
 			`{"type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":16.0,"resets_at":1788702939},"rate_limit_reached_type":null}}}`,
 		)
 		r, ok := Tail(KindCodex, p)
-		if !ok || r.Class != OK || r.UsedPct != 16 {
+		if !ok || r.Class != Unknown || r.UsedPct != 16 {
 			t.Fatalf("got ok=%v class=%s pct=%v", ok, r.Class, r.UsedPct)
 		}
 		if r.ResetsAt != 1788702939 {

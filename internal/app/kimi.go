@@ -2,9 +2,11 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"time"
 
 	"qswitch/internal/adapter"
@@ -83,9 +85,22 @@ func (a *App) keepAliveKimiAccounts(ctx context.Context) {
 // Caller holds the Kimi tool lock. A running CLI owns live renewal; with no
 // CLI, qswitch can renew a verified live account under the official auth lock.
 func (a *App) keepAliveKimiLocked(ctx context.Context, b adapter.Blob, force, bypassBackoff bool) (adapter.Blob, string, error) {
+	previous, err := kimi.CredsFromBlob(b)
+	if err != nil {
+		return b, "", err
+	}
+	if runtime.GOOS == "windows" && (force || previous.NeedsRefresh(a.now())) {
+		return b, "", errors.New("kimi: Windows OAuth refresh recovery is not supported; renew with the native client and capture again")
+	}
+	if err := a.recoverKimiLocked(&b); err != nil {
+		return b, "", err
+	}
 	c, err := kimi.CredsFromBlob(b)
 	if err != nil {
 		return b, "", err
+	}
+	if !sameKimiTokens(previous, c) {
+		force = false // A recovered exchange already replaced the rejected pair.
 	}
 	live, liveErr := kimi.ReadLiveCreds(a.UserHome)
 	if liveErr == nil && sameKimiTokens(c, live) {
@@ -110,6 +125,24 @@ func (a *App) keepAliveKimiLocked(ctx context.Context, b adapter.Blob, force, by
 			return b, "", a.recordRefreshResult(adapter.Kimi, b.Identity.StableID, false, errors.New("kimi: live profile missing identity"))
 		}
 		if liveID == b.Identity.StableID {
+			raw, readErr := os.ReadFile(a.Adapters[adapter.Kimi].LivePaths(a.UserHome)[0])
+			current, parseErr := kimi.ParseCreds(raw)
+			if readErr != nil || parseErr != nil || !sameKimiTokens(live, current) {
+				return b, "", errors.New("kimi: live credentials changed during identity verification")
+			}
+			var env map[string]json.RawMessage
+			if err := json.Unmarshal(b.Payload, &env); err != nil {
+				return b, "", err
+			}
+			env["credentials_json"], _ = json.Marshal(string(raw))
+			b.Payload, err = json.Marshal(env)
+			if err != nil {
+				return b, "", err
+			}
+			if err := a.saveBlob(b); err != nil {
+				return b, "", err
+			}
+			force = false // The rejected stored token has already been replaced.
 			return a.keepAliveLiveKimiLocked(ctx, b, live, force, bypassBackoff)
 		}
 	} else if !os.IsNotExist(liveErr) {
@@ -137,6 +170,10 @@ func (a *App) keepAliveKimiLocked(ctx context.Context, b adapter.Blob, force, by
 		(os.IsNotExist(liveErr) && !os.IsNotExist(currentErr)) {
 		return b, "", a.recordRefreshResult(adapter.Kimi, b.Identity.StableID, false, errors.New("kimi: live credentials changed before refresh"))
 	}
+	recovery, err := a.beginKimiRecovery(b, "")
+	if err != nil {
+		return b, "", a.recordRefreshResult(adapter.Kimi, b.Identity.StableID, false, err)
+	}
 	tok, err := a.HTTP.KimiRefresh(ctx, c.RefreshToken)
 	if err != nil {
 		return b, "", a.recordRefreshResult(adapter.Kimi, b.Identity.StableID, tok.Permanent, err)
@@ -145,7 +182,11 @@ func (a *App) keepAliveKimiLocked(ctx context.Context, b adapter.Blob, force, by
 	if err != nil {
 		return b, "", a.recordRefreshResult(adapter.Kimi, b.Identity.StableID, false, err)
 	}
-	if err := a.saveBlob(updated); err != nil {
+	recovery.Updated = &updated
+	if err := a.putKimiRecovery(recovery); err != nil {
+		return updated, "", a.recordRefreshResult(adapter.Kimi, b.Identity.StableID, false, err)
+	}
+	if err := a.recoverKimiLocked(&updated); err != nil {
 		return updated, "", a.recordRefreshResult(adapter.Kimi, b.Identity.StableID, false, err)
 	}
 	if err := a.recordRefreshResult(adapter.Kimi, b.Identity.StableID, false, nil); err != nil {

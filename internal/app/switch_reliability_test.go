@@ -113,33 +113,20 @@ func TestSwitchActiveDesktopDoesNotQuit(t *testing.T) {
 	}
 }
 
-func TestSwitchFailureRelaunchesDesktop(t *testing.T) {
-	for _, launchFails := range []bool{false, true} {
-		t.Run(map[bool]string{false: "reopened", true: "reopen failed"}[launchFails], func(t *testing.T) {
-			a, s, running, quits, launches := setupDesktopSwitch(t)
-			restoreErr := errors.New("restore failed")
-			launchErr := errors.New("launch failed")
-			s.restoreErr = restoreErr
-			if launchFails {
-				a.Host.LaunchFn = func(string) error { *launches++; return launchErr }
-			}
-			err := a.Switch(adapter.Codex, "acc-a", adapter.RestoreOpts{}, false)
-			if !errors.Is(err, restoreErr) {
-				t.Errorf("lost restore error: %v", err)
-			}
-			if launchFails && !errors.Is(err, launchErr) {
-				t.Errorf("lost relaunch error: %v", err)
-			}
-			if *quits != 1 || *launches != 1 || *running == launchFails {
-				t.Errorf("desktop recovery: running=%v quits=%d launches=%d", *running, *quits, *launches)
-			}
-			p, err := a.State.GetPointer("codex")
-			if err != nil {
-				t.Fatal(err)
-			}
-			if p.StableID != "acc-b" {
-				t.Errorf("failed restore changed pointer: %s", p.StableID)
-			}
-		})
+func TestSwitchUnverifiedDesktopBlocksBeforeRestore(t *testing.T) {
+	a, s, running, quits, launches := setupDesktopSwitch(t)
+	s.idle = true // CLI idle does not establish desktop idle.
+	restoreErr := errors.New("restore must not be reached")
+	s.restoreErr = restoreErr
+	err := a.Switch(adapter.Codex, "acc-a", adapter.RestoreOpts{}, false)
+	if err == nil || errors.Is(err, restoreErr) {
+		t.Fatalf("unexpected restore path: %v", err)
+	}
+	if !*running || *quits != 0 || *launches != 0 {
+		t.Fatal("desktop was interrupted")
+	}
+	p, err := a.State.GetPointer("codex")
+	if err != nil || p.StableID != "acc-b" {
+		t.Fatalf("pointer changed: %+v %v", p, err)
 	}
 }

@@ -94,6 +94,19 @@ func (a *App) syncClaudeRecoveryDir() error {
 }
 
 func (a *App) deleteClaudeRecovery(r claudeRecovery) error {
+	if r.Updated != nil {
+		// Vault.Put syncs the ciphertext before rename. Persist the account's
+		// new directory entry before removing its durable recovery result.
+		dir, err := os.Open(filepath.Join(a.Vault.Dir, "vault", string(adapter.Claude)))
+		if err != nil {
+			return err
+		}
+		err = dir.Sync()
+		dir.Close()
+		if err != nil {
+			return err
+		}
+	}
 	if err := a.Vault.Delete(claudeRecoveryVault, r.key); err != nil {
 		return err
 	}
