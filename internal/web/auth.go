@@ -416,7 +416,7 @@ func (s *Server) setSession(w http.ResponseWriter, x external, value string, max
 func (s *Server) unauthorized(w http.ResponseWriter, r *http.Request, x external) {
 	w.Header().Set("Cache-Control", "no-store")
 	if r.Method == http.MethodGet && (r.URL.Path == "/" || strings.Contains(r.Header.Get("Accept"), "text/html")) {
-		http.Redirect(w, r, preserveExpected(x.path("/login"), r.URL.Query().Get("expected_instance")), http.StatusSeeOther)
+		http.Redirect(w, r, preserveNavigation(x.path("/login"), r.URL.Query()), http.StatusSeeOther)
 		return
 	}
 	writeErr(w, http.StatusUnauthorized, "unauthorized")
@@ -443,10 +443,10 @@ func (s *Server) getLoginPage(w http.ResponseWriter, r *http.Request) {
 	}
 	x := externalOf(r)
 	if !need || s.sessionOK(r, c) {
-		http.Redirect(w, r, preserveExpected(x.path("/"), r.URL.Query().Get("expected_instance")), http.StatusSeeOther)
+		http.Redirect(w, r, preserveNavigation(x.path("/"), r.URL.Query()), http.StatusSeeOther)
 		return
 	}
-	s.loginPage(w, http.StatusOK, x, "", "", r.URL.Query().Get("expected_instance"))
+	s.loginPage(w, http.StatusOK, x, "", "", r.URL.Query())
 }
 
 func (s *Server) postLogin(w http.ResponseWriter, r *http.Request) {
@@ -461,44 +461,44 @@ func (s *Server) postLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	x := externalOf(r)
 	if !need {
-		http.Redirect(w, r, preserveExpected(x.path("/"), r.URL.Query().Get("expected_instance")), http.StatusSeeOther)
+		http.Redirect(w, r, preserveNavigation(x.path("/"), r.URL.Query()), http.StatusSeeOther)
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 	if err := r.ParseForm(); err != nil {
-		s.loginPage(w, http.StatusBadRequest, x, "", "表单无法读取", r.URL.Query().Get("expected_instance"))
+		s.loginPage(w, http.StatusBadRequest, x, "", "表单无法读取", r.URL.Query())
 		return
 	}
 	user := strings.TrimSpace(r.PostForm.Get("user"))
 	password := r.PostForm.Get("password")
 	now := s.now()
 	if wait := s.fails.locked(x.client, now); wait > 0 {
-		s.loginPage(w, http.StatusTooManyRequests, x, user, lockMessage(wait), r.URL.Query().Get("expected_instance"))
+		s.loginPage(w, http.StatusTooManyRequests, x, user, lockMessage(wait), r.URL.Query())
 		return
 	}
 	if !c.verify(user, password) {
 		if lock := s.fails.fail(x.client, now); lock > 0 {
 			s.logf("login paused for %s after %d wrong passwords", x.client, lockAfter)
-			s.loginPage(w, http.StatusTooManyRequests, x, user, lockMessage(lock), r.URL.Query().Get("expected_instance"))
+			s.loginPage(w, http.StatusTooManyRequests, x, user, lockMessage(lock), r.URL.Query())
 			return
 		}
-		s.loginPage(w, http.StatusUnauthorized, x, user, "用户名或密码不对", r.URL.Query().Get("expected_instance"))
+		s.loginPage(w, http.StatusUnauthorized, x, user, "用户名或密码不对", r.URL.Query())
 		return
 	}
 	s.fails.reset(x.client)
 	s.setSession(w, x, c.issue(now), int(sessionTTL/time.Second))
 	s.logf("login ok user=%s from %s", c.User, x.client)
-	http.Redirect(w, r, preserveExpected(x.path("/"), r.URL.Query().Get("expected_instance")), http.StatusSeeOther)
+	http.Redirect(w, r, preserveNavigation(x.path("/"), r.URL.Query()), http.StatusSeeOther)
 }
 
 func (s *Server) postLogout(w http.ResponseWriter, r *http.Request) {
 	x := externalOf(r)
 	s.setSession(w, x, "", -1)
 	if _, need := s.loginRequired(r); need {
-		http.Redirect(w, r, preserveExpected(x.path("/login"), r.URL.Query().Get("expected_instance")), http.StatusSeeOther)
+		http.Redirect(w, r, preserveNavigation(x.path("/login"), r.URL.Query()), http.StatusSeeOther)
 		return
 	}
-	http.Redirect(w, r, preserveExpected(x.path("/"), r.URL.Query().Get("expected_instance")), http.StatusSeeOther)
+	http.Redirect(w, r, preserveNavigation(x.path("/"), r.URL.Query()), http.StatusSeeOther)
 }
 
 func lockMessage(wait time.Duration) string {
@@ -509,11 +509,7 @@ func lockMessage(wait time.Duration) string {
 	return fmt.Sprintf("连续输错 %d 次，%d 分钟后再试", lockAfter, m)
 }
 
-func (s *Server) loginPage(w http.ResponseWriter, status int, x external, user, msg string, expected ...string) {
-	expectedID := ""
-	if len(expected) > 0 {
-		expectedID = expected[0]
-	}
+func (s *Server) loginPage(w http.ResponseWriter, status int, x external, user, msg string, query url.Values) {
 	h := w.Header()
 	h.Set("Content-Type", "text/html; charset=utf-8")
 	h.Set("Cache-Control", "no-store")
@@ -524,7 +520,7 @@ func (s *Server) loginPage(w http.ResponseWriter, status int, x external, user, 
 	if msg != "" {
 		errLine = `<p class="err" id="loginError" role="alert">` + html.EscapeString(msg) + `</p>`
 	}
-	page := fmt.Sprintf(loginHTML, html.EscapeString(preserveExpected(x.path("/login"), expectedID)), html.EscapeString(user), errLine, lockAfter, int(lockFor/time.Minute), html.EscapeString(s.App.Instance().Name))
+	page := fmt.Sprintf(loginHTML, html.EscapeString(preserveNavigation(x.path("/login"), query)), html.EscapeString(user), errLine)
 	fmt.Fprint(w, strings.Replace(page, iconPlaceholder, iconLinks(x), 1))
 }
 
@@ -545,7 +541,6 @@ const loginHTML = `<!DOCTYPE html>
 <body>
 <main>
   <div class="brand"><img src="favicon.svg" alt="" width="36" height="36">qswitch</div>
-  <p class="instance">登录到 %[6]s</p>
   <h1>登录管理页面</h1>
   <form method="post" action="%[1]s">
     <label>用户名<input name="user" value="%[2]s" autocomplete="username" autocapitalize="none" spellcheck="false" required autofocus aria-describedby="loginError"></label>

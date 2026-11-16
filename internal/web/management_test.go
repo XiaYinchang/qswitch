@@ -78,8 +78,8 @@ func TestAutoAndEnvironmentWritesBindCurrentInstance(t *testing.T) {
 	r = httptest.NewRequest("POST", "/api/environments", strings.NewReader(`{"environments":[{"id":"fixture","name":"Deck","url":"https://example.test/qswitch/"}]}`))
 	r.Host = "127.0.0.1:7432"
 	r.Header.Set(instanceHeader, a.Instance().ID)
-	if w := do(h, r); w.Code != 200 {
-		t.Fatal(w.Body.String())
+	if w := do(h, r); w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("retired environment writer remains available: %d %s", w.Code, w.Body.String())
 	}
 	if w := do(h, local("GET", "/api/health?expected_instance=another")); w.Code != 409 {
 		t.Fatal("expected identity not enforced")

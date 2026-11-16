@@ -14,10 +14,8 @@ import (
 )
 
 type Overview struct {
-	Instance          InstanceInfo  `json:"instance"`
-	Environments      []Environment `json:"environments"`
-	EnvironmentsError string        `json:"environments_error,omitempty"`
-	Tools             []ToolView    `json:"tools"`
+	Instance InstanceInfo `json:"instance"`
+	Tools    []ToolView   `json:"tools"`
 }
 
 type ToolView struct {
@@ -100,11 +98,6 @@ func remainingPct(class string, used float64) *float64 {
 
 func (a *App) Overview() Overview {
 	out := Overview{Instance: a.Instance()}
-	var envErr error
-	out.Environments, envErr = a.Environments()
-	if envErr != nil {
-		out.EnvironmentsError = envErr.Error()
-	}
 	cfg := a.cfgSnapshot()
 	now := a.now().Unix()
 	for _, t := range a.ManagedTools() {

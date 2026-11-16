@@ -1,0 +1,21 @@
+# Render once per allowlisted environment into instances.conf.
+# @INSTANCE_ID@: exactly 32 lowercase hex digits from actual /api/health.
+# @INSTANCE_NAME@: a fixed deployment name [a-z][a-z0-9_]*.
+# @UPSTREAM_PORT@: the existing loopback SSH reverse-forward port.
+location ^~ /qswitch/api/instances/@INSTANCE_ID@/ {
+    include /etc/nginx/qswitch-gateway/gate.conf;
+    try_files /__qswitch_dispatch_only__ @qswitch_target_@INSTANCE_NAME@;
+}
+location @qswitch_target_@INSTANCE_NAME@ {
+    default_type application/json;
+    if ($http_x_qswitch_instance = "") { return 400 '{"error":"missing X-Qswitch-Instance"}'; }
+    if ($http_x_qswitch_instance != "@INSTANCE_ID@") { return 409 '{"error":"instance mismatch; no operation was performed"}'; }
+    # Named locations cannot use a URI in proxy_pass. Rewrite only supported
+    # API endpoints, retaining method, request body and original query args.
+    rewrite ^/qswitch/api/instances/@INSTANCE_ID@/(health|overview|capture|probe|switch|forget|auto|diagnostics|login/(?:codex|grok)(?:/cancel)?)$ /api/$1 break;
+    return 404 '{"error":"未知环境或接口"}';
+    include /etc/nginx/qswitch-gateway/target.conf;
+    # Root:root 0600; contents: proxy_set_header Authorization "Bearer ...";
+    include /etc/nginx/qswitch-gateway/secrets/@INSTANCE_NAME@.conf;
+    proxy_pass http://127.0.0.1:@UPSTREAM_PORT@;
+}

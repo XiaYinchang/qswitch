@@ -23,10 +23,12 @@ const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
 const source=fs.readFileSync('static/index.html','utf8');
 const elements=new Map();
 function element(){return {textContent:'',className:'',hidden:false,disabled:false,open:false,dataset:{},children:[],innerHTML:'',contains(){return false},querySelectorAll(){return []},setAttribute(){},removeAttribute(){},appendChild(n){this.children.push(n);n.parent=this},insertBefore(n,b){if(n.parent)n.remove();const at=b?this.children.indexOf(b):this.children.length;this.children.splice(at<0?this.children.length:at,0,n);n.parent=this},remove(){if(this.parent){this.parent.children.splice(this.parent.children.indexOf(this),1);this.parent=null}},focus(){this.focused=true},showModal(){this.open=true},close(){this.open=false}}}
+const location=new URL('http://localhost:7432/');location.assign=(url)=>{location.redirect=url};
+const history={replaceState(a,b,url){location.href=new URL(url,location.href).href},pushState(a,b,url){location.href=new URL(url,location.href).href}};
 let fetchImpl=async()=>({ok:true,status:200,json:async()=>({instance:{id:'fixture-a',name:'Fixture A'},tools:[]})});
-const ctx={assert,URL,Intl,AbortController,DOMException,TypeError,console,setTimeout,clearTimeout,Date,Map,Set,Promise,location:{href:'http://localhost:7432/',hash:'',assign(){}},navigator:{clipboard:{writeText:async()=>{}}},document:{hidden:false,getElementById(id){if(!elements.has(id))elements.set(id,element());return elements.get(id)},querySelector(){return element()},querySelectorAll(){return []},createElement:element,activeElement:null},fetch:(...args)=>fetchImpl(...args),setFetch(fn){fetchImpl=fn},elements};
+const ctx={assert,URL,Intl,AbortController,DOMException,TypeError,console,setTimeout:(fn,ms,...args)=>{const timer=setTimeout(fn,ms,...args);if(ms>=10000)timer.unref();return timer},clearTimeout,Date,Map,Set,Promise,location,history,navigator:{clipboard:{writeText:async()=>{}}},document:{hidden:false,getElementById(id){if(!elements.has(id))elements.set(id,element());return elements.get(id)},querySelector(){return element()},querySelectorAll(){return []},createElement:element,activeElement:null},fetch:(...args)=>fetchImpl(...args),setFetch(fn){fetchImpl=fn},elements};
 vm.createContext(ctx);
-vm.runInContext(source.slice(source.indexOf('// qswitch-ui-start'),source.indexOf('// qswitch-ui-bootstrap'))+` + string(checkJSON) + `,ctx);
+vm.runInContext(source.slice(source.indexOf('// qswitch-ui-start'),source.indexOf('// qswitch-ui-bootstrap'))+'\nstate.envID="fixture-a";state.apiBase="/api/";'+` + string(checkJSON) + `,ctx);
 `
 	if out, err := exec.Command(node, "-e", script).CombinedOutput(); err != nil {
 		t.Fatalf("dashboard regression: %v\n%s", err, out)
@@ -46,9 +48,8 @@ assert(bucketHTML({tool:'kimi',buckets:[{id:'5h'},{id:'weekly',used_pct:null}]})
 assert(!bucketHTML({tool:'kimi',buckets:[{id:'5h'}]}).includes('已用 0%'));
 const html=accountHTML({tool:'devin',stable_id:'synthetic',email:'<img onerror=bad>',class:'unknown'},tool);
 assert(html.includes('&lt;img'));assert(!html.includes('<img onerror'));
-assert(environmentURL({id:'env-b',name:'B',url:'https://example.test/qsw/'}).includes('expected_instance=env-b'));
-assert.equal(environmentURL({id:'env-b',url:'javascript:alert(1)'}),'');
-assert.equal(environmentURL({id:'env-b',url:'https://user:secret@example.test/'}),'');
+assert(environmentURL({id:'env-b',name:'B',api_base:'/unused/'}).includes('env=env-b'));
+assert(!environmentURL({id:'env-b'}).includes('expected_instance=env-b'));
 `)
 }
 
@@ -60,11 +61,11 @@ render=()=>{};renderMessage=()=>{};
  let calls=[];setFetch(async(path,opts)=>{calls.push({path,opts});return {ok:true,status:200,json:async()=>({})}});
  await api('api/capture',{method:'POST',body:{tool:'codex'}});
  assert.equal(calls[0].opts.headers['X-Qswitch-Instance'],'fixture-a');
- state.expected='fixture-b';setFetch(async()=>({ok:true,status:200,json:async()=>({instance:{id:'fixture-a',name:'A'}})}));
+ state.envID='fixture-b';setFetch(async()=>({ok:true,status:200,json:async()=>({instance:{id:'fixture-a',name:'A'}})}));
  assert.equal(await connect(),false);assert(state.fatal.includes('不匹配'));
  let wrote=false;setFetch(async()=>{wrote=true;return {ok:true,status:200,json:async()=>({})}});
  await assert.rejects(api('api/auto',{method:'POST',body:{tool:'codex',enabled:true}}));assert.equal(wrote,false);
- state.fatal='';state.expected='';state.online=true;state.messages.set('codex',{text:'操作失败，须处理',error:true});
+ state.fatal='';state.envID='fixture-a';state.trustedID='fixture-a';state.online=true;state.messages.set('codex',{text:'操作失败，须处理',error:true});
  let first,second,count=0;setFetch(()=>new Promise(resolve=>{if(++count===1)first=resolve;else second=resolve}));
  const a=loadSnapshot(),b=loadSnapshot();
  second({ok:true,status:200,json:async()=>({instance:{id:'fixture-a',name:'newer'},tools:[]})});await b;
@@ -101,7 +102,7 @@ document.activeElement=old;patchHTML(node,'changed');assert.equal(disclosure.ope
 render=()=>{};
 (async()=>{
  state.instance={id:'fixture-a'};state.trustedID='fixture-a';state.online=true;
- ui.login={generation:2,id:'synthetic-login',tool:'codex',expires:Date.now()+60000,polling:false,timer:null};
+ ui.login={context:requestContext(),generation:2,id:'synthetic-login',tool:'codex',expires:Date.now()+60000,polling:false,timer:null};
  let count=0,finish;setFetch(()=>{count++;return new Promise(resolve=>finish=resolve)});
  const first=pollLogin(2);await pollLogin(2);assert.equal(count,1);
  finish({ok:true,status:200,json:async()=>({status:'error',error:'Synthetic denial'})});await first;
@@ -163,7 +164,7 @@ state.instance={id:'fixture-a'};state.trustedID='fixture-a';state.online=true;
 const tool={tool:'cursor',enabled:true,auto:false,capabilities:{auto_switch:{available:false,reason:'当前平台不可用'}}};
 const toggle=()=>{renderToolSettings(tool);return $('toolSettings').innerHTML.match(/<button[^>]+data-act="auto"[^>]*>/)[0]};
 assert(!toggle().includes('disabled'));tool.enabled=false;assert(toggle().includes('disabled'));
-tool.enabled=true;state.online=false;assert(toggle().includes('disabled'));state.online=true;state.operations.set('cursor',{label:'查询'});assert(toggle().includes('disabled'));
+tool.enabled=true;state.online=false;assert(toggle().includes('disabled'));state.online=true;state.operations.set(operationKey('cursor'),{label:'查询'});assert(toggle().includes('disabled'));
 `)
 }
 
@@ -210,6 +211,6 @@ state.overview={tools:[{tool:'antigravity',accounts:[],capabilities:{capture:{av
 assert.deepEqual(addableTools().map(t=>t.tool),['antigravity','codex']);
 openAddAccount({dataset:{focus:'add-account'}});assert($('loginDlg').open);assert.equal(ui.login.mode,'picker');assert.equal($('loginPicker').hidden,false);assert.equal($('loginAuthorization').hidden,true);assert(!$('addTool').innerHTML.includes('claude'));assert(!$('addTool').innerHTML.includes('grokbot'));assert($('addAccountGuidance').innerHTML.includes('data-act="capture"'));assert($('addAccountGuidance').innerHTML.includes('qswitch run antigravity'));
 ui.login.tool='codex';renderAccountPicker();assert($('addAccountGuidance').innerHTML.includes('data-act="login"'));
-render=()=>{};state.operations.set('codex',{label:'查询'});cancelLogin();assert(state.operations.has('codex'),'closing the picker released another mutation');
+render=()=>{};state.operations.set(operationKey('codex'),{label:'查询'});cancelLogin();assert(state.operations.has(operationKey('codex')),'closing the picker released another mutation');
 `)
 }
