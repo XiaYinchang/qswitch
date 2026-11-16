@@ -1863,7 +1863,10 @@
               const url = new URL("login", location.href);
               if (state.expected || state.gateway?.id)
                 url.searchParams.set("expected_instance", state.expected || state.gateway.id);
-              if (state.envID) url.searchParams.set("env", state.envID);
+              const selectedEnvironment =
+                state.envID || new URL(location.href).searchParams.get("env");
+              if (selectedEnvironment !== null)
+                url.searchParams.set("env", selectedEnvironment);
               url.hash = location.hash;
               location.assign(url.href);
             }
