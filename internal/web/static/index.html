@@ -1,670 +1,2437 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>qswitch</title>
-<!-- qswitch-icons -->
-<style>
-  :root {
-    --bg: #111318;
-    --card: #1a1d24;
-    --line: #2a2e38;
-    --text: #e8eaed;
-    --muted: #9aa0a6;
-    --ok: #3dd68c;
-    --soft: #e6b84d;
-    --bad: #f07178;
-    --live: #7aa2f7;
-    --btn: #2b313c;
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0;
-    font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, "PingFang SC", sans-serif;
-    background: var(--bg);
-    color: var(--text);
-  }
-  header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 16px;
-    padding: 16px 24px;
-    border-bottom: 1px solid var(--line);
-  }
-  header h1 { font-size: 18px; font-weight: 600; margin: 0; }
-  header p { color: var(--muted); margin: 2px 0 0; font-size: 13px; }
-  .header-right {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    min-width: 0;
-  }
-  #logoutForm { display: flex; align-items: center; gap: 8px; margin: 0; }
-  #logoutForm[hidden] { display: none; }
-  main { padding: 18px 24px 40px; display: grid; gap: 22px; }
-  .sec-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    margin-bottom: 10px;
-  }
-  .sec-head h2 {
-    font-size: 15px;
-    margin: 0;
-    display: flex;
-    gap: 10px;
-    align-items: baseline;
-    min-width: 0;
-    flex-wrap: wrap;
-  }
-  .meta { color: var(--muted); font-size: 12px; font-weight: 400; }
-  .actions {
-    display: flex;
-    gap: 6px;
-    flex-shrink: 0;
-    align-items: center;
-  }
-  button {
-    background: var(--btn);
-    color: var(--text);
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    padding: 5px 10px;
-    cursor: pointer;
-    font: inherit;
-    font-size: 12px;
-    line-height: 1.3;
-    white-space: nowrap;
-  }
-  button:hover { border-color: #4a5160; }
-  button:disabled { opacity: 0.5; cursor: default; }
-  button.danger { color: var(--bad); }
-  button.primary { border-color: var(--live); color: var(--live); }
-  button.ghost {
-    background: transparent;
-    border-color: transparent;
-    color: #b4bac2;
-  }
-  button.ghost:hover {
-    color: var(--text);
-    background: var(--btn);
-    border-color: var(--line);
-  }
-  button.ghost.danger:hover { color: var(--bad); border-color: #5c2a30; }
-  .card {
-    background: var(--card);
-    border: 1px solid var(--line);
-    border-radius: 12px;
-    padding: 12px 14px;
-    margin-bottom: 8px;
-  }
-  .card.live { border-color: #3d4c7a; }
-  .card.desktop { opacity: 0.78; }
-  section.collapsed .sec-body { display: none; }
-  section.collapsed .sec-head { margin-bottom: 0; }
-  section.collapsed .toggle::before { content: "▸ "; }
-  .toggle::before { content: "▾ "; }
-  .toggle { cursor: pointer; user-select: none; }
-  .who {
-    display: flex;
-    justify-content: space-between;
-    gap: 12px;
-    align-items: center;
-  }
-  .who > div:first-child { min-width: 0; }
-  .email { font-weight: 600; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
-  .id { color: var(--muted); font-size: 12px; word-break: break-all; margin-top: 2px; }
-  .bar {
-    height: 8px;
-    background: #2a2e38;
-    border-radius: 99px;
-    overflow: hidden;
-    margin: 8px 0 4px;
-  }
-  .bar > i {
-    display: block;
-    height: 100%;
-    border-radius: inherit;
-    background: var(--ok);
-    transition: width .35s ease, background-color .35s ease;
-  }
-  .bar.empty > i { width: 0; background: transparent; }
-  .stats {
-    display: flex;
-    justify-content: space-between;
-    gap: 12px;
-    color: var(--muted);
-    font-size: 12px;
-    font-variant-numeric: tabular-nums;
-  }
-  .stats .rem, .bucket .rem {
-    margin-left: auto;
-    text-align: right;
-    white-space: nowrap;
-    min-width: 5.6em;
-  }
-  .bucket .when {
-    color: var(--muted);
-    font-size: 12px;
-    white-space: nowrap;
-    min-width: 9em;
-    text-align: right;
-  }
-  .buckets { margin-top: 8px; display: grid; gap: 6px; }
-  .bucket {
-    display: grid;
-    grid-template-columns: 72px 1fr auto auto;
-    gap: 8px;
-    align-items: center;
-    font-size: 12px;
-    color: var(--muted);
-  }
-  .bucket .name { color: var(--text); }
-  .bucket .bar { margin: 0; height: 6px; }
-  .buckets.antigravity .bucket { grid-template-columns: 118px 1fr auto auto; }
-  .badge {
-    font-size: 11px;
-    font-weight: 500;
-    padding: 1px 7px;
-    border-radius: 99px;
-    border: 1px solid var(--line);
-    color: var(--muted);
-  }
-  .badge.ok { color: var(--ok); border-color: #245c42; }
-  .badge.soft { color: var(--soft); border-color: #5c4a20; }
-  .badge.exhausted, .badge.expired { color: var(--bad); border-color: #5c2a30; }
-  .badge.live { color: var(--live); border-color: #3d4c7a; }
-  .msg {
-    color: var(--muted);
-    font-size: 13px;
-    min-height: 1.2em;
-    text-align: right;
-  }
-  .msg.err { color: var(--bad); }
-  .empty { color: var(--muted); font-size: 13px; margin: 0; }
-  .quota-note { color: var(--muted); font-size: 12px; margin: 8px 0 0; }
-  .switch-note { color: var(--soft); font-size: 12px; margin: 0 0 10px; overflow-wrap: anywhere; }
-  dialog {
-    border: 1px solid var(--line);
-    background: var(--card);
-    color: var(--text);
-    border-radius: 12px;
-    padding: 18px 20px;
-    max-width: 440px;
-  }
-  dialog::backdrop { background: #0008; }
-  .code {
-    font: 22px/1.3 ui-monospace, SFMono-Regular, Menlo, monospace;
-    letter-spacing: 0.08em;
-    margin: 10px 0;
-  }
-  a { color: var(--live); }
-  @media (max-width: 720px) {
-    header, .sec-head, .stats { flex-wrap: wrap; }
-    .header-right, .msg { width: 100%; text-align: left; }
-    .sec-head .actions { width: 100%; justify-content: flex-start; flex-wrap: wrap; }
-    .who { align-items: flex-start; }
-    .buckets.antigravity .bucket { grid-template-columns: 118px 1fr auto; }
-    .buckets.antigravity .when { grid-column: 1 / -1; min-width: 0; text-align: left; }
-  }
-</style>
-</head>
-<body>
-<header>
-  <div>
-    <h1>qswitch <span class="meta" id="daemonVersion">守护进程版本：读取中…</span></h1>
-    <p>本机账号余量。token 不会出现在这个页面上。</p>
-  </div>
-  <div class="header-right">
-    <p class="msg" id="msg"></p>
-    <button id="reload" data-act="reload-all">刷新</button>
-    <form method="post" action="logout" id="logoutForm" hidden><span class="meta" id="who"></span><button class="ghost" type="submit">退出登录</button></form>
-  </div>
-</header>
-<main id="root"></main>
-<dialog id="loginDlg">
-  <h3 id="loginTitle">Device Code 加号</h3>
-  <p id="loginHint">用浏览器打开链接，输入一次性代码。不要在当前客户端里换号或 logout。</p>
-  <p><a id="loginUrl" target="_blank" rel="noopener"></a></p>
-  <div class="code" id="loginCode"></div>
-  <p class="msg" id="loginMsg">等你在浏览器里确认…</p>
-  <div class="actions">
-    <button class="ghost" id="loginCancel">取消</button>
-  </div>
-</dialog>
-<script>
-const $ = (id) => document.getElementById(id);
-const msg = (t, err) => { const el = $("msg"); el.textContent = t || ""; el.className = "msg" + (err ? " err" : ""); };
-const api = (path, opt) => fetch(path, Object.assign({ cache: "no-store", headers: { "Content-Type": "application/json" } }, opt)).then(async r => {
-  if (r.status === 401) { location.replace("login"); throw new Error("需要登录"); }
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(j.error || r.statusText);
-  return j;
-});
-const clsLabel = { ok: "正常", soft: "接近用尽", exhausted: "已用尽", expired: "票失效", unknown: "未查到" };
-function clampPct(n) {
-  if (n == null || n === "") return null;
-  const x = Number(n);
-  if (!Number.isFinite(x)) return null;
-  return Math.max(0, Math.min(100, x));
-}
-function mixRGB(a, b, t) {
-  const u = Math.max(0, Math.min(1, t));
-  return `rgb(${Math.round(a[0] + (b[0] - a[0]) * u)},${Math.round(a[1] + (b[1] - a[1]) * u)},${Math.round(a[2] + (b[2] - a[2]) * u)})`;
-}
-function usedColor(used) {
-  const p = clampPct(used);
-  if (p == null) return "transparent";
-  const g = [61, 214, 140], y = [230, 184, 77], r = [240, 113, 120];
-  if (p <= 50) return mixRGB(g, g, 0);
-  if (p <= 80) return mixRGB(g, y, (p - 50) / 30);
-  return mixRGB(y, r, (p - 80) / 20);
-}
-function usedText(used, tool) {
-  if (used == null) return "用量未知";
-  return `已用 ${["grok", "kimi", "zcode", "claude", "antigravity"].includes(tool) ? Math.floor(used) : used.toFixed(0)}%`;
-}
-function barStyle(used) {
-  if (used == null) return "";
-  return `width:${used}%;background:${usedColor(used)}`;
-}
-function fmtTime(sec) {
-  if (!sec) return "";
-  const d = new Date(sec * 1000);
-  if (Number.isNaN(d.getTime())) return "";
-  const pad = (n) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-function whenText(ac) {
-  const ts = Number(ac.resets_at) || (ac.class === "exhausted" ? Number(ac.cooling_until) : 0) || 0;
-  if (!ts) return "";
-  const label = ac.class === "exhausted" ? "冷却到" : "重置于";
-  return `${label} ${fmtTime(ts)}`;
-}
-function bucketLabel(id) {
-  if (id === "auto") return "Auto";
-  if (id === "api") return "高级模型";
-  if (id === "bot") return "Bot";
-  if (id === "daily") return "日额度";
-  if (id === "weekly") return "周额度";
-  if (id === "monthly") return "月额度";
-  if (id === "monthly_code") return "月度编程";
-  if (id === "mcp") return "月度 MCP";
-  if (id === "5h") return "5小时";
-  if (id === "weekly_sonnet") return "Sonnet 周额度";
-  if (id === "weekly_opus") return "Opus 周额度";
-  if (id === "gemini_5h") return "Gemini 5 小时";
-  if (id === "gemini_weekly") return "Gemini 周额度";
-  if (id === "third_party_5h") return "第三方 5 小时";
-  if (id === "third_party_weekly") return "第三方周额度";
-  if (id === "extra_usage") return "额外用量";
-  if (id === "1d") return "日额度";
-  return id;
-}
-const antigravityBucketIDs = ["gemini_5h", "gemini_weekly", "third_party_5h", "third_party_weekly"];
-function quotaBuckets(ac) {
-  const rows = ac.buckets || [];
-  if (ac.tool !== "antigravity") return rows;
-  return antigravityBucketIDs.map(id => rows.find(b => b.id === id) || {id, used_pct: null});
-}
-function quotaClass(ac) {
-  if (ac.tool === "antigravity" && ac.class !== "expired" && quotaBuckets(ac).some(b => clampPct(b.used_pct) == null)) return "unknown";
-  return ac.class;
-}
-function bucketHTML(ac) {
-  const rows = quotaBuckets(ac);
-  if (!rows.length) return "";
-  return `<div class="buckets${ac.tool === "antigravity" ? " antigravity" : ""}">${rows.map(b => {
-    const used = clampPct(b.used_pct);
-    const when = b.resets_at ? fmtTime(b.resets_at) : "";
-    return `<div class="bucket"><span class="name">${attr(bucketLabel(b.id))}</span><div class="bar${used == null ? " empty" : ""}"><i style="${barStyle(used)}"></i></div><span class="rem">${usedText(used, ac.tool)}</span>${when ? `<span class="when">${when}</span>` : `<span class="when"></span>`}</div>`;
-  }).join("")}</div>`;
-}
-function toolTitle(t) {
-  if (t === "codex") return "ChatGPT / Codex";
-  if (t === "grok") return "Grok";
-  if (t === "cursor") return "Cursor";
-  if (t === "grokbot") return "Grok Bot";
-  if (t === "devin") return "Devin CLI";
-  if (t === "zcode") return "ZCode 订阅";
-  if (t === "kimi") return "Kimi Code";
-  if (t === "claude") return "Claude Code";
-  if (t === "antigravity") return "Antigravity";
-  return t;
-}
-function attr(s) {
-  return String(s ?? "").replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
-}
-function toolActions(tool) {
-  const t = attr(tool.tool === "grokbot" ? "cursor" : tool.tool);
-  let html = `<button data-act="probe-tool" data-tool="${t}">刷新用量</button>`;
-  if (tool.tool === "grokbot") return html;
-  html += `<button data-act="capture" data-tool="${t}">收录</button>`;
-  if (tool.tool === "codex") html += `<button class="primary" data-act="login-codex">加号</button>`;
-  if (tool.tool === "grok") html += `<button class="primary" data-act="login-grok">加号</button>`;
-  return html;
-}
-function accountLabel(ac) {
-  if (ac.tool === "kimi") return ac.phone || ac.display_name || ac.email || ac.stable_id;
-  return ac.email || ac.display_name || ac.phone || ac.stable_id;
-}
-function switchNote(tool) {
-  const pids = (tool.blocked_by_pid || []).filter(pid => Number.isInteger(pid) && pid > 0);
-  const blocked = tool.busy || pids.length > 0;
-  if (!tool.pending_to && !blocked) return "";
-  const parts = [];
-  if (tool.pending_to) {
-    const target = (tool.accounts || []).find(ac => ac.stable_id === tool.pending_to);
-    parts.push(`待切换至 ${target ? accountLabel(target) : tool.pending_to}，当前账号尚未切换。`);
-  }
-  const managed = (tool.managed || []).filter(s => Number.isInteger(s.pid));
-  if (tool.tool === "claude" && tool.managed_unavailable) {
-    if (!tool.pending_to) return "";
-    parts.push("受管会话状态暂时读取失败，稍后刷新查看。");
-    return parts.join(" ");
-  }
-  if (tool.tool === "claude" && managed.length) {
-    const recovery = managed.filter(s => s.recovery);
-    // Healthy managed sessions rotate on their own; with nothing queued there
-    // is nothing for the user to act on.
-    if (!tool.pending_to && !recovery.length) return "";
-    if (recovery.length) parts.push(`受管会话需要人工恢复：${recovery.map(s => `PID ${s.pid}（${s.recovery}）`).join("；")}。`);
-    if (tool.pending_to) {
-      const waiting = managed.filter(s => !s.recovery && !s.ready);
-      const ready = managed.filter(s => !s.recovery && s.ready);
-      if (waiting.length) parts.push(`受管会话尚未就绪：${waiting.map(s => `PID ${s.pid}${s.reason ? `（${s.reason}）` : ""}`).join("；")}。`);
-      if (ready.length) parts.push(`受管会话已就绪：PID ${ready.map(s => s.pid).join("、")}。将自动退出、切号并恢复原会话。`);
-      parts.push("排队切换仍需通过用量和安全检查，请刷新查看结果。");
-    }
-    return parts.join(" ");
-  }
-  if (tool.tool === "claude") {
-    if (tool.pending_to) parts.push("排队切换仍需通过用量和安全检查，请刷新查看结果。");
-    return parts.join(" ");
-  }
-  if (pids.length) parts.push(`阻塞进程 PID：${pids.join("、")}。`);
-  if (tool.tool === "antigravity") {
-    if (blocked) parts.push("等待桌面 App 和 CLI 会话空闲后，统一切换本机账号。");
-    if (tool.pending_to) parts.push("切换前会再次核验两组额度。");
-    return parts.join(" ");
-  }
-  if (tool.tool === "kimi") {
-    if (blocked) parts.push("请在对应终端退出所有运行中的会话；仅空闲 30 秒不会解除阻塞。");
-    else parts.push("当前未检测到阻塞会话。");
-  } else if (blocked) {
-    parts.push("请等待 CLI 会话满足空闲条件，或在对应终端退出会话。");
-  }
-  if (tool.pending_to) parts.push("排队切换仍需通过用量和安全检查，请刷新查看结果。");
-  else parts.push("退出后刷新，再选择目标账号切换。");
-  return parts.join(" ");
-}
-function quotaNote(ac) {
-  const known = (ac.buckets || []).some(b => clampPct(b.used_pct) != null) ||
-    (["ok", "soft", "exhausted"].includes(ac.class) && clampPct(ac.used_pct) != null);
-  const parts = [];
-  if (ac.tool === "antigravity" && quotaBuckets(ac).some(b => clampPct(b.used_pct) == null)) parts.push("两组额度信息不完整，当前额度未知，暂不自动切换。");
-  if (ac.class === "expired") parts.push("认证已失效，请重新登录。" + (known ? "显示历史用量。" : ""));
-  else if (ac.last_probe_class === "unknown") parts.push("最近查询未能确认用量。" + (known ? "显示历史用量。" : ""));
-  else if (ac.class === "unknown") parts.push("尚未确认当前用量。" + (known ? "显示历史用量。" : ""));
-  else if (ac.quota_stale && known) parts.push("用量记录已过期。");
-  if (known && ac.last_quota_at) parts.push(`用量记录 ${fmtTime(ac.last_quota_at)}`);
-  if (parts.length && ac.last_probe_at && ac.last_probe_at !== ac.last_quota_at) parts.push(`最近查询 ${fmtTime(ac.last_probe_at)}`);
-  return parts.join(" · ");
-}
-function cardActions(ac, switchable) {
-  const t = attr(ac.tool), id = attr(ac.stable_id);
-  const bits = [];
-  if (!ac.desktop) bits.push(`<button class="ghost" data-act="probe" data-tool="${t}" data-id="${id}">查询</button>`);
-  if (ac.derived) return bits.join("");
-  if (switchable && !ac.live && !ac.desktop) bits.push(`<button data-act="switch" data-tool="${t}" data-id="${id}">切换</button>`);
-  if (!ac.live) bits.push(`<button class="ghost danger" data-act="forget" data-tool="${t}" data-id="${id}">删除</button>`);
-  return bits.join("");
-}
-function render(ov) {
-  const root = $("root");
-  root.innerHTML = "";
-  const tools = (ov.tools || []).slice().sort((a, b) => {
-    const na = (a.accounts || []).length, nb = (b.accounts || []).length;
-    if (na > 0 && nb === 0) return -1;
-    if (na === 0 && nb > 0) return 1;
-    return 0;
-  });
-  tools.forEach(tool => {
-    const sec = document.createElement("section");
-    const flags = [];
-    if (tool.auto) flags.push("自动切换开");
-    if (tool.pending_to) flags.push("切换排队中");
-    if (tool.busy) flags.push(tool.tool === "antigravity" ? "会话使用中" : "CLI 占用中");
-    if (tool.chatgpt_app) flags.push("ChatGPT.app 在跑");
-    if (tool.cursor_app) flags.push("Cursor.app 在跑");
-    if (tool.grok_bot_app) flags.push("Grok Bot.app 在跑");
-    if (tool.devin_app) flags.push("Devin.app 在跑");
-    if (tool.antigravity_app) flags.push("Antigravity App 在跑");
-    if (tool.desync) flags.push("桌面/CLI 不一致");
-    if (tool.tool === "grokbot") flags.push("随 Cursor 账号");
-    if (tool.tool === "zcode") flags.push("桌面订阅 · 在 ZCode 中切换账号");
-    if (tool.tool === "antigravity" && tool.capture_error) flags.push("收录失败：" + attr(tool.capture_error));
-    const head = document.createElement("div");
-    head.className = "sec-head";
-    head.innerHTML = `<h2 class="toggle" data-toggle="${attr(tool.tool)}">${toolTitle(tool.tool)} <span class="meta">${flags.join(" · ") || "空闲"}</span></h2>
-      <div class="actions">${toolActions(tool)}</div>`;
-    sec.appendChild(head);
-    const body = document.createElement("div");
-    body.className = "sec-body";
-    sec.appendChild(body);
-    if (tool.tool === "antigravity") {
-      const note = document.createElement("p");
-      note.className = "switch-note";
-      note.textContent = "Gemini 与第三方模型两组额度都耗尽时才自动切号；单组耗尽时保留当前账号。";
-      body.appendChild(note);
-    }
-    const pendingNote = switchNote(tool);
-    if (pendingNote) {
-      const note = document.createElement("p");
-      note.className = "switch-note";
-      note.textContent = pendingNote;
-      body.appendChild(note);
-    }
-    (tool.accounts || []).forEach(ac => {
-      const cls = quotaClass(ac);
-      const used = ["unknown", "expired"].includes(cls) ? null : clampPct(ac.used_pct);
-      const card = document.createElement("div");
-      const kinds = ["card"];
-      if (ac.live) kinds.push("live");
-      if (ac.desktop) kinds.push("desktop");
-      card.className = kinds.join(" ");
-      const badges = [];
-      if (ac.live) badges.push(`<span class="badge live">当前</span>`);
-      if (ac.stable_id === tool.pending_to) badges.push(`<span class="badge soft">待切换目标</span>`);
-      const oldStatus = ac.quota_stale && ["ok", "soft", "exhausted"].includes(cls);
-      if (!oldStatus) badges.push(`<span class="badge ${attr(cls)}">${attr(cls === "unknown" && ac.tool === "antigravity" ? "额度未知" : clsLabel[cls] || cls)}</span>`);
-      if (ac.plan && ac.plan !== "-") badges.push(`<span class="badge">${attr(ac.plan)}</span>`);
-      if (ac.stale_cli) badges.push(`<span class="badge">CLI 偏旧</span>`);
-      if (ac.desktop) badges.push(`<span class="badge">桌面快照</span>`);
-      const acts = cardActions(ac, tool.switchable);
-      card.innerHTML = `
-        <div class="who">
-          <div>
-            <div class="email">${attr(accountLabel(ac))} ${badges.join(" ")}</div>
-            <div class="id">${attr(ac.stable_id)}</div>
-          </div>
-          ${acts ? `<div class="actions">${acts}</div>` : ""}
-        </div>
-        ${quotaBuckets(ac).length
-          ? bucketHTML(ac) + (!(ac.buckets || []).some(b => b.resets_at) && whenText(ac) ? `<div class="stats"><span>${whenText(ac)}</span><span></span></div>` : "")
-          : `<div class="bar${used == null ? " empty" : ""}"><i style="${barStyle(used)}"></i></div>
-        <div class="stats"><span>${whenText(ac)}</span><span class="rem">${usedText(used, ac.tool)}</span></div>`}
-        ${quotaNote(ac) ? `<p class="quota-note">${attr(quotaNote(ac))}</p>` : ""}`;
-      body.appendChild(card);
-    });
-    if (!(tool.accounts || []).length) {
-      const p = document.createElement("p");
-      p.className = "empty";
-      p.textContent = tool.tool === "antigravity"
-        ? "先在 Antigravity App 或 qswitch run antigravity 中登录，再收录。"
-        : "还没有收录账号。先在官方客户端登录，再点「收录」。";
-      body.appendChild(p);
-      if (!pendingNote) sec.classList.add("collapsed");
-    }
-    root.appendChild(sec);
-  });
-}
-async function loadVersion() {
-  const el = $("daemonVersion");
-  try {
-    const health = await api("api/health");
-    if (typeof health.version !== "string" || !health.version.trim()) throw new Error("接口未返回版本号");
-    el.textContent = "守护进程版本：" + health.version;
-    el.title = "当前连接的 qswitch 守护进程";
-  } catch (e) {
-    el.textContent = "守护进程版本：读取失败";
-    el.title = e.message;
-  }
-}
-async function load() {
-  try {
-    render(await api("api/overview"));
-    msg("");
-  } catch (e) { msg(e.message, true); }
-}
-async function onClick(e) {
-  const t = e.target;
-  if (t && t.dataset && t.dataset.toggle) {
-    let sec = t;
-    while (sec && sec.tagName !== "SECTION") sec = sec.parentNode;
-    if (sec) sec.classList.toggle("collapsed");
-    return;
-  }
-  const b = t && t.closest ? t.closest("button") : null;
-  if (!b || !b.dataset.act) return;
-  const act = b.dataset.act, tool = b.dataset.tool, id = b.dataset.id;
-  try {
-    if (act === "capture") {
-      b.disabled = true;
-      const r = await api("api/capture", { method: "POST", body: JSON.stringify({ tool }) });
-      await load();
-      msg("已收录 " + (r.captured || []).map(accountLabel).join(", "));
-    } else if (act === "reload-all" || act === "probe" || act === "probe-tool") {
-      b.disabled = true;
-      if (act === "reload-all") loadVersion();
-      msg("正在查用量…");
-      const body = act === "reload-all" ? {} : { tool, id: act === "probe" ? id : "" };
-      const ov = await api("api/probe", { method: "POST", body: JSON.stringify(body) });
-      if (ov && ov.tools) {
-        render(ov);
-        const uncertain = ov.tools.filter(t => !tool || t.tool === tool).some(t => (t.accounts || []).some(ac => ac.quota_stale));
-        msg(uncertain ? "查询完成，部分账号的当前用量未能确认；旧数据已标明。" : "查询完成。", uncertain);
-      } else {
-        await load();
-        if (ov.class === "expired") msg("认证已失效，请重新登录。旧用量已标明。", true);
-        else if (!ov.updated) msg("本次未能确认用量，保留上次记录。", true);
-        else msg("用量已更新");
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark light" />
+    <title>qswitch</title>
+    <!-- qswitch-icons -->
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #10141c;
+        --surface: #161c27;
+        --raised: #1b2330;
+        --line: #2a3547;
+        --text: #e6edf7;
+        --muted: #98a7bd;
+        --accent: #83afff;
+        --accent-bg: #213654;
+        --ok: #75d6ae;
+        --warn: #efc276;
+        --bad: #ff9aa5;
+        --shadow: 0 20px 80px #0006;
       }
-      b.disabled = false;
-    } else if (act === "forget") {
-      if (!confirm("从仓库删掉这个账号？当前登录不会动。")) return;
-      b.disabled = true;
-      await api("api/forget", { method: "POST", body: JSON.stringify({ tool, id }) });
-      await load();
-    } else if (act === "switch") {
-      const prompt = {
-        codex: "切换到这个账号？会关掉并重启 ChatGPT.app；空闲的 Codex CLI 也会结束。",
-        grok: "切换到这个账号？会关掉并重启 Grok Bot.app；空闲的 grok CLI 也会结束。",
-        cursor: "切换到这个账号？会关掉并重启 Cursor.app；空闲的 cursor-agent 也会结束。只改登录字段，不碰聊天记录。",
-        devin: "切换 Devin CLI 到这个账号？空闲 CLI 会结束，新进程使用新账号。Devin.app 使用独立登录。",
-        kimi: "切换 Kimi Code 到这个账号？请先退出所有运行中的 Kimi 会话，仅空闲 30 秒不会解除阻塞；新进程将使用新账号。",
-        claude: "切换 Claude Code 到这个账号？只协调 qswitch run claude 受管会话，不等待、不退出、不杀、不恢复普通 Claude；共享 ~/.claude/.credentials.json 与 ~/.claude.json 会更新，运行中的非受管会话内存账号不保证改变。受管会话重启可能中断后台任务、agent、cron，仅保证已提交对话，恢复后请检查未完成的副作用工作。",
-        antigravity: "统一将本机 Antigravity 桌面 App 和 CLI 切换到这个账号？会等待会话空闲后切换。",
-      }[tool] || "切换到这个账号？空闲的 CLI 会先结束。";
-      if (!confirm(prompt)) return;
-      b.disabled = true;
-      await api("api/switch", { method: "POST", body: JSON.stringify({ tool, id, kill_cli: true }) });
-      await load();
-      msg(tool === "antigravity" ? "Antigravity 本机 App 和 CLI 账号已切换。" : ["kimi", "devin", "claude"].includes(tool) ? "已切换。新的 CLI 进程将使用新账号。" : "已切换。对应的 App 会用新号打开。");
-    } else if (act === "login-codex" || act === "login-grok") {
-      await startLogin(act === "login-grok" ? "grok" : "codex");
-    }
-  } catch (err) {
-    b.disabled = false;
-    msg(err.message, true);
-  }
-}
-let loginTimer = null, loginId = "", loginTool = "codex", loginGeneration = 0;
-async function startLogin(tool) {
-  const generation = ++loginGeneration;
-  clearInterval(loginTimer);
-  loginId = "";
-  loginTool = tool;
-  $("loginTitle").textContent = tool === "grok" ? "Grok Device Code 加号" : "ChatGPT Device Code 加号";
-  $("loginHint").textContent = tool === "grok"
-    ? "用浏览器打开链接，输入一次性代码。不要在当前 grok 里换号，也不要 logout。"
-    : "用浏览器打开链接，输入一次性代码。不要在 ChatGPT.app 里换号，也不要 logout。";
-  $("loginUrl").removeAttribute("href");
-  $("loginUrl").textContent = "";
-  $("loginCode").textContent = "";
-  $("loginMsg").textContent = "正在向官方申请一次性代码…";
-  $("loginDlg").showModal();
-  let r;
-  try {
-    r = await api("api/login/" + tool, { method: "POST", body: "{}" });
-  } catch (e) {
-    if (generation === loginGeneration) $("loginMsg").textContent = e.message;
-    return;
-  }
-  if (generation !== loginGeneration) {
-    await api("api/login/" + tool + "/cancel", { method: "POST", body: JSON.stringify({ id: r.id }) }).catch(() => {});
-    return;
-  }
-  loginId = r.id;
-  $("loginUrl").href = r.url;
-  $("loginUrl").textContent = r.url;
-  $("loginCode").textContent = r.user_code;
-  $("loginMsg").textContent = "等你在浏览器里确认…";
-  loginTimer = setInterval(pollLogin, 2000);
-}
-async function pollLogin() {
-  if (!loginId) return;
-  const generation = loginGeneration;
-  try {
-    const r = await api("api/login/" + loginTool + "?id=" + encodeURIComponent(loginId));
-    if (generation !== loginGeneration) return;
-    if (r.status === "ok") {
-      clearInterval(loginTimer);
-      $("loginDlg").close();
-      msg("已加上 " + (r.email || r.stable_id) + "，当前登录没动。");
-      load();
-    } else if (r.status === "error") {
-      clearInterval(loginTimer);
-      $("loginMsg").textContent = r.error || "失败";
-    }
-  } catch (e) { if (generation === loginGeneration) $("loginMsg").textContent = e.message; }
-}
-async function cancelLogin() {
-  ++loginGeneration;
-  clearInterval(loginTimer);
-  const id = loginId, tool = loginTool;
-  loginId = "";
-  $("loginDlg").close();
-  if (id) await api("api/login/" + tool + "/cancel", { method: "POST", body: JSON.stringify({ id }) }).catch(() => {});
-}
-$("loginCancel").onclick = cancelLogin;
-$("loginDlg").addEventListener("cancel", e => { e.preventDefault(); cancelLogin(); });
-async function loadSession() {
-  try {
-    const sess = await api("api/session");
-    if (sess.login_required) {
-      $("who").textContent = sess.user || "";
-      $("logoutForm").hidden = false;
-    }
-  } catch (e) { /* no login configured, or the redirect above is under way */ }
-}
-document.addEventListener("click", onClick);
-loadSession();
-loadVersion();
-load();
-</script>
-</body>
+      @media (prefers-color-scheme: light) {
+        :root {
+          color-scheme: light;
+          --bg: #f4f6fa;
+          --surface: #fff;
+          --raised: #f0f3f8;
+          --line: #dce3ee;
+          --text: #202d40;
+          --muted: #5d6c81;
+          --accent: #245fbd;
+          --accent-bg: #e7efff;
+          --ok: #167b56;
+          --warn: #855a12;
+          --bad: #b63148;
+          --shadow: 0 20px 80px #24385824;
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font:
+          14px/1.5 ui-sans-serif,
+          system-ui,
+          -apple-system,
+          "PingFang SC",
+          sans-serif;
+      }
+      button,
+      input {
+        font: inherit;
+      }
+      button,
+      a,
+      input,
+      summary {
+        touch-action: manipulation;
+      }
+      button,
+      a,
+      summary {
+        -webkit-tap-highlight-color: transparent;
+      }
+      button {
+        min-height: 36px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--raised);
+        color: var(--text);
+        padding: 7px 12px;
+        cursor: pointer;
+      }
+      button:hover:not(:disabled) {
+        border-color: var(--accent);
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      button.primary {
+        background: var(--accent-bg);
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+      button.ghost {
+        background: transparent;
+      }
+      button.danger {
+        color: var(--bad);
+      }
+      a {
+        color: var(--accent);
+        text-decoration: none;
+      }
+      a:hover {
+        text-decoration: underline;
+      }
+      :focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 3px;
+      }
+      input {
+        min-width: 0;
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 9px 11px;
+        color: var(--text);
+        background: var(--bg);
+      }
+      h1,
+      h2,
+      h3,
+      p {
+        margin: 0;
+      }
+      h1 {
+        font-size: 20px;
+        letter-spacing: -0.025em;
+      }
+      h2 {
+        font-size: 17px;
+      }
+      h3 {
+        font-size: 14px;
+      }
+      small,
+      .muted {
+        color: var(--muted);
+      }
+      [hidden] {
+        display: none !important;
+      }
+      .skip {
+        position: fixed;
+        top: -60px;
+        left: 12px;
+        z-index: 30;
+        padding: 10px;
+        background: var(--surface);
+      }
+      .skip:focus {
+        top: 10px;
+      }
+      .topbar {
+        min-height: 68px;
+        display: flex;
+        align-items: center;
+        gap: 24px;
+        padding: 12px 24px;
+        border-bottom: 1px solid var(--line);
+        background: var(--surface);
+      }
+      .brand {
+        display: flex;
+        gap: 9px;
+        align-items: center;
+        color: var(--text);
+        font-size: 19px;
+        font-weight: 700;
+        letter-spacing: -0.04em;
+        flex-shrink: 0;
+      }
+      .brand img {
+        width: 30px;
+        height: 30px;
+      }
+      .environments {
+        display: flex;
+        gap: 4px;
+        flex-wrap: wrap;
+        min-width: 0;
+      }
+      .environment {
+        padding: 5px 10px;
+        border-radius: 7px;
+        color: var(--muted);
+        overflow-wrap: anywhere;
+      }
+      .environment[aria-current="page"] {
+        color: var(--text);
+        background: var(--raised);
+        font-weight: 600;
+      }
+      .top-actions {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin-left: auto;
+        flex-shrink: 0;
+      }
+      .connection {
+        font-size: 12px;
+        color: var(--muted);
+        display: flex;
+        gap: 6px;
+        align-items: center;
+      }
+      .connection::before {
+        content: "";
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: var(--muted);
+      }
+      .connection.online::before {
+        background: var(--ok);
+      }
+      .connection.offline::before {
+        background: var(--bad);
+      }
+      #logoutForm {
+        margin: 0;
+      }
+      .layout {
+        display: grid;
+        grid-template-columns: 196px minmax(0, 1fr);
+        min-height: calc(100vh - 69px);
+      }
+      .sidebar {
+        padding: 22px 14px;
+        border-right: 1px solid var(--line);
+        display: flex;
+        flex-direction: column;
+        gap: 20px;
+        background: var(--surface);
+      }
+      .nav-caption {
+        font-size: 11px;
+        color: var(--muted);
+        padding: 0 10px 8px;
+        letter-spacing: 0.08em;
+      }
+      .tool-nav {
+        display: grid;
+        gap: 4px;
+      }
+      .nav-item {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 10px 11px;
+        border-radius: 8px;
+        color: var(--muted);
+        min-height: 42px;
+      }
+      .nav-item:hover {
+        text-decoration: none;
+        background: var(--raised);
+      }
+      .nav-item[aria-current="page"] {
+        color: var(--accent);
+        background: var(--accent-bg);
+      }
+      .nav-count {
+        font-size: 11px;
+        background: var(--bg);
+        border-radius: 5px;
+        min-width: 20px;
+        text-align: center;
+        padding: 1px 5px;
+      }
+      .sidebar-bottom {
+        margin-top: auto;
+        display: grid;
+        gap: 10px;
+      }
+      .instance-meta {
+        font-size: 11px;
+        color: var(--muted);
+        padding: 0 11px;
+        overflow-wrap: anywhere;
+      }
+      .main {
+        min-width: 0;
+        padding: 28px 30px 40px;
+        max-width: 1500px;
+        width: 100%;
+        margin: 0 auto;
+      }
+      .page-heading {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 20px;
+        margin-bottom: 20px;
+      }
+      .heading-meta {
+        margin-top: 5px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .actions {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      .notice {
+        padding: 11px 14px;
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        background: var(--surface);
+        margin-bottom: 16px;
+        overflow-wrap: anywhere;
+      }
+      .notice:empty {
+        display: none;
+      }
+      .notice.error {
+        border-color: var(--bad);
+        color: var(--bad);
+      }
+      .notice.warn {
+        color: var(--warn);
+      }
+      .tool-status {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin: 0 0 18px;
+      }
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 3px 7px;
+        font-size: 11px;
+        color: var(--muted);
+        white-space: normal;
+      }
+      .pill.current {
+        color: var(--accent);
+        background: var(--accent-bg);
+        border-color: transparent;
+      }
+      .pill.ok {
+        color: var(--ok);
+      }
+      .pill.warn {
+        color: var(--warn);
+      }
+      .pill.error {
+        color: var(--bad);
+      }
+      .workspace {
+        display: grid;
+        grid-template-columns: minmax(220px, 29%) minmax(0, 1fr);
+        gap: 18px;
+        align-items: start;
+      }
+      .account-list {
+        display: grid;
+        gap: 6px;
+        min-width: 0;
+      }
+      .account-row {
+        width: 100%;
+        text-align: left;
+        min-width: 0;
+        padding: 13px 14px;
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+      }
+      .account-row[aria-current="true"] {
+        border-color: var(--accent);
+        background: var(--accent-bg);
+      }
+      .account-name {
+        display: block;
+        font-weight: 600;
+        overflow-wrap: anywhere;
+      }
+      .account-row-meta {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-top: 8px;
+        color: var(--muted);
+        font-size: 11px;
+      }
+      .account-detail {
+        min-width: 0;
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 22px;
+      }
+      .mobile-back {
+        display: none;
+        margin-bottom: 14px;
+      }
+      .detail-heading {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 14px;
+        margin-bottom: 18px;
+      }
+      .identity {
+        min-width: 0;
+      }
+      .identity h2 {
+        overflow-wrap: anywhere;
+        line-height: 1.4;
+      }
+      .identity-meta {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+        margin-top: 8px;
+      }
+      .detail-actions {
+        display: flex;
+        gap: 7px;
+        flex-wrap: wrap;
+        align-items: start;
+        margin-bottom: 20px;
+      }
+      .more {
+        position: relative;
+      }
+      .more > summary {
+        list-style: none;
+        min-height: 36px;
+        padding: 7px 11px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        cursor: pointer;
+        color: var(--muted);
+      }
+      .more > summary::-webkit-details-marker {
+        display: none;
+      }
+      .more-menu {
+        position: absolute;
+        z-index: 3;
+        right: 0;
+        top: calc(100% + 5px);
+        padding: 5px;
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        background: var(--surface);
+        box-shadow: var(--shadow);
+        min-width: 140px;
+      }
+      .more-menu button {
+        width: 100%;
+        text-align: left;
+        border: 0;
+      }
+      .quota-groups {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 16px;
+      }
+      .quota-group {
+        min-width: 0;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 14px;
+      }
+      .quota-group header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 14px;
+      }
+      .quota-list {
+        display: grid;
+        gap: 16px;
+      }
+      .quota-row {
+        min-width: 0;
+      }
+      .quota-label {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 12px;
+        font-size: 12px;
+      }
+      .quota-label span:first-child {
+        overflow-wrap: anywhere;
+        min-width: 0;
+      }
+      .quota-value {
+        white-space: nowrap;
+        flex-shrink: 0;
+        font-variant-numeric: tabular-nums;
+      }
+      .bar {
+        height: 6px;
+        background: var(--raised);
+        border-radius: 8px;
+        margin: 7px 0;
+        overflow: hidden;
+      }
+      .bar i {
+        display: block;
+        height: 100%;
+        border-radius: 8px;
+        background: var(--ok);
+      }
+      .bar.empty {
+        background: repeating-linear-gradient(
+          135deg,
+          var(--raised),
+          var(--raised) 4px,
+          var(--bg) 4px,
+          var(--bg) 8px
+        );
+      }
+      .reset-time {
+        font-size: 11px;
+        color: var(--muted);
+        overflow-wrap: anywhere;
+        font-variant-numeric: tabular-nums;
+      }
+      .quota-note {
+        font-size: 12px;
+        color: var(--muted);
+        margin-top: 14px;
+        overflow-wrap: anywhere;
+      }
+      .rule {
+        font-size: 12px;
+        color: var(--muted);
+        margin-top: 14px;
+      }
+      .rule strong {
+        color: var(--text);
+        font-weight: 500;
+      }
+      .details {
+        border-top: 1px solid var(--line);
+        padding-top: 14px;
+        margin-top: 20px;
+      }
+      .details > summary {
+        cursor: pointer;
+        color: var(--muted);
+        min-height: 30px;
+        font-size: 12px;
+      }
+      .details-content {
+        padding-top: 10px;
+        display: grid;
+        gap: 12px;
+      }
+      .facts {
+        display: grid;
+        grid-template-columns: 100px minmax(0, 1fr);
+        gap: 9px 12px;
+        font-size: 12px;
+        margin: 0;
+      }
+      .facts dt {
+        color: var(--muted);
+      }
+      .facts dd {
+        margin: 0;
+        overflow-wrap: anywhere;
+      }
+      .empty {
+        padding: 32px 24px;
+        border: 1px dashed var(--line);
+        border-radius: 12px;
+        display: grid;
+        gap: 12px;
+        justify-items: start;
+        color: var(--muted);
+        overflow-wrap: anywhere;
+      }
+      .empty strong {
+        color: var(--text);
+        font-weight: 500;
+      }
+      .tool-settings {
+        margin-top: 22px;
+        border-top: 1px solid var(--line);
+        padding-top: 16px;
+      }
+      .tool-settings > summary {
+        cursor: pointer;
+        font-size: 13px;
+        min-height: 32px;
+        color: var(--muted);
+      }
+      .settings-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 20px;
+        padding: 12px 0;
+      }
+      .setting-copy {
+        min-width: 0;
+      }
+      .setting-copy p {
+        font-size: 12px;
+        color: var(--muted);
+        margin-top: 4px;
+        overflow-wrap: anywhere;
+      }
+      .switch {
+        min-width: 72px;
+        flex-shrink: 0;
+      }
+      .switch[aria-checked="true"] {
+        color: var(--accent);
+        border-color: var(--accent);
+        background: var(--accent-bg);
+      }
+      code {
+        font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+        overflow-wrap: anywhere;
+        font-size: 12px;
+      }
+      pre {
+        font:
+          12px/1.6 ui-monospace,
+          SFMono-Regular,
+          Consolas,
+          monospace;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        background: var(--bg);
+        padding: 14px;
+        border-radius: 8px;
+        margin: 0;
+      }
+      .command {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 10px 12px;
+        border-radius: 8px;
+        background: var(--raised);
+        width: 100%;
+        min-width: 0;
+      }
+      .command code {
+        min-width: 0;
+      }
+      .capability-note {
+        font-size: 12px;
+        color: var(--muted);
+        margin: 10px 0;
+        overflow-wrap: anywhere;
+      }
+      .env-intro {
+        font-size: 13px;
+        color: var(--muted);
+        margin: 6px 0 22px;
+      }
+      .environment-rows {
+        display: grid;
+        gap: 12px;
+      }
+      .environment-row {
+        display: grid;
+        grid-template-columns:
+          160px minmax(180px, 1fr) minmax(160px, 0.7fr)
+          auto;
+        gap: 12px;
+        padding: 16px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: var(--surface);
+        align-items: end;
+      }
+      .field {
+        display: grid;
+        gap: 6px;
+        min-width: 0;
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .form-actions {
+        margin-top: 18px;
+        display: flex;
+        gap: 10px;
+      }
+      .environment-row button {
+        min-height: 40px;
+      }
+      .settings-page {
+        max-width: 980px;
+      }
+      .diagnostics {
+        margin-top: 18px;
+      }
+      .status-line {
+        font-size: 12px;
+        color: var(--muted);
+        margin: 12px 0;
+      }
+      .icon-label {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .dialog {
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        background: var(--surface);
+        color: var(--text);
+        box-shadow: var(--shadow);
+        padding: 24px;
+        width: min(460px, calc(100vw - 28px));
+        max-height: calc(100dvh - 36px);
+        overflow: auto;
+      }
+      .dialog::backdrop {
+        background: #060b16a6;
+        backdrop-filter: blur(3px);
+      }
+      .dialog h2 {
+        margin-bottom: 10px;
+      }
+      .dialog p {
+        font-size: 13px;
+        color: var(--muted);
+        margin: 10px 0;
+        overflow-wrap: anywhere;
+      }
+      .dialog .actions {
+        justify-content: flex-end;
+        margin-top: 20px;
+      }
+      .device-code-row {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        margin: 18px 0;
+      }
+      .device-code {
+        font:
+          24px/1.4 ui-monospace,
+          SFMono-Regular,
+          Consolas,
+          monospace;
+        letter-spacing: 0.07em;
+        padding: 11px 13px;
+        background: var(--raised);
+        border-radius: 9px;
+        min-width: 0;
+        flex: 1;
+        overflow-wrap: anywhere;
+        user-select: all;
+      }
+      .dialog .dialog-status {
+        color: var(--text);
+        min-height: 1.5em;
+      }
+      .dialog .dialog-status.error {
+        color: var(--bad);
+      }
+      .dialog .dialog-status.ok {
+        color: var(--ok);
+      }
+      .dialog a.button-link {
+        display: inline-flex;
+        min-height: 40px;
+        align-items: center;
+        justify-content: center;
+        padding: 8px 14px;
+        border-radius: 8px;
+        background: var(--accent-bg);
+        border: 1px solid var(--accent);
+      }
+      .confirm-impact {
+        padding: 12px;
+        background: var(--raised);
+        border-radius: 8px;
+      }
+      .confirm-target {
+        font-weight: 600;
+        overflow-wrap: anywhere;
+      }
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+      @media (min-width: 1500px) {
+        .main {
+          padding-top: 34px;
+        }
+        .workspace {
+          grid-template-columns: 290px minmax(0, 1fr);
+        }
+      }
+      @media (max-width: 1100px) {
+        .topbar {
+          gap: 12px;
+          padding: 12px 18px;
+        }
+        .top-actions {
+          gap: 8px;
+        }
+        .layout {
+          grid-template-columns: 168px minmax(0, 1fr);
+        }
+        .sidebar {
+          padding: 18px 10px;
+        }
+        .main {
+          padding: 22px 20px;
+        }
+        .workspace {
+          grid-template-columns: 215px minmax(0, 1fr);
+          gap: 12px;
+        }
+        .account-detail {
+          padding: 18px;
+        }
+        .quota-groups {
+          grid-template-columns: 1fr;
+        }
+        .environment-row {
+          grid-template-columns: 1fr 1fr;
+        }
+        .environment-row .field:nth-child(2) {
+          grid-column: 2;
+        }
+        .environment-row button {
+          justify-self: end;
+        }
+        .connection {
+          font-size: 11px;
+        }
+      }
+      @media (max-width: 760px) {
+        .topbar {
+          padding: 12px 16px;
+          gap: 12px;
+          flex-wrap: wrap;
+        }
+        .brand {
+          font-size: 18px;
+        }
+        .brand img {
+          width: 27px;
+          height: 27px;
+        }
+        .top-actions {
+          margin-left: auto;
+          gap: 8px;
+        }
+        .connection {
+          max-width: 90px;
+        }
+        .environments {
+          order: 3;
+          flex-basis: 100%;
+          gap: 3px;
+        }
+        .environment {
+          padding: 4px 9px;
+          font-size: 12px;
+        }
+        .layout {
+          display: block;
+          min-height: 0;
+        }
+        .sidebar {
+          display: block;
+          padding: 10px 12px;
+          border-right: 0;
+          border-bottom: 1px solid var(--line);
+        }
+        .nav-caption,
+        .instance-meta {
+          display: none;
+        }
+        .tool-nav {
+          display: flex;
+          overflow: auto;
+          gap: 4px;
+          scrollbar-width: thin;
+          padding: 2px 0;
+        }
+        .nav-item {
+          flex-shrink: 0;
+          white-space: nowrap;
+          min-height: 40px;
+          padding: 8px 10px;
+          font-size: 12px;
+        }
+        .sidebar-bottom {
+          margin-top: 8px;
+        }
+        .sidebar-bottom .nav-item {
+          display: inline-flex;
+          width: max-content;
+        }
+        .main {
+          padding: 20px 16px 32px;
+        }
+        .page-heading {
+          gap: 12px;
+          flex-wrap: wrap;
+          margin-bottom: 16px;
+        }
+        h1 {
+          font-size: 19px;
+        }
+        .page-heading > .actions {
+          width: 100%;
+        }
+        .workspace {
+          grid-template-columns: minmax(0, 1fr);
+          gap: 14px;
+        }
+        .account-list {
+          max-height: 260px;
+          overflow-y: auto;
+          padding: 1px;
+        }
+        .account-row {
+          padding: 12px;
+        }
+        .account-name {
+          font-size: 13px;
+        }
+        .account-row-meta {
+          margin-top: 5px;
+        }
+        .account-detail {
+          padding: 17px;
+          scroll-margin-top: 12px;
+        }
+        .mobile-back {
+          display: inline-flex;
+        }
+        .quota-groups {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 10px;
+        }
+        .quota-group {
+          padding: 12px;
+        }
+        .quota-label {
+          gap: 7px;
+          font-size: 11px;
+        }
+        .quota-group h3 {
+          font-size: 13px;
+        }
+        .detail-actions {
+          gap: 7px;
+        }
+        .facts {
+          grid-template-columns: 76px minmax(0, 1fr);
+        }
+        button {
+          min-height: 40px;
+        }
+        .actions button,
+        .more > summary {
+          min-height: 44px;
+        }
+        .environment-row {
+          grid-template-columns: minmax(0, 1fr);
+          padding: 14px;
+        }
+        .environment-row .field:nth-child(2) {
+          grid-column: auto;
+        }
+        .environment-row button {
+          justify-self: start;
+        }
+        .dialog {
+          padding: 22px 18px;
+        }
+        .top-actions button {
+          font-size: 12px;
+          padding: 7px 9px;
+        }
+        .setting-copy {
+          font-size: 13px;
+        }
+      }
+      @media (max-width: 420px) {
+        .quota-groups {
+          grid-template-columns: minmax(0, 1fr);
+        }
+        .quota-group .quota-list {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 14px;
+        }
+        .quota-group header {
+          margin-bottom: 12px;
+        }
+        .detail-heading {
+          flex-wrap: wrap;
+        }
+        .connection {
+          display: none;
+        }
+        .topbar {
+          column-gap: 8px;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        * {
+          scroll-behavior: auto !important;
+          transition: none !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip" href="#main">跳到账号管理</a>
+    <header class="topbar">
+      <a class="brand" href="#" aria-label="qswitch 首页"
+        ><img src="favicon.svg" alt="" width="30" height="30" />qswitch</a
+      >
+      <nav class="environments" id="environmentNav" aria-label="环境"></nav>
+      <div class="top-actions">
+        <span class="connection" id="connection" role="status">正在连接</span
+        ><button
+          class="ghost"
+          data-act="refresh-state"
+          data-focus="refresh-state"
+        >
+          刷新状态
+        </button>
+        <form method="post" action="logout" id="logoutForm" hidden>
+          <button class="ghost" type="submit">退出</button>
+        </form>
+      </div>
+    </header>
+    <div class="layout">
+      <aside class="sidebar">
+        <div>
+          <p class="nav-caption">账号管理</p>
+          <nav class="tool-nav" id="toolNav" aria-label="工具"></nav>
+        </div>
+        <div class="sidebar-bottom">
+          <a
+            class="nav-item"
+            href="#environments"
+            data-view="environments"
+            data-focus="environment-settings"
+            >环境管理</a
+          >
+          <div class="instance-meta" id="instanceMeta"></div>
+        </div>
+      </aside>
+      <main class="main" id="main" tabindex="-1">
+        <div id="globalNotice" class="notice" role="alert" hidden></div>
+        <div id="root"></div>
+      </main>
+    </div>
+    <dialog
+      class="dialog"
+      id="loginDlg"
+      aria-labelledby="loginTitle"
+      aria-describedby="loginHint"
+    >
+      <h2 id="loginTitle">添加账号</h2>
+      <p id="loginHint"></p>
+      <div class="device-code-row">
+        <output id="loginCode" class="device-code" aria-label="一次性授权代码"
+          >…</output
+        ><button id="copyLoginCode" data-act="copy-code" disabled>复制</button>
+      </div>
+      <a
+        id="loginUrl"
+        class="button-link"
+        target="_blank"
+        rel="noopener noreferrer"
+        hidden
+        >打开官方授权页 ↗</a
+      >
+      <p id="loginExpiry"></p>
+      <p
+        id="loginMsg"
+        class="dialog-status"
+        role="status"
+        aria-live="polite"
+      ></p>
+      <div class="actions">
+        <button id="loginRetry" data-act="retry-login" hidden>
+          重新获取代码</button
+        ><button id="loginCancel" data-act="cancel-login">取消</button>
+      </div>
+    </dialog>
+    <dialog
+      class="dialog"
+      id="confirmDlg"
+      aria-labelledby="confirmTitle"
+      aria-describedby="confirmImpact"
+    >
+      <h2 id="confirmTitle"></h2>
+      <div class="confirm-target" id="confirmTarget"></div>
+      <p id="confirmImpact" class="confirm-impact"></p>
+      <p id="confirmInstance"></p>
+      <div class="actions">
+        <button data-act="cancel-confirm" id="confirmCancel">取消</button
+        ><button data-act="accept-confirm" id="confirmAccept" class="primary">
+          确认
+        </button>
+      </div>
+    </dialog>
+    <script>
+      // qswitch-ui-start
+      const $ = (id) => document.getElementById(id);
+      const state = {
+        instance: null,
+        expected:
+          new URL(location.href).searchParams.get("expected_instance") || "",
+        trustedID: "",
+        online: false,
+        fatal: "",
+        overview: null,
+        view: "",
+        selected: new Map(),
+        operations: new Map(),
+        messages: new Map(),
+        revision: 0,
+        readSequence: 0,
+        readController: null,
+        environments: [],
+        envDirty: false,
+        envDraft: [],
+        lastRead: 0,
+        connectionError: "",
+        environmentsError: "",
+        environmentsMessage: null,
+      };
+      const ui = {
+        accountNodes: new Map(),
+        navNodes: new Map(),
+        tool: "",
+        overviewTimer: null,
+        confirm: null,
+        login: {
+          generation: 0,
+          id: "",
+          tool: "",
+          timer: null,
+          expires: 0,
+          opener: null,
+          polling: false,
+        },
+      };
+      const toolNames = {
+        codex: "ChatGPT / Codex",
+        grok: "Grok",
+        cursor: "Cursor",
+        grokbot: "Grok Bot",
+        devin: "Devin CLI",
+        zcode: "ZCode 订阅",
+        kimi: "Kimi Code",
+        claude: "Claude Code",
+        antigravity: "Antigravity",
+      };
+      const classNames = {
+        ok: "可用",
+        soft: "接近用尽",
+        exhausted: "已耗尽",
+        expired: "需要重新登录",
+        unknown: "额度未知",
+      };
+      const antigravityBucketIDs = [
+        "gemini_5h",
+        "gemini_weekly",
+        "third_party_5h",
+        "third_party_weekly",
+      ];
+      const attr = (value) =>
+        String(value ?? "").replace(
+          /[&<>"']/g,
+          (c) =>
+            ({
+              "&": "&amp;",
+              "<": "&lt;",
+              ">": "&gt;",
+              '"': "&quot;",
+              "'": "&#39;",
+            })[c],
+        );
+      const toolTitle = (tool) => toolNames[tool] || tool;
+      const actionTool = (tool) => (tool === "grokbot" ? "cursor" : tool);
+      const toolView = (tool) =>
+        (state.overview?.tools || []).find((t) => t.tool === tool);
+      const capability = (tool, key) =>
+        tool?.capabilities?.[key] || {
+          available: false,
+          reason: "当前服务未提供此能力",
+        };
+      const accountLabel = (ac) =>
+        (ac.tool === "kimi"
+          ? ac.phone || ac.display_name || ac.email
+          : ac.email || ac.display_name || ac.phone) || "未提供账号名称";
+      const busy = (tool) => state.operations.has(actionTool(tool));
+      const canWrite = () =>
+        Boolean(
+          state.instance && state.trustedID && state.online && !state.fatal,
+        );
+      function clampPct(value) {
+        if (value == null || value === "") return null;
+        const n = Number(value);
+        return Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : null;
+      }
+      function usedColor(value) {
+        const p = clampPct(value);
+        return p == null
+          ? "transparent"
+          : p >= 100
+            ? "var(--bad)"
+            : p >= 80
+              ? "var(--warn)"
+              : "var(--ok)";
+      }
+      function usedText(value) {
+        const p = clampPct(value);
+        return p == null ? "用量未知" : `已用 ${Math.floor(p)}%`;
+      }
+      function fmtTime(seconds) {
+        if (!seconds) return "";
+        const d = new Date(Number(seconds) * 1000);
+        if (Number.isNaN(d.getTime())) return "";
+        return new Intl.DateTimeFormat("zh-CN", {
+          month: "2-digit",
+          day: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: false,
+        }).format(d);
+      }
+      function quotaBuckets(ac) {
+        const rows = ac.buckets || [];
+        return ac.tool === "antigravity"
+          ? antigravityBucketIDs.map(
+              (id) => rows.find((b) => b.id === id) || { id, used_pct: null },
+            )
+          : rows;
+      }
+      function quotaClass(ac) {
+        if (
+          ac.tool === "antigravity" &&
+          ac.class !== "expired" &&
+          quotaBuckets(ac).some((b) => clampPct(b.used_pct) == null)
+        )
+          return "unknown";
+        return ac.class || "unknown";
+      }
+      function quotaNote(ac) {
+        const known =
+            quotaBuckets(ac).some((b) => clampPct(b.used_pct) != null) ||
+            (["ok", "soft", "exhausted"].includes(ac.class) &&
+              clampPct(ac.used_pct) != null),
+          parts = [];
+        if (ac.class === "expired") parts.push("认证已失效，请重新登录。");
+        if (
+          ac.tool === "antigravity" &&
+          quotaBuckets(ac).some((b) => clampPct(b.used_pct) == null)
+        )
+          parts.push("两组额度信息不完整，暂不自动切换。");
+        if (
+          ac.quota_stale ||
+          ac.last_probe_class === "unknown" ||
+          ac.class === "unknown"
+        ) {
+          parts.push(
+            known ? "当前用量未确认，显示历史用量。" : "尚未确认当前用量。",
+          );
+        }
+        if (ac.last_quota_at)
+          parts.push("用量记录 " + fmtTime(ac.last_quota_at));
+        if (ac.last_probe_at && ac.last_probe_at !== ac.last_quota_at)
+          parts.push("最近查询 " + fmtTime(ac.last_probe_at));
+        return parts.join(" · ");
+      }
+      function bucketLabel(id) {
+        return (
+          {
+            auto: "Auto",
+            api: "高级模型",
+            bot: "Bot",
+            daily: "日额度",
+            weekly: "周额度",
+            monthly: "月额度",
+            monthly_code: "月度编程",
+            mcp: "月度 MCP",
+            "5h": "5 小时",
+            weekly_sonnet: "Sonnet 周额度",
+            weekly_opus: "Opus 周额度",
+            gemini_5h: "5 小时",
+            gemini_weekly: "周额度",
+            third_party_5h: "5 小时",
+            third_party_weekly: "周额度",
+            extra_usage: "额外用量",
+            "1d": "日额度",
+          }[id] || id
+        );
+      }
+      function quotaRow(b) {
+        const p = clampPct(b.used_pct),
+          label = bucketLabel(b.id);
+        return `<div class="quota-row"><div class="quota-label"><span>${attr(label)}</span><span class="quota-value">${usedText(p)}</span></div><div class="bar${p == null ? " empty" : ""}" role="meter" aria-label="${attr(label)}" ${p == null ? 'aria-valuetext="用量未知"' : `aria-valuemin="0" aria-valuemax="100" aria-valuenow="${p}" aria-valuetext="${usedText(p)}"`}><i style="width:${p ?? 0}%;background:${usedColor(p)}"></i></div><div class="reset-time">${b.resets_at ? "重置 " + attr(fmtTime(b.resets_at)) : "重置时间未知"}</div></div>`;
+      }
+      function groupStatus(rows, ac) {
+        if (rows.some((b) => clampPct(b.used_pct) == null)) return "未知";
+        if (ac.quota_stale || ac.class === "unknown" || ac.class === "expired")
+          return "历史记录";
+        return rows.some((b) => clampPct(b.used_pct) >= 100) ? "受限" : "可用";
+      }
+      function bucketHTML(ac) {
+        let rows = quotaBuckets(ac);
+        if (ac.tool === "antigravity")
+          return `<div class="quota-groups">${[
+            ["Gemini", rows.slice(0, 2)],
+            ["第三方模型", rows.slice(2)],
+          ]
+            .map(
+              ([name, items]) =>
+                `<section class="quota-group" aria-label="${name}额度"><header><h3>${name}</h3><span class="pill">${groupStatus(items, ac)}</span></header><div class="quota-list">${items.map(quotaRow).join("")}</div></section>`,
+            )
+            .join(
+              "",
+            )}</div><p class="rule"><strong>两组额度都耗尽</strong>才自动切换；单组耗尽时保留当前账号。</p>`;
+        if (!rows.length)
+          rows = [
+            {
+              id: "总用量",
+              used_pct: ["ok", "soft", "exhausted"].includes(ac.class)
+                ? ac.used_pct
+                : null,
+              resets_at: ac.resets_at,
+            },
+          ];
+        const extra = new Set(["weekly_sonnet", "weekly_opus", "extra_usage"]),
+          primary = rows.filter((b) => !extra.has(b.id)),
+          secondary = rows.filter((b) => extra.has(b.id));
+        return `<div class="quota-list">${primary.map(quotaRow).join("")}</div>${secondary.length ? `<details class="details" data-detail="extra-quota"><summary>专项额度与额外用量</summary><div class="quota-list details-content">${secondary.map(quotaRow).join("")}</div><p class="quota-note">这些额度单独展示，不作为自动切换门限。</p></details>` : ""}`;
+      }
+      function pill(label, tone = "") {
+        return `<span class="pill ${tone}">${attr(label)}</span>`;
+      }
+      function accountStatus(ac) {
+        const cls = quotaClass(ac);
+        if (ac.class === "expired") return pill("需要重新登录", "error");
+        if (ac.quota_stale) return pill("历史额度");
+        return pill(
+          classNames[cls] || cls,
+          cls === "ok"
+            ? "ok"
+            : ["soft", "exhausted"].includes(cls)
+              ? "warn"
+              : "",
+        );
+      }
+      function switchNote(tool) {
+        const parts = [];
+        if (tool.pending_to) {
+          const target = (tool.accounts || []).find(
+            (a) => a.stable_id === tool.pending_to,
+          );
+          parts.push(
+            "待切换至 " +
+              (target ? accountLabel(target) : "已选目标") +
+              "，当前账号尚未切换。",
+          );
+        }
+        if (tool.tool === "antigravity") {
+          if (tool.busy)
+            parts.push("等待桌面 App 和 CLI 会话空闲后，统一切换本机账号。");
+          if (tool.pending_to) parts.push("切换前会再次核验两组额度。");
+        } else if (tool.tool === "claude") {
+          if (tool.managed_unavailable) parts.push("受管会话状态暂时不可读。");
+          for (const s of tool.managed || []) {
+            if (s.recovery) parts.push(`PID ${s.pid} 需要恢复：${s.recovery}`);
+            else if (tool.pending_to && !s.ready)
+              parts.push(`PID ${s.pid}：${s.reason || "会话尚未空闲"}`);
+          }
+        } else if (tool.busy) {
+          parts.push(
+            tool.tool === "kimi"
+              ? "请在对应终端退出 Kimi 会话；仅空闲不会解除阻塞。"
+              : "当前客户端仍在使用，切换前须满足空闲条件。",
+          );
+        }
+        return parts.join(" ");
+      }
+      function commandHTML(command) {
+        return command
+          ? `<div class="command"><code>${attr(command)}</code><button class="ghost" data-act="copy-command" data-command="${attr(command)}" aria-label="复制命令">复制</button></div>`
+          : "";
+      }
+      function actionButton(tool, key, label, act, id = "", extra = "") {
+        const cap = capability(tool, key),
+          disabled = !cap.available || !canWrite() || busy(tool.tool);
+        return `<button ${extra} data-act="${act}" data-tool="${attr(tool.tool)}" data-id="${attr(id)}" data-focus="${act}:${attr(id || tool.tool)}" ${disabled ? "disabled" : ""} ${!cap.available ? `title="${attr(cap.reason || "暂不可用")}"` : ""}>${label}</button>`;
+      }
+      function loginGuidance(tool) {
+        const cap = capability(tool, "login");
+        if (["codex", "grok"].includes(tool.tool) && cap.available)
+          return actionButton(
+            tool,
+            "login",
+            "添加账号",
+            "login",
+            "",
+            'class="primary"',
+          );
+        return (
+          commandHTML(cap.command || capability(tool, "run").command) +
+          `<p class="capability-note">${attr(cap.reason || (tool.tool === "antigravity" ? "在 Antigravity App 或原生 CLI 中登录，账号会自动收录。" : "先在官方客户端登录，再收录当前账号。"))}</p>`
+        );
+      }
+      function accountHTML(ac, tool) {
+        const readOnly = Boolean(tool.derived_from || ac.derived || ac.desktop);
+        const cls = quotaClass(ac);
+        return `<button class="ghost mobile-back" data-act="back-to-accounts" data-focus="back-to-accounts">← 返回账号列表</button><div class="detail-heading"><div class="identity"><h2 id="accountTitle" tabindex="-1">${attr(accountLabel(ac))}</h2><div class="identity-meta">${ac.live ? pill("当前账号", "current") : ""}${ac.plan && ac.plan !== "-" ? pill(ac.plan) : ""}${accountStatus(ac)}${ac.desktop ? pill("桌面快照") : ""}${ac.incomplete ? pill("凭据待补齐", "warn") : ""}</div></div></div><div class="detail-actions">${actionButton(tool, "probe", "查询用量", "probe", ac.stable_id)}${!ac.live && !readOnly ? actionButton(tool, "switch", "切换到此账号", "switch", ac.stable_id, 'class="primary"') : ""}${!ac.live && !ac.derived && !tool.derived_from ? `<details class="more" data-detail="account-more"><summary aria-label="此账号的更多操作" data-focus="account-more">更多</summary><div class="more-menu"><button class="danger" data-act="forget" data-tool="${attr(tool.tool)}" data-id="${attr(ac.stable_id)}" data-focus="forget:${attr(ac.stable_id)}" ${!canWrite() || busy(tool.tool) ? "disabled" : ""}>删除已收录账号</button></div></details>` : ""}</div>${bucketHTML(ac)}<p class="quota-note">${attr(quotaNote(ac))}</p>${cls === "expired" ? `<div class="details-content">${loginGuidance(tool)}</div>` : ""}${!capability(tool, "switch").available ? `<p class="capability-note">${attr(capability(tool, "switch").reason || "当前工具不支持账号切换")}</p>` : ""}<details class="details" data-detail="account-details"><summary data-focus="account-details">账号与查询详情</summary><div class="details-content"><dl class="facts"><dt>账号 ID</dt><dd><code>${attr(ac.stable_id)}</code></dd><dt>认证</dt><dd>${ac.class === "expired" ? "已失效" : ac.incomplete ? "信息不完整" : "已收录"}</dd><dt>最近收录</dt><dd>${fmtTime(ac.last_captured_at) || "暂无记录"}</dd><dt>最近查询</dt><dd>${fmtTime(ac.last_probe_at || ac.last_probed_at) || "暂无记录"}</dd><dt>查询来源</dt><dd>${attr(ac.last_probe_source || "暂无记录")}</dd>${ac.stale_cli ? "<dt>CLI</dt><dd>登录快照偏旧，需在官方 CLI 重新登录后收录</dd>" : ""}</dl></div></details>`;
+      }
+      // Outer navigation and account buttons keep their identity across observations.
+      // Only changed detail content is replaced; focus and disclosure state survive it.
+      function patchHTML(el, html) {
+        if (el._html === html) return;
+        const active = document.activeElement,
+          focus = el.contains(active) ? active?.dataset?.focus : null;
+        const open = new Set(
+          Array.from(el.querySelectorAll("details[open][data-detail]")).map(
+            (d) => d.dataset.detail,
+          ),
+        );
+        el.innerHTML = html;
+        el._html = html;
+        for (const d of el.querySelectorAll("details[data-detail]"))
+          if (open.has(d.dataset.detail)) d.open = true;
+        if (focus) {
+          const next = Array.from(el.querySelectorAll("[data-focus]")).find(
+            (n) => n.dataset.focus === focus,
+          );
+          if (next && !next.disabled) next.focus({ preventScroll: true });
+        }
+      }
+      function setNotice(el, text, error = false) {
+        if (!el) return;
+        el.textContent = text || "";
+        el.hidden = !text;
+        el.className = "notice" + (error ? " error" : "");
+      }
+      function message(tool, text, error = false) {
+        state.messages.set(actionTool(tool), { text, error });
+        renderMessage();
+      }
+      function renderMessage() {
+        const el = $("toolMessage");
+        if (el) {
+          const value = state.messages.get(actionTool(state.view));
+          setNotice(el, value?.text, value?.error);
+        }
+      }
+      function renderConnection() {
+        const el = $("connection");
+        el.className =
+          "connection " + (state.online && !state.fatal ? "online" : "offline");
+        el.textContent = state.fatal
+          ? "实例不匹配"
+          : state.online
+            ? "已连接"
+            : "连接中断";
+        el.title = state.lastRead ? "最近更新 " + fmtTime(state.lastRead) : "";
+        setNotice(
+          $("globalNotice"),
+          state.fatal ||
+            (!state.online
+              ? state.connectionError ||
+                "连接中断，操作已暂停；请刷新状态重试。"
+              : ""),
+          true,
+        );
+      }
+      function environmentURL(env) {
+        try {
+          const u = new URL(env.url, location.href);
+          if (
+            !["http:", "https:"].includes(u.protocol) ||
+            u.username ||
+            u.password ||
+            !env.id
+          )
+            return "";
+          u.searchParams.set("expected_instance", env.id);
+          return u.href;
+        } catch {
+          return "";
+        }
+      }
+      function renderEnvironmentNav() {
+        const entries = state.environments.slice();
+        if (state.instance && !entries.some((e) => e.id === state.instance.id))
+          entries.unshift({
+            id: state.instance.id,
+            name: state.instance.name,
+            url: location.href,
+          });
+        patchHTML(
+          $("environmentNav"),
+          entries
+            .map((e) => {
+              const url = environmentURL(e);
+              return url
+                ? `<a class="environment" href="${attr(url)}" ${e.id === state.instance?.id ? 'aria-current="page"' : ""}>${attr(e.name || e.id)}</a>`
+                : "";
+            })
+            .join(""),
+        );
+        if (state.instance)
+          $("instanceMeta").textContent =
+            `${state.instance.name} · ${state.instance.os || ""}\n${state.instance.version || ""}`;
+      }
+      function renderNavigation() {
+        const nav = $("toolNav"),
+          tools = state.overview?.tools || [],
+          keep = new Set();
+        for (const [index, t] of tools.entries()) {
+          keep.add(t.tool);
+          let node = ui.navNodes.get(t.tool);
+          if (!node) {
+            node = document.createElement("a");
+            node.className = "nav-item";
+            node.href = "#" + encodeURIComponent(t.tool);
+            node.dataset.view = t.tool;
+            node.dataset.focus = "tool:" + t.tool;
+            ui.navNodes.set(t.tool, node);
+          }
+          patchHTML(
+            node,
+            `<span>${attr(toolTitle(t.tool))}${t.derived_from ? " · 派生" : ""}</span><span class="nav-count">${(t.accounts || []).length}</span>`,
+          );
+          node.setAttribute(
+            "aria-current",
+            state.view === t.tool ? "page" : "false",
+          );
+          if (nav.children[index] !== node)
+            nav.insertBefore(node, nav.children[index] || null);
+        }
+        for (const [key, node] of ui.navNodes)
+          if (!keep.has(key)) {
+            node.remove();
+            ui.navNodes.delete(key);
+          }
+        document
+          .querySelector('[data-view="environments"]')
+          .setAttribute(
+            "aria-current",
+            state.view === "environments" ? "page" : "false",
+          );
+      }
+      function render() {
+        renderConnection();
+        renderEnvironmentNav();
+        renderNavigation();
+        if (state.view === "environments") {
+          renderEnvironments();
+          return;
+        }
+        const tool = toolView(state.view),
+          root = $("root");
+        if (!tool) {
+          patchHTML(
+            root,
+            '<div class="empty"><strong>暂无管理工具</strong><p>当前实例尚未提供可管理的工具。</p></div>',
+          );
+          ui.tool = "";
+          return;
+        }
+        if (ui.tool !== tool.tool || !$("accountList")) {
+          root.innerHTML =
+            '<div id="toolHeading"></div><div id="toolStatus"></div><div id="toolMessage" class="notice" role="status" aria-live="polite" hidden></div><div id="toolProblem" class="notice warn" role="status" hidden></div><div class="workspace" id="workspace"><div class="account-list" id="accountList" aria-label="已收录账号"></div><article class="account-detail" id="accountDetail" aria-labelledby="accountTitle"></article></div><div id="emptyAccounts"></div><div id="toolSettings"></div>';
+          ui.tool = tool.tool;
+          ui.accountNodes.clear();
+        }
+        const op = state.operations.get(actionTool(tool.tool));
+        $("workspace").setAttribute("aria-busy", Boolean(op));
+        patchHTML(
+          $("toolHeading"),
+          `<div class="page-heading"><div><h1>${attr(toolTitle(tool.tool))}</h1><p class="heading-meta">${(tool.accounts || []).length} 个账号${op ? " · " + attr(op.label) : ""}</p></div><div class="actions">${actionButton(tool, "probe", "查询全部用量", "probe-tool")}${!tool.derived_from ? actionButton(tool, "capture", "收录当前账号", "capture") : ""}${["codex", "grok"].includes(tool.tool) && capability(tool, "login").available ? actionButton(tool, "login", "添加账号", "login", "", 'class="primary"') : ""}</div></div>${
+            tool.derived_from
+              ? `<p class="capability-note">由 ${attr(toolTitle(tool.derived_from))} 账号派生的只读用量；账号在 ${attr(toolTitle(tool.derived_from))} 中管理。</p>`
+              : [
+                  ...new Set(
+                    ["capture", "probe"]
+                      .map((key) => capability(tool, key))
+                      .filter((cap) => !cap.available)
+                      .map((cap) => cap.reason)
+                      .filter(Boolean),
+                  ),
+                ]
+                  .map(
+                    (reason) =>
+                      `<p class="capability-note">${attr(reason)}</p>`,
+                  )
+                  .join("")
+          }`,
+        );
+        patchHTML(
+          $("toolStatus"),
+          `<div class="tool-status">${tool.derived_from ? pill("只读用量") : pill("自动切换 " + (tool.auto ? "开启" : "关闭"), tool.auto ? "current" : "") + pill(tool.managed_unavailable || tool.session_error ? "会话状态未知" : tool.busy ? "会话使用中" : "会话空闲", tool.managed_unavailable || tool.session_error || tool.busy ? "warn" : "")}${tool.pending_to ? pill("切换排队中", "warn") : ""}${tool.desync ? pill("客户端账号不一致", "error") : ""}</div>`,
+        );
+        renderMessage();
+        const problem = [
+          tool.capture_error ? "收录失败：" + tool.capture_error : "",
+          switchNote(tool),
+        ]
+          .filter(Boolean)
+          .join(" ");
+        setNotice($("toolProblem"), problem, Boolean(tool.capture_error));
+        const accounts = tool.accounts || [],
+          keep = new Set();
+        let selected = state.selected.get(tool.tool);
+        if (!accounts.some((a) => a.stable_id === selected)) {
+          selected =
+            (accounts.find((a) => a.live) || accounts[0])?.stable_id || "";
+          state.selected.set(tool.tool, selected);
+        }
+        for (const [index, ac] of accounts.entries()) {
+          keep.add(ac.stable_id);
+          let row = ui.accountNodes.get(ac.stable_id);
+          if (!row) {
+            row = document.createElement("button");
+            row.className = "account-row";
+            row.dataset.act = "select-account";
+            row.dataset.tool = tool.tool;
+            row.dataset.id = ac.stable_id;
+            row.dataset.focus = "account:" + ac.stable_id;
+            ui.accountNodes.set(ac.stable_id, row);
+          }
+          patchHTML(
+            row,
+            `<span class="account-name">${attr(accountLabel(ac))}</span><span class="account-row-meta">${ac.live ? pill("当前", "current") : ""}${ac.plan && ac.plan !== "-" ? `<span>${attr(ac.plan)}</span>` : ""}${accountStatus(ac)}</span>`,
+          );
+          row.setAttribute(
+            "aria-current",
+            ac.stable_id === selected ? "true" : "false",
+          );
+          if ($("accountList").children[index] !== row)
+            $("accountList").insertBefore(
+              row,
+              $("accountList").children[index] || null,
+            );
+        }
+        let deletedFocus = false;
+        for (const [id, node] of ui.accountNodes)
+          if (!keep.has(id)) {
+            deletedFocus =
+              deletedFocus || node.contains(document.activeElement);
+            node.remove();
+            ui.accountNodes.delete(id);
+          }
+        const ac = accounts.find((a) => a.stable_id === selected);
+        $("workspace").hidden = !ac;
+        $("emptyAccounts").hidden = Boolean(ac);
+        if (ac) patchHTML($("accountDetail"), accountHTML(ac, tool));
+        else
+          patchHTML(
+            $("emptyAccounts"),
+            `<div class="empty"><strong>${tool.derived_from ? "暂无派生用量" : "尚未收录账号"}</strong>${tool.derived_from ? `<p>在 ${attr(toolTitle(tool.derived_from))} 中添加并查询账号后，此处会显示派生用量。</p>` : loginGuidance(tool)}<p>${tool.derived_from ? "" : tool.tool === "antigravity" ? "登录完成后会自动核验并收录；页面出现账号后再登录下一个。" : "官方客户端登录后，使用“收录当前账号”添加到本机仓库。"}</p></div>`,
+          );
+        if (deletedFocus)
+          ui.accountNodes.get(selected)?.focus({ preventScroll: true });
+        renderToolSettings(tool);
+      }
+      function renderToolSettings(tool) {
+        if (tool.derived_from) {
+          patchHTML(
+            $("toolSettings"),
+            `<div class="actions"><a class="environment" href="#${attr(tool.derived_from)}" data-view="${attr(tool.derived_from)}">管理 ${attr(toolTitle(tool.derived_from))} 账号</a></div>`,
+          );
+          return;
+        }
+        const cap = capability(tool, "auto_switch");
+        patchHTML(
+          $("toolSettings"),
+          `<details class="tool-settings" data-detail="tool-settings"><summary data-focus="tool-settings">${attr(toolTitle(tool.tool))} 设置与诊断</summary><div class="settings-row"><div class="setting-copy"><strong>自动切换</strong><p>${attr(tool.auto_reason || cap.reason || (tool.tool === "antigravity" ? "两组额度都耗尽且会话空闲时切换。" : "按此工具的额度与会话条件切换账号。"))}</p></div><button class="switch" role="switch" aria-label="${attr(toolTitle(tool.tool))} 自动切换" aria-checked="${Boolean(tool.auto)}" data-act="auto" data-tool="${attr(tool.tool)}" data-focus="auto:${attr(tool.tool)}" ${!canWrite() || busy(tool.tool) || !cap.available ? "disabled" : ""}>${tool.auto ? "已开启" : "已关闭"}</button></div>${!["codex", "grok"].includes(tool.tool) ? `<div class="details-content">${loginGuidance(tool)}</div>` : ""}<div class="actions"><button class="ghost" data-act="diagnostics" data-tool="${attr(tool.tool)}" data-focus="diagnostics:${attr(tool.tool)}">查看诊断</button></div><div class="diagnostics" id="diagnostics" hidden></div></details>`,
+        );
+      }
+      function acceptOverview(ov) {
+        if (!ov?.instance || ov.instance.id !== state.trustedID)
+          throw new Error("返回数据来自其他实例，已停止操作。");
+        state.instance = ov.instance;
+        state.overview = ov;
+        state.environments = ov.environments || state.environments;
+        state.environmentsError = ov.environments_error || "";
+        const hash = decodeURIComponent(location.hash.slice(1));
+        if (!state.view)
+          state.view =
+            hash === "environments" || ov.tools.some((t) => t.tool === hash)
+              ? hash
+              : (ov.tools.find((t) => (t.accounts || []).length) || ov.tools[0])
+                  ?.tool || "";
+        state.online = true;
+        state.connectionError = "";
+        state.lastRead = Date.now() / 1000;
+        render();
+      }
+      function requestError(message, unknown = false) {
+        const e = new Error(message);
+        e.unknown = unknown;
+        return e;
+      }
+      async function api(
+        path,
+        { method = "GET", body, signal, timeout = 20000 } = {},
+      ) {
+        if (method !== "GET" && !canWrite())
+          throw new Error(
+            state.fatal || "尚未连接并核对目标实例，无法执行操作。",
+          );
+        const controller = new AbortController();
+        let timedOut = false;
+        const abort = () => controller.abort();
+        signal?.addEventListener("abort", abort, { once: true });
+        if (signal?.aborted) controller.abort();
+        const timer = setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+        }, timeout);
+        try {
+          const headers = { "Content-Type": "application/json" };
+          if (state.trustedID) headers["X-Qswitch-Instance"] = state.trustedID;
+          const res = await fetch(path, {
+            method,
+            headers,
+            body: body === undefined ? undefined : JSON.stringify(body),
+            cache: "no-store",
+            signal: controller.signal,
+          });
+          if (res.status === 401) {
+            const u = new URL("login", location.href);
+            if (state.expected || state.trustedID)
+              u.searchParams.set(
+                "expected_instance",
+                state.expected || state.trustedID,
+              );
+            location.assign(u.href);
+            throw new Error("登录已过期，请重新登录管理页面。");
+          }
+          let data = {};
+          try {
+            data = await res.json();
+          } catch {}
+          if (!res.ok) {
+            const message = data.error || `请求失败（${res.status}）`;
+            if (res.status === 409 && /instance|实例/i.test(message)) {
+              state.fatal = message;
+              renderConnection();
+            }
+            throw new Error(message);
+          }
+          return data;
+        } catch (e) {
+          if (controller.signal.aborted) {
+            if (signal?.aborted)
+              throw requestError("请求已被较新的状态读取替代");
+            throw requestError(
+              timedOut
+                ? method === "GET"
+                  ? "读取状态超时，请重试。"
+                  : "请求超时，操作结果尚未确认。请刷新状态核对，不要重复提交。"
+                : "请求已取消",
+              method !== "GET",
+            );
+          }
+          if (e instanceof TypeError)
+            throw requestError(
+              method === "GET"
+                ? "暂时无法连接服务，请重试。"
+                : "连接中断，操作结果尚未确认。请刷新状态核对，不要重复提交。",
+              method !== "GET",
+            );
+          throw e;
+        } finally {
+          clearTimeout(timer);
+          signal?.removeEventListener("abort", abort);
+        }
+      }
+      async function connect() {
+        try {
+          const health = await api("api/health", { timeout: 10000 });
+          const id = health.instance?.id;
+          if (!id)
+            throw new Error("当前服务尚不支持实例核对，请升级 qswitchd。");
+          const expected = state.expected || state.trustedID;
+          if (expected && expected !== id) {
+            state.fatal = `目标实例不匹配：期望 ${expected}，当前连接为 ${health.instance.name || id}。请检查环境地址。`;
+            state.online = false;
+            renderConnection();
+            return false;
+          }
+          state.instance = health.instance;
+          state.trustedID = id;
+          state.fatal = "";
+          state.online = true;
+          renderConnection();
+          return await loadSnapshot();
+        } catch (e) {
+          state.online = false;
+          state.connectionError = e.message;
+          renderConnection();
+          return false;
+        }
+      }
+      async function loadSnapshot() {
+        const sequence = ++state.readSequence,
+          revision = state.revision;
+        state.readController?.abort();
+        const controller = new AbortController();
+        state.readController = controller;
+        try {
+          const ov = await api("api/overview", { signal: controller.signal });
+          if (sequence !== state.readSequence || revision !== state.revision)
+            return false;
+          acceptOverview(ov);
+          return true;
+        } catch (e) {
+          if (sequence !== state.readSequence || controller.signal.aborted)
+            return false;
+          state.online = false;
+          state.connectionError = e.message;
+          if (/其他实例/.test(e.message)) state.fatal = e.message;
+          renderConnection();
+          return false;
+        } finally {
+          if (state.readController === controller) state.readController = null;
+        }
+      }
+      async function mutate(tool, label, path, body, onSuccess) {
+        const key = actionTool(tool);
+        const focusKey = document.activeElement?.dataset?.focus;
+        if (state.operations.has(key)) return false;
+        if (!canWrite()) {
+          message(tool, state.fatal || "服务未连接，操作尚未执行。", true);
+          return false;
+        }
+        state.operations.set(key, { label });
+        state.revision++;
+        render();
+        try {
+          const result = await api(path, {
+            method: "POST",
+            body,
+            timeout: 95000,
+          });
+          state.revision++;
+          const fresh = await loadSnapshot();
+          const success = onSuccess ? onSuccess(result) : label + "完成。";
+          message(
+            tool,
+            success +
+              (fresh
+                ? ""
+                : " 操作已返回成功，但页面状态未能更新；请刷新状态核对。"),
+            !fresh,
+          );
+          return true;
+        } catch (e) {
+          message(tool, e.message, true);
+          if (e.unknown) await loadSnapshot();
+          return false;
+        } finally {
+          state.operations.delete(key);
+          render();
+          if (
+            focusKey &&
+            (!document.activeElement ||
+              document.activeElement === document.body)
+          )
+            restoreFocus(null, focusKey);
+        }
+      }
+      function switchImpact(tool) {
+        return (
+          {
+            codex: "会关闭并重启 ChatGPT.app，空闲的 Codex CLI 会结束。",
+            grok: "会关闭并重启 Grok Bot.app，空闲的 Grok CLI 会结束。",
+            cursor:
+              "会关闭并重启 Cursor.app，空闲 CLI 会结束；只修改登录字段，保留聊天记录。",
+            devin:
+              "只切换 Devin CLI，新进程使用新账号；Devin App 使用独立登录。",
+            kimi: "须先退出全部 Kimi 会话；仅空闲不会解除阻塞，新进程使用新账号。",
+            claude:
+              "只协调 qswitch run claude 受管会话，更新共享登录。受管会话重启可能中断后台任务和定时任务；只保证已提交对话，恢复后应检查未完成的工作。普通 Claude 会话不被控制。",
+            antigravity:
+              "统一切换本机 Antigravity 桌面 App 和 CLI 的共享账号。等待会话空闲后更新认证，不重启客户端。",
+          }[tool] || "切换前会核验账号和会话状态。"
+        );
+      }
+      function askConfirm({
+        title,
+        target,
+        impact,
+        label = "确认",
+        danger = false,
+        run,
+        opener,
+      }) {
+        $("confirmTitle").textContent = title;
+        $("confirmTarget").textContent = target;
+        $("confirmImpact").textContent = impact;
+        $("confirmInstance").textContent =
+          "目标环境：" + (state.instance?.name || "");
+        $("confirmAccept").textContent = label;
+        $("confirmAccept").className = danger ? "danger" : "primary";
+        ui.confirm = { run, opener, focusKey: opener?.dataset?.focus };
+        $("confirmDlg").showModal();
+        $("confirmCancel").focus();
+      }
+      function restoreFocus(opener, key) {
+        const target = opener?.isConnected
+          ? opener
+          : Array.from(document.querySelectorAll("[data-focus]")).find(
+              (el) => el.dataset.focus === key,
+            );
+        if (target && !target.disabled) target.focus({ preventScroll: true });
+      }
+      function closeConfirm() {
+        const current = ui.confirm;
+        ui.confirm = null;
+        $("confirmDlg").close();
+        if (current) restoreFocus(current.opener, current.focusKey);
+        return current;
+      }
+      function selectView(view) {
+        state.view = view;
+        location.hash = encodeURIComponent(view);
+        render();
+      }
+      async function copyText(text) {
+        if (!text) return;
+        try {
+          await navigator.clipboard.writeText(text);
+          return true;
+        } catch {
+          return false;
+        }
+      }
+      function renderEnvironments() {
+        const root = $("root");
+        if (ui.tool === "environments" && state.envDirty) return;
+        if (ui.tool !== "environments") {
+          root.innerHTML =
+            '<div class="settings-page"><div class="page-heading"><div><h1>环境管理</h1><p class="env-intro">切换环境会打开对应实例，各环境独立管理本机账号。</p></div></div><div id="environmentMessage" class="notice" role="status" hidden></div><form id="environmentForm"><div id="environmentRows" class="environment-rows"></div><div class="form-actions"><button type="button" data-act="add-environment">添加环境</button><button class="primary" type="submit" id="saveEnvironments">保存目录</button></div></form><details class="details"><summary>当前实例信息</summary><div class="details-content" id="instanceDetails"></div></details></div>';
+          ui.tool = "environments";
+          if (!state.envDirty)
+            state.envDraft = state.environments.map((e) => ({ ...e }));
+        }
+        if (!state.envDirty)
+          state.envDraft = state.environments.map((e) => ({ ...e }));
+        renderEnvironmentRows();
+        if (state.environmentsMessage)
+          setNotice(
+            $("environmentMessage"),
+            state.environmentsMessage.text,
+            state.environmentsMessage.error,
+          );
+        else if (state.environmentsError)
+          setNotice($("environmentMessage"), state.environmentsError, true);
+        patchHTML(
+          $("instanceDetails"),
+          `<dl class="facts"><dt>名称</dt><dd>${attr(state.instance?.name)}</dd><dt>实例 ID</dt><dd><code>${attr(state.instance?.id)}</code></dd><dt>版本</dt><dd>${attr(state.instance?.version)}</dd><dt>系统</dt><dd>${attr(state.instance?.os)}</dd><dt>管理工具</dt><dd>${attr((state.instance?.managed_tools || []).map(toolTitle).join("、"))}</dd></dl>`,
+        );
+        $("saveEnvironments").disabled = !canWrite() || busy("environments");
+      }
+      function renderEnvironmentRows() {
+        patchHTML(
+          $("environmentRows"),
+          state.envDraft
+            .map(
+              (e, i) =>
+                `<div class="environment-row" data-env-row="${i}"><label class="field">显示名称<input name="name-${i}" value="${attr(e.name)}" maxlength="80" required data-env-field="name" data-focus="env-name:${i}"></label><label class="field">访问地址<input type="url" name="url-${i}" value="${attr(e.url)}" placeholder="https://example.com/qswitch/" required data-env-field="url" data-focus="env-url:${i}"></label><label class="field">目标实例 ID<input name="id-${i}" value="${attr(e.id)}" required spellcheck="false" data-env-field="id" data-focus="env-id:${i}" aria-label="目标实例 ID，可在目标环境的环境管理中查看"></label><button type="button" class="ghost danger" data-act="remove-environment" data-index="${i}">移除</button></div>`,
+            )
+            .join(""),
+        );
+      }
+      function collectEnvironmentDraft() {
+        state.envDraft = Array.from(
+          $("environmentRows").querySelectorAll("[data-env-row]"),
+        ).map((row) =>
+          Object.fromEntries(
+            Array.from(row.querySelectorAll("[data-env-field]")).map(
+              (input) => [input.dataset.envField, input.value.trim()],
+            ),
+          ),
+        );
+      }
+      function environmentMessage(text, error = false) {
+        state.environmentsMessage = { text, error };
+        setNotice($("environmentMessage"), text, error);
+      }
+      async function saveEnvironments(event) {
+        event.preventDefault();
+        if (busy("environments") || !canWrite()) return;
+        collectEnvironmentDraft();
+        state.operations.set("environments", { label: "保存目录" });
+        state.revision++;
+        $("saveEnvironments").disabled = true;
+        try {
+          const result = await api("api/environments", {
+            method: "POST",
+            body: { environments: state.envDraft },
+            timeout: 20000,
+          });
+          if (result.instance && result.instance.id !== state.trustedID)
+            throw new Error("保存结果来自其他实例。");
+          state.revision++;
+          state.environments = result.environments || state.envDraft;
+          state.envDraft = state.environments.map((e) => ({ ...e }));
+          state.envDirty = false;
+          state.environmentsError = "";
+          renderEnvironmentNav();
+          environmentMessage("环境目录已保存；账号与凭据没有跨环境传输。");
+        } catch (e) {
+          environmentMessage(e.message, true);
+        } finally {
+          state.operations.delete("environments");
+          if ($("saveEnvironments"))
+            $("saveEnvironments").disabled = !canWrite();
+        }
+      }
+      async function startLogin(tool, opener) {
+        if (!canWrite() || busy(tool)) return;
+        const login = ui.login;
+        login.generation++;
+        const generation = login.generation;
+        clearTimeout(login.timer);
+        login.id = "";
+        login.tool = tool;
+        login.opener = opener || login.opener;
+        login.focusKey = opener?.dataset?.focus || login.focusKey;
+        login.expires = 0;
+        login.polling = false;
+        state.operations.set(actionTool(tool), { label: "等待账号授权" });
+        render();
+        $("loginTitle").textContent = `添加 ${toolTitle(tool)} 账号`;
+        $("loginHint").textContent =
+          "在官方授权页输入一次性代码，当前客户端的登录保持不变。";
+        $("loginCode").textContent = "…";
+        $("copyLoginCode").disabled = true;
+        $("loginUrl").hidden = true;
+        $("loginUrl").removeAttribute("href");
+        $("loginExpiry").textContent = "";
+        $("loginRetry").hidden = true;
+        $("loginCancel").textContent = "取消";
+        loginMessage("正在申请授权代码…");
+        if (!$("loginDlg").open) $("loginDlg").showModal();
+        try {
+          const r = await api("api/login/" + tool, {
+            method: "POST",
+            body: {},
+            timeout: 25000,
+          });
+          if (generation !== login.generation) {
+            if (r.id)
+              await api("api/login/" + tool + "/cancel", {
+                method: "POST",
+                body: { id: r.id },
+              }).catch(() => {});
+            return;
+          }
+          const url = new URL(r.url);
+          if (url.protocol !== "https:") throw new Error("官方授权地址无效。");
+          login.id = r.id;
+          login.expires = Date.parse(r.expires_at);
+          if (!Number.isFinite(login.expires))
+            throw new Error("服务未返回有效授权期限。");
+          $("loginCode").textContent = r.user_code;
+          $("copyLoginCode").disabled = false;
+          $("loginUrl").href = url.href;
+          $("loginUrl").hidden = false;
+          loginMessage("等待你在官方页面完成授权…");
+          scheduleLoginPoll(generation, 0);
+        } catch (e) {
+          if (generation !== login.generation) return;
+          loginMessage(e.message, true);
+          $("loginRetry").hidden = false;
+          releaseLoginTool();
+        }
+      }
+      function loginMessage(text, error = false) {
+        $("loginMsg").textContent = text;
+        $("loginMsg").className = "dialog-status" + (error ? " error" : "");
+      }
+      function releaseLoginTool() {
+        state.operations.delete(actionTool(ui.login.tool));
+        render();
+      }
+      function scheduleLoginPoll(generation, delay = 2000) {
+        clearTimeout(ui.login.timer);
+        ui.login.timer = setTimeout(() => pollLogin(generation), delay);
+      }
+      async function pollLogin(generation) {
+        const login = ui.login;
+        if (generation !== login.generation || !login.id || login.polling)
+          return;
+        const remaining = Math.ceil((login.expires - Date.now()) / 1000);
+        if (remaining <= 0) {
+          loginMessage("授权代码已过期，请重新获取。", true);
+          $("loginExpiry").textContent = "已过期";
+          $("loginUrl").hidden = true;
+          $("copyLoginCode").disabled = true;
+          $("loginRetry").hidden = false;
+          releaseLoginTool();
+          return;
+        }
+        $("loginExpiry").textContent =
+          `代码剩余 ${Math.floor(remaining / 60)} 分 ${remaining % 60} 秒有效`;
+        login.polling = true;
+        let again = true;
+        try {
+          const r = await api(
+            "api/login/" + login.tool + "?id=" + encodeURIComponent(login.id),
+            { timeout: 10000 },
+          );
+          if (generation !== login.generation) return;
+          if (r.status === "ok") {
+            again = false;
+            loginMessage("账号已添加，当前登录保持不变。");
+            $("loginCancel").textContent = "完成";
+            $("loginExpiry").textContent = "授权完成";
+            $("loginUrl").hidden = true;
+            $("copyLoginCode").disabled = true;
+            releaseLoginTool();
+            state.revision++;
+            await loadSnapshot();
+            message(login.tool, "账号已添加，当前登录保持不变。");
+          } else if (r.status === "error") {
+            again = false;
+            loginMessage(r.error || "授权未完成，请重试。", true);
+            $("loginRetry").hidden = false;
+            releaseLoginTool();
+          }
+        } catch (e) {
+          if (generation === login.generation)
+            loginMessage(e.message + " 正在等待连接恢复。", true);
+        } finally {
+          if (generation === login.generation) {
+            login.polling = false;
+            if (again) scheduleLoginPoll(generation);
+          }
+        }
+      }
+      async function cancelLogin() {
+        const login = ui.login;
+        const id = login.id,
+          tool = login.tool;
+        login.generation++;
+        clearTimeout(login.timer);
+        login.id = "";
+        $("loginDlg").close();
+        releaseLoginTool();
+        restoreFocus(login.opener, login.focusKey);
+        if (id)
+          try {
+            await api("api/login/" + tool + "/cancel", {
+              method: "POST",
+              body: { id },
+              timeout: 10000,
+            });
+          } catch (e) {
+            message(tool, "已关闭授权窗口；取消请求未确认。" + e.message, true);
+          }
+      }
+      async function onClick(event) {
+        const nav = event.target.closest("[data-view]");
+        if (nav) {
+          event.preventDefault();
+          selectView(nav.dataset.view);
+          return;
+        }
+        const b = event.target.closest("[data-act]");
+        if (!b || b.disabled) return;
+        const { act, tool, id } = b.dataset;
+        try {
+          if (act === "refresh-state") {
+            b.disabled = true;
+            await connect();
+            b.disabled = false;
+            return;
+          }
+          if (act === "select-account") {
+            state.selected.set(tool, id);
+            render();
+            if (window.matchMedia?.("(max-width: 760px)")?.matches) {
+              requestAnimationFrame(() => {
+                $("accountTitle")?.focus({ preventScroll: true });
+                $("accountDetail")?.scrollIntoView({
+                  block: "start",
+                  behavior: window.matchMedia(
+                    "(prefers-reduced-motion: reduce)",
+                  ).matches
+                    ? "auto"
+                    : "smooth",
+                });
+              });
+            }
+            return;
+          }
+          if (act === "back-to-accounts") {
+            ui.accountNodes
+              .get(state.selected.get(state.view))
+              ?.focus({ preventScroll: true });
+            $("accountList")?.scrollIntoView({ block: "start" });
+            return;
+          }
+          if (act === "copy-command") {
+            const ok = await copyText(b.dataset.command);
+            b.textContent = ok ? "已复制" : "请手动复制";
+            return;
+          }
+          if (act === "copy-code") {
+            const ok = await copyText($("loginCode").textContent);
+            loginMessage(
+              ok ? "代码已复制。" : "复制失败，请选中代码手动复制。",
+              !ok,
+            );
+            return;
+          }
+          if (act === "login") {
+            await startLogin(tool, b);
+            return;
+          }
+          if (act === "retry-login") {
+            const t = ui.login.tool,
+              opener = ui.login.opener;
+            await cancelLogin();
+            await startLogin(t, opener);
+            return;
+          }
+          if (act === "cancel-login") {
+            await cancelLogin();
+            return;
+          }
+          if (act === "cancel-confirm") {
+            closeConfirm();
+            return;
+          }
+          if (act === "accept-confirm") {
+            const c = closeConfirm();
+            if (c) await c.run();
+            return;
+          }
+          if (act === "add-environment") {
+            collectEnvironmentDraft();
+            state.envDraft.push({ name: "", url: "", id: "" });
+            state.envDirty = true;
+            renderEnvironmentRows();
+            $("environmentRows")
+              .lastElementChild?.querySelector("input")
+              ?.focus();
+            return;
+          }
+          if (act === "remove-environment") {
+            collectEnvironmentDraft();
+            state.envDraft.splice(Number(b.dataset.index), 1);
+            state.envDirty = true;
+            renderEnvironmentRows();
+            return;
+          }
+          if (act === "diagnostics") {
+            b.disabled = true;
+            const r = await api(
+              "api/diagnostics?tool=" + encodeURIComponent(actionTool(tool)),
+            );
+            const el = $("diagnostics");
+            if (el && ui.tool === tool) {
+              el.hidden = false;
+              el.textContent = "";
+              const pre = document.createElement("pre");
+              pre.textContent = r.diagnostics || "暂无诊断信息";
+              el.appendChild(pre);
+            }
+            b.disabled = false;
+            return;
+          }
+          if (busy(tool)) return;
+          const t = toolView(tool),
+            ac = t?.accounts?.find((a) => a.stable_id === id);
+          if (!t) return;
+          if (act === "capture") {
+            await mutate(
+              tool,
+              "收录账号",
+              "api/capture",
+              { tool: actionTool(tool) },
+              (r) => {
+                const count = (r.captured || []).length;
+                return (
+                  (count
+                    ? `已收录 ${count} 个账号。`
+                    : "未发现可收录的账号。") +
+                  (r.warnings?.length ? " " + r.warnings.join("；") : "")
+                );
+              },
+            );
+          } else if (act === "probe" || act === "probe-tool") {
+            await mutate(
+              tool,
+              "查询用量",
+              "api/probe",
+              { tool: actionTool(tool), id: act === "probe" ? id : "" },
+              (r) =>
+                r.class === "expired"
+                  ? "认证已失效，请重新登录。"
+                  : r.updated === false
+                    ? "本次未能确认用量，详情中已标明历史记录。"
+                    : "用量查询完成。",
+            );
+          } else if (act === "auto") {
+            await mutate(
+              tool,
+              "更新自动切换",
+              "api/auto",
+              { tool: actionTool(tool), enabled: !t.auto },
+              () => `自动切换已${t.auto ? "关闭" : "开启"}。`,
+            );
+          } else if (act === "switch" && ac) {
+            askConfirm({
+              title: "切换账号",
+              target: accountLabel(ac),
+              impact: switchImpact(tool),
+              label: "确认切换",
+              opener: b,
+              run: () =>
+                mutate(
+                  tool,
+                  "切换账号",
+                  "api/switch",
+                  { tool: actionTool(tool), id, kill_cli: true },
+                  () =>
+                    tool === "antigravity"
+                      ? "Antigravity 本机 App 和 CLI 账号已切换。"
+                      : "账号切换已完成。",
+                ),
+            });
+          } else if (act === "forget" && ac) {
+            askConfirm({
+              title: "删除已收录账号",
+              target: accountLabel(ac),
+              impact:
+                "只从当前实例的加密仓库删除此账号，不退出官方客户端，也不删除对话。",
+              label: "删除账号",
+              danger: true,
+              opener: b,
+              run: () =>
+                mutate(
+                  tool,
+                  "删除账号",
+                  "api/forget",
+                  { tool: actionTool(tool), id },
+                  () => "已从本机仓库删除该账号。",
+                ),
+            });
+          }
+        } catch (e) {
+          if (tool) message(tool, e.message, true);
+          else setNotice($("globalNotice"), e.message, true);
+          b.disabled = false;
+        }
+      }
+      async function pollOverview() {
+        clearTimeout(ui.overviewTimer);
+        if (!document.hidden && !state.fatal) {
+          if (state.instance) await loadSnapshot();
+          else await connect();
+        }
+        ui.overviewTimer = setTimeout(pollOverview, 15000);
+      }
+      // qswitch-ui-bootstrap
+      document.addEventListener("click", onClick);
+      document.addEventListener("input", (e) => {
+        if (e.target.closest("#environmentForm")) {
+          state.envDirty = true;
+          collectEnvironmentDraft();
+        }
+      });
+      document.addEventListener("submit", (e) => {
+        if (e.target.id === "environmentForm") saveEnvironments(e);
+      });
+      $("loginDlg").addEventListener("cancel", (e) => {
+        e.preventDefault();
+        cancelLogin();
+      });
+      $("confirmDlg").addEventListener("cancel", (e) => {
+        e.preventDefault();
+        closeConfirm();
+      });
+      document.addEventListener("visibilitychange", () => {
+        if (!document.hidden) pollOverview();
+      });
+      window.addEventListener("hashchange", () => {
+        const view = decodeURIComponent(location.hash.slice(1));
+        if (view && view !== state.view) {
+          state.view = view;
+          render();
+        }
+      });
+      (async () => {
+        await connect();
+        try {
+          const session = await api("api/session");
+          $("logoutForm").hidden = !session.login_required;
+        } catch {}
+        ui.overviewTimer = setTimeout(pollOverview, 15000);
+      })();
+    </script>
+  </body>
 </html>

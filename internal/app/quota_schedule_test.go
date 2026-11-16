@@ -31,7 +31,7 @@ func TestScheduledQuotaRetryProgressionAndRecovery(t *testing.T) {
 		hits++
 		status, body := 503, `{}`
 		if success {
-			status, body = 200, `{"rate_limit":{"primary_window":{"used_percent":20}}}`
+			status, body = 200, `{"rate_limit":{"primary_window":{"used_percent":20},"secondary_window":{"used_percent":0}}}`
 		}
 		return &http.Response{StatusCode: status, Header: http.Header{"Retry-After": []string{serverDelay}}, Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
 	})}
@@ -120,7 +120,7 @@ func TestIdleQuotaBoundedFairAndDoesNotSwitch(t *testing.T) {
 			t.Fatal("healthy parked probe unnecessarily rotated credentials")
 		}
 		hits++
-		status, body := 200, `{"rate_limit":{"primary_window":{"used_percent":25}}}`
+		status, body := 200, `{"rate_limit":{"primary_window":{"used_percent":25},"secondary_window":{"used_percent":0}}}`
 		if hits == 1 {
 			status, body = 503, `{}`
 		}

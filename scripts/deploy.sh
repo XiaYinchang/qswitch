@@ -1,207 +1,173 @@
 #!/usr/bin/env bash
-# Deploys qswitch the way the README's systemd and launchd steps do by hand:
-# a fresh clone of one commit, builds whose embedded version is that commit,
-# the binaries copied next to the running ones and checked, swapped in with
-# a backup kept, the daemon restarted and its health polled for the new
-# version, the first quota probe awaited, and the backup removed. A daemon
-# that does not come back on the new version within a minute is rolled back.
-#
-#   scripts/deploy.sh [--ref <commit>] [novix|macmini ...]
-#
-# --ref defaults to origin/main and the targets to both. Run it on the Mac
-# mini: it needs go, ssh to novix, and launchctl for its own daemon. Managed
-# Claude sessions on novix pick up the new qswitch by themselves when idle;
-# the script reports how many have not yet.
-# Command strings run on the target through ssh or bash -c, where the tilde
-# and the dollar expressions expand.
-# shellcheck disable=SC2088,SC2016
+# Install an immutable published release. No compiler runs on deployment hosts.
+# Hosts, URL and intended worker scope live in deploy/hosts.tsv.
 set -euo pipefail
-
-usage() { echo "usage: $0 [--ref <commit>] [novix|macmini ...]"; }
+usage() { echo "usage: $0 --release <tag> [--check|--dry-run] [host ...]"; }
 die() { echo "deploy: $*" >&2; exit 1; }
-
-ref=origin/main
+release= mode=apply
 targets=()
 while [ $# -gt 0 ]; do
-	case "$1" in
-	--ref) [ $# -ge 2 ] || die "--ref needs a commit"; ref=$2; shift 2 ;;
-	--ref=*) ref=${1#--ref=}; shift ;;
-	novix | macmini) targets+=("$1"); shift ;;
-	-h | --help) usage; exit 0 ;;
-	*) usage >&2; exit 2 ;;
-	esac
+ case "$1" in
+ --release) [ $# -ge 2 ] || die 'missing release'; release=$2; shift 2 ;;
+ --check) mode=check; shift ;;
+ --dry-run) mode=dry-run; shift ;;
+ -h|--help) usage; exit 0 ;;
+ --*) usage >&2; exit 2 ;;
+ *) targets+=("$1"); shift ;;
+ esac
 done
-[ ${#targets[@]} -gt 0 ] || targets=(novix macmini)
-
-# The hosts: how to reach them, what to build for them, how to restart the
-# daemon, and how to hash a file there. macmini is the machine this runs on.
-ssh_host() { case $1 in novix) echo novix ;; macmini) echo "" ;; esac; }
-goos() { case $1 in novix) echo linux ;; macmini) echo darwin ;; esac; }
-goarch() { case $1 in novix) echo amd64 ;; macmini) echo arm64 ;; esac; }
-restart_cmd() {
-	case $1 in
-	novix) echo "systemctl --user restart qswitchd" ;;
-	macmini) echo "launchctl kickstart -k gui/$(id -u)/com.qswitch" ;;
-	esac
-}
-sha_cmd() { case $1 in novix) echo "sha256sum" ;; macmini) echo "shasum -a 256" ;; esac; }
-
-# on <target> <command>: runs a shell command on the target.
-on() {
-	local t=$1 host
-	shift
-	host=$(ssh_host "$t")
-	if [ -n "$host" ]; then
-		ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" "$*"
-	else
-		bash -c "$*"
-	fi
-}
-
-# put <target> <local file> <name>: copies a file to ~/.local/bin/<name>.
-put() {
-	local t=$1 src=$2 name=$3 host
-	host=$(ssh_host "$t")
-	if [ -n "$host" ]; then
-		scp -q "$src" "$host:.local/bin/$name"
-	else
-		cp "$src" "$HOME/.local/bin/$name"
-	fi
-}
-
-health() { on "$1" "curl -s -m 3 127.0.0.1:7432/api/health" 2>/dev/null || true; }
-version_in() { sed -n 's/.*"version":"\([^"]*\)".*/\1/p' <<<"$1"; }
-
-# wait_version <target> <commit> <seconds>: polls health until it reports a
-# version that is a prefix of the commit.
-wait_version() {
-	local t=$1 want=$2 limit=$3 i v
-	for ((i = 0; i < limit; i++)); do
-		v=$(version_in "$(health "$t")")
-		if [ -n "$v" ] && [[ $want == "$v"* ]]; then
-			echo "$v"
-			return 0
-		fi
-		sleep 1
-	done
-	return 1
-}
-
-# latest_probe <target>: the newest quota observation the daemon shows, as a
-# Unix time, 0 when the overview cannot be read.
-latest_probe() {
-	on "$1" "curl -s -m 5 127.0.0.1:7432/api/overview" 2>/dev/null | python3 -c '
-import json, sys
-try:
-    d = json.load(sys.stdin)
-except Exception:
-    print(0)
-    raise SystemExit
-print(max([a.get("last_probe_at") or 0 for t in d.get("tools") or [] for a in t.get("accounts") or []] or [0]))'
-}
-
-# Build from a fresh clone, never from a working copy or a worktree: a
-# working copy may be stale or dirty, and Go embeds no revision in a
-# worktree. On 11-03 two builds from the shared checkout shipped without
-# later fixes, and on 11-04 an output written into the clone made the next
-# build report itself modified.
+[[ "$release" =~ ^v[0-9][a-zA-Z0-9._-]*$ ]] || die 'an explicit release tag is required'
 here=$(cd "$(dirname "$0")/.." && pwd)
-url=$(git -C "$here" remote get-url origin)
-tmp=$(mktemp -d "${TMPDIR:-/tmp}/qswitch-deploy.XXXXXX")
-trap 'rm -rf "$tmp"' EXIT
-git clone -q "$url" "$tmp/repo"
-rev=$(git -C "$tmp/repo" rev-parse --verify "$ref^{commit}") || die "unknown ref $ref"
-git -C "$tmp/repo" checkout -q --detach "$rev"
-short=${rev:0:12}
-echo "deploying $short: $(git -C "$tmp/repo" log -1 --format=%s)"
-
-# The Go mise manages is the one the daemons have been built with; the shell
-# may carry a GOROOT and GOBIN for it that would mismatch another go.
-go_bin=$HOME/.local/share/mise/installs/go/latest/bin/go
-[ -x "$go_bin" ] || go_bin=$(command -v go || true)
-[ -n "$go_bin" ] && [ -x "$go_bin" ] || die "go not found"
-unset GOROOT GOBIN GOFLAGS
-
+manifest="$here/deploy/hosts.tsv"
+if [ ${#targets[@]} -eq 0 ]; then
+ while read -r name rest; do [[ "$name" == \#* || -z "$name" ]] || targets+=("$name"); done < "$manifest"
+fi
 for t in "${targets[@]}"; do
-	mkdir -p "$tmp/out/$t"
-	for name in qswitch qswitchd; do
-		(cd "$tmp/repo" && GOOS=$(goos "$t") GOARCH=$(goarch "$t") CGO_ENABLED=0 "$go_bin" build -trimpath -o "$tmp/out/$t/$name" "./cmd/$name")
-		info=$("$go_bin" version -m "$tmp/out/$t/$name")
-		if ! { grep -q "vcs.revision=$rev" <<<"$info" && grep -q "vcs.modified=false" <<<"$info"; }; then
-			die "$name for $t is not a clean build of $rev"
-		fi
-	done
+ [[ "$t" =~ ^[a-zA-Z0-9_-]+$ ]] || die 'invalid host name'
+ [ "$(awk -v h="$t" '$1==h {n++} END {print n+0}' "$manifest")" = 1 ] || die "unknown or duplicate host: $t"
 done
-
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/qswitch-release.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT
+if [ "$mode" != check ]; then
+ command -v gh >/dev/null || die 'GitHub CLI is required to download release assets'
+ gh release download "$release" --repo XiaYinchang/qswitch --dir "$tmp" --pattern 'SHA256SUMS' --pattern '*.tar.gz'
+ python3 - "$tmp" <<'PY'
+import hashlib,pathlib,sys
+root=pathlib.Path(sys.argv[1]); sums={}
+for line in (root/'SHA256SUMS').read_text().splitlines():
+ digest,name=line.split(); sums[name.lstrip('*')]=digest
+for p in root.glob('*.tar.gz'):
+ if hashlib.sha256(p.read_bytes()).hexdigest()!=sums.get(p.name): raise SystemExit('release checksum mismatch: '+p.name)
+PY
+fi
+# Run as the owner of the instance. The Book SSH administrator does not own it.
+on() {
+ if [ "$remote" = local ]; then (cd "$HOME"; /bin/bash -c "$1")
+ elif [ "$account" = - ]; then /usr/bin/ssh -o BatchMode=yes -o ConnectTimeout=10 "$remote" "$1"
+ else
+  # Manifest values and all callers below use a closed alphabet; no user text.
+  /usr/bin/ssh -o BatchMode=yes -o ConnectTimeout=10 "$remote" "cd /Users/$account && sudo -u $account -H /bin/bash -c '$1'"
+ fi
+}
 failed=0
 for t in "${targets[@]}"; do
-	old=$(version_in "$(health "$t")")
-	[ -n "$old" ] || die "$t: qswitchd health does not answer; deploy by hand"
-	if [[ $rev == "$old"* ]]; then
-		echo "$t: already on $old"
-		continue
-	fi
-	# Replacing the binaries during a switch would restart sessions with the
-	# wrong code or leave the switch half done.
-	if on "$t" "~/.local/bin/qswitch status" | grep -q 'queued_since=[^-]'; then
-		die "$t: a switch is queued; try again when it is done"
-	fi
-	if on "$t" "test -e ~/.qswitch/managed-claude/pending.json"; then
-		die "$t: a managed Claude rotation is in progress; try again when it is done"
-	fi
-	for name in qswitch qswitchd; do
-		put "$t" "$tmp/out/$t/$name" "$name.next"
-		want=$(shasum -a 256 "$tmp/out/$t/$name" | cut -d' ' -f1)
-		got=$(on "$t" "$(sha_cmd "$t") ~/.local/bin/$name.next | cut -d' ' -f1")
-		[ "$want" = "$got" ] || die "$t: $name.next does not match the build"
-	done
-	on "$t" "chmod 755 ~/.local/bin/qswitch.next ~/.local/bin/qswitchd.next"
-	staged=$(on "$t" "~/.local/bin/qswitch.next version | head -1")
-	[[ $rev == "$staged"* ]] || die "$t: staged qswitch reports $staged, want $short"
-	staged=$(on "$t" "~/.local/bin/qswitchd.next --version | head -1")
-	[[ $rev == "$staged"* ]] || die "$t: staged qswitchd reports $staged, want $short"
-	# mv renames over the running binaries, which is what makes the managed
-	# sessions' runners notice the new file.
-	restarted=$(date +%s)
-	on "$t" "cd ~/.local/bin && cp -p qswitch qswitch.prev-$old && cp -p qswitchd qswitchd.prev-$old && mv qswitch.next qswitch && mv qswitchd.next qswitchd && $(restart_cmd "$t")"
-	# launchd kills the first spawn of a new binary (code signature) and
-	# starts it again about 10 s later, so the wait covers that.
-	if now=$(wait_version "$t" "$rev" 60); then
-		echo "$t: qswitchd $old -> $now"
-	else
-		echo "$t: qswitchd did not come up on $short within 60 s; rolling back to $old" >&2
-		on "$t" "cd ~/.local/bin && mv qswitch.prev-$old qswitch && mv qswitchd.prev-$old qswitchd && $(restart_cmd "$t")"
-		if wait_version "$t" "$old" 60 >/dev/null; then
-			echo "$t: back on $old" >&2
-		else
-			echo "$t: health does not report $old either; check the daemon" >&2
-		fi
-		exit 1
-	fi
-	# The first probe after the restart shows the daemon doing its real work:
-	# the vault key, the provider request and the database. The backups go
-	# only then. Probes are spaced by the accounts' intervals, so this can
-	# take a while.
-	echo "$t: waiting for the first quota probe"
-	waited=0
-	until [ "$(latest_probe "$t")" -gt "$restarted" ]; do
-		if [ $waited -ge 900 ]; then
-			echo "$t: no quota probe in 15 minutes; backups kept as ~/.local/bin/{qswitch,qswitchd}.prev-$old; check journal/log" >&2
-			failed=1
-			continue 2
-		fi
-		sleep 15
-		waited=$((waited + 15))
-	done
-	on "$t" "rm -f ~/.local/bin/qswitch.prev-$old ~/.local/bin/qswitchd.prev-$old"
-	echo "$t: first probe seen, backups removed"
-	if [ "$(goos "$t")" = linux ]; then
-		stale=$(on "$t" 'for p in $(pgrep -f "^[^ ]*/qswitch run claude"); do readlink /proc/$p/exe; done 2>/dev/null' | grep -c deleted || true)
-		if [ "$stale" -gt 0 ]; then
-			echo "$t: $stale managed session runner(s) still on the old binary; they upgrade when idle"
-		else
-			echo "$t: every managed session runner is on the new binary"
-		fi
-	fi
+ read -r name remote os arch account public_url scope < <(awk -v h="$t" '$1==h {print}' "$manifest")
+ [[ "$remote" =~ ^[a-zA-Z0-9._-]+$ && "$account" =~ ^[a-zA-Z0-9_-]+$ ]] || die 'invalid host manifest'
+ [ "$os" = linux ] || [ "$os" = darwin ] || die 'unsupported service host'
+ echo "$t: $mode $release ($os/$arch, scope=$scope)"
+ if [ "$mode" != check ]; then
+  stage="$tmp/$os-$arch"
+  if [ ! -d "$stage" ]; then mkdir "$stage"; tar -xzf "$tmp/qswitch-$os-$arch.tar.gz" -C "$stage"; fi
+  for bin in qswitch qswitchd; do [ -f "$stage/$bin" ] || die "release is missing $bin"; done
+ fi
+ # Check is read-only. A dry run verifies the release and live preconditions,
+ # but does not upload files, restart the daemon, or touch account data.
+ if [ "$mode" != apply ]; then
+  on "python3 - $release $mode $scope" <<'PY' || failed=1
+import json,pathlib,sqlite3,subprocess,sys,urllib.request
+want,mode,scope=sys.argv[1:]; home=pathlib.Path.home(); data=home/'.qswitch'
+health=json.load(urllib.request.urlopen('http://127.0.0.1:7432/api/health',timeout=5))
+cli=subprocess.check_output([str(home/'.local/bin/qswitch'),'version'],text=True).strip().splitlines()[0]
+db=sqlite3.connect('file:'+str(data/'state.db')+'?mode=ro',uri=True)
+pending=db.execute('select count(*) from pending_switch').fetchone()[0];db.close()
+assert not pending and not (data/'managed-claude/pending.json').exists(), 'a switch is in progress'
+info=health.get('instance',{})
+print(json.dumps({'daemon':health['version'],'cli':cli,'instance':info.get('id'),'scope':info.get('managed_tools'),'target':want,'public_data_checked':False}))
+if mode=='check':
+ assert health['version']==want and cli==want,'version drift'
+ expected=['codex','grok','cursor','devin','zcode','kimi','claude','antigravity'] if scope=='all' else scope.split(',')
+ assert sorted(info.get('managed_tools',[]))==sorted(expected),'worker scope drift'
+PY
+  continue
+ fi
+ on "umask 077; mkdir .qswitch/deploy-$release"
+ for bin in qswitch qswitchd; do
+  on "cat > .qswitch/deploy-$release/$bin" < "$stage/$bin"
+ done
+ # Pass expected binary hashes as arguments, never trust only an archive name.
+ h1=$(shasum -a 256 "$stage/qswitch" | awk '{print $1}')
+ h2=$(shasum -a 256 "$stage/qswitchd" | awk '{print $1}')
+ if ! on "python3 - $release $scope $h1 $h2" <<'PY'
+import hashlib,json,os,pathlib,shutil,sqlite3,subprocess,sys,time,urllib.request
+want,scope,h1,h2=sys.argv[1:]; home=pathlib.Path.home(); data=home/'.qswitch'; bindir=home/'.local/bin'; stage=data/('deploy-'+want)
+mac=sys.platform=='darwin'; uid=os.getuid(); plist=home/'Library/LaunchAgents/com.qswitch.plist'
+def run(args): return subprocess.run(args,check=True,capture_output=True,text=True).stdout.strip()
+def health(): return json.load(urllib.request.urlopen('http://127.0.0.1:7432/api/health',timeout=4))
+def safe():
+ db=sqlite3.connect('file:'+str(data/'state.db')+'?mode=ro',uri=True)
+ n=db.execute('select count(*) from pending_switch').fetchone()[0];db.close()
+ assert n==0 and not (data/'managed-claude/pending.json').exists(),'switch in progress; deployment refused'
+def stop():
+ if mac:
+  result=subprocess.run(['launchctl','bootout',f'gui/{uid}/com.qswitch'],capture_output=True,text=True)
+  if result.returncode:
+   present=subprocess.run(['launchctl','print',f'gui/{uid}/com.qswitch'],capture_output=True,text=True)
+   if present.returncode==0: raise RuntimeError('unable to stop launchd service')
+ else: run(['systemctl','--user','stop','qswitchd.service'])
+def start():
+ if mac: run(['launchctl','bootstrap',f'gui/{uid}',str(plist)])
+ else: run(['systemctl','--user','start','qswitchd.service'])
+def wait(version):
+ for _ in range(60):
+  try:
+   got=health()
+   if got['version']==version: return got
+  except Exception: pass
+  time.sleep(1)
+ raise RuntimeError('daemon did not reach '+version)
+try:
+ old=health(); safe()
+ for name,digest in [('qswitch',h1),('qswitchd',h2)]:
+  p=stage/name
+  assert hashlib.sha256(p.read_bytes()).hexdigest()==digest,'staged checksum mismatch'
+  p.chmod(0o755)
+  arg='version' if name=='qswitch' else '--version'
+  assert run([str(p),arg]).splitlines()[0]==want,'staged version mismatch'
+  shutil.copy2(bindir/name,stage/(name+'.previous'))
+except Exception as err:
+ shutil.rmtree(stage)
+ raise SystemExit("preflight failed; running programs unchanged: "+str(err))
+# No new switch can begin after the daemon has stopped. Re-check durable work
+# before replacing either executable, and resume the old daemon on rejection.
+stopped=False; swapped=False
+try:
+ stop(); stopped=True; safe()
+ swapped=True # Any partial replacement must restore both previous binaries.
+ for name in ['qswitch','qswitchd']: os.replace(stage/name,bindir/name)
+ start(); stopped=False
+ got=wait(want)
+ assert got.get('instance',{}).get('id'),'missing instance identity'
+ assert not old.get('instance',{}).get('id') or old['instance']['id']==got['instance']['id'],'instance identity changed'
+ tools=got['instance']['managed_tools']
+ expected=['codex','grok','cursor','devin','zcode','kimi','claude','antigravity'] if scope=='all' else scope.split(',')
+ assert sorted(tools)==sorted(expected),'worker scope changed'
+ assert run([str(bindir/'qswitch'),'version']).splitlines()[0]==want,'CLI did not update'
+ overview=json.load(urllib.request.urlopen('http://127.0.0.1:7432/api/overview',timeout=15))
+ visible=[]
+ for item in overview['tools']:
+  if item['tool']=='grokbot' and item.get('derived_from')=='cursor' and 'cursor' in tools: continue
+  assert not item.get('derived_from'),'unexpected derived tool'
+  visible.append(item['tool'])
+ assert sorted(visible)==sorted(tools),'overview scope mismatch'
+ time.sleep(10)
+ assert health()['version']==want,'daemon did not stay on target version'
+ receipt={'release':want,'previous':old['version'],'instance':got['instance'],'checked_at':int(time.time()),'sha256':{'qswitch':h1,'qswitchd':h2}}
+ out=data/'deployment.json.next'; out.write_text(json.dumps(receipt,indent=2)+'\n');out.chmod(0o600);os.replace(out,data/'deployment.json')
+ shutil.rmtree(stage)
+ print(json.dumps({'result':'deployed','release':want,'instance':got['instance'],'rollback_files_removed':True}))
+except Exception as err:
+ try:
+  if swapped:
+   stop()
+   for name in ['qswitch','qswitchd']: os.replace(stage/(name+'.previous'),bindir/name)
+   start();stopped=False;wait(old['version'])
+  elif stopped: start();stopped=False;wait(old['version'])
+  shutil.rmtree(stage)
+  print('deployment failed; previous version restored',file=sys.stderr)
+ except Exception as recovery:
+  print('rollback needs attention; recovery files retained at '+str(stage)+': '+str(recovery),file=sys.stderr)
+ raise SystemExit(str(err))
+PY
+ then failed=1; fi
 done
-exit $failed
+exit "$failed"

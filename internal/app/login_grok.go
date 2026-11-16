@@ -35,6 +35,9 @@ func findGrokBin() string {
 }
 
 func (a *App) LoginGrok(ctx context.Context, announce func(userCode, verifyURL string)) (adapter.Identity, error) {
+	if err := a.CheckAction(adapter.Grok, "login"); err != nil {
+		return adapter.Identity{}, err
+	}
 	if !secutil.InTest() {
 		if bin := findGrokBin(); bin != "" {
 			return a.loginGrokOfficial(ctx, bin)
@@ -92,6 +95,9 @@ func (a *App) loginGrokHTTP(ctx context.Context, announce func(userCode, verifyU
 }
 
 func (a *App) BeginGrokDeviceLogin(ctx context.Context) (quota.GrokDeviceStart, error) {
+	if err := a.CheckAction(adapter.Grok, "login"); err != nil {
+		return quota.GrokDeviceStart{}, err
+	}
 	if a.HTTP.Client == nil && secutil.InTest() {
 		return quota.GrokDeviceStart{}, errors.New("grok login: no http client")
 	}
@@ -99,6 +105,9 @@ func (a *App) BeginGrokDeviceLogin(ctx context.Context) (quota.GrokDeviceStart, 
 }
 
 func (a *App) CompleteGrokDeviceLogin(ctx context.Context, st quota.GrokDeviceStart) (adapter.Identity, error) {
+	if err := a.CheckAction(adapter.Grok, "login"); err != nil {
+		return adapter.Identity{}, err
+	}
 	deadline := st.ExpiresAt
 	if deadline.IsZero() {
 		deadline = a.now().Add(30 * time.Minute)
@@ -157,6 +166,9 @@ func (a *App) enrollGrokBlob(ctx context.Context, blob adapter.Blob) (adapter.Id
 		return adapter.Identity{}, err
 	}
 	err = a.saveBlob(blob)
+	if err == nil {
+		err = a.recordRefreshResult(adapter.Grok, blob.Identity.StableID, false, nil)
+	}
 	closeErr := lock.Close()
 	if err != nil {
 		return adapter.Identity{}, err

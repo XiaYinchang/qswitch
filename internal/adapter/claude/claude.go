@@ -18,9 +18,9 @@ import (
 
 	"qswitch/internal/adapter"
 	"qswitch/internal/busy"
-	"qswitch/internal/livefile"
 	"qswitch/internal/managed"
 	"qswitch/internal/quota"
+	"qswitch/internal/snapshot"
 )
 
 const payloadKind = "claude.oauth.v1"
@@ -128,6 +128,9 @@ func readPayload(blob adapter.Blob) (payload, error) {
 	if _, err := ParseCreds([]byte(p.Credentials)); err != nil {
 		return p, err
 	}
+	if blob.Identity.StableID != "" && p.Identity.StableID != "" && blob.Identity.StableID != p.Identity.StableID {
+		return p, errors.New("claude: snapshot identity mismatch")
+	}
 	return p, nil
 }
 
@@ -178,65 +181,49 @@ func (Adapter) IdentityOf(blob adapter.Blob) (adapter.Identity, error) {
 	return id, nil
 }
 
-func (a Adapter) Restore(home string, blob adapter.Blob, _ adapter.RestoreOpts) error {
+func (a Adapter) Restore(home string, blob adapter.Blob, opts adapter.RestoreOpts) error {
+	_, err := a.RestoreWithRollback(home, blob, opts)
+	return err
+}
+
+func (a Adapter) RestoreWithRollback(home string, blob adapter.Blob, _ adapter.RestoreOpts) (func() error, error) {
 	p, err := readPayload(blob)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// Saved snapshots may predate identity/metadata reconciliation. The
 	// verified snapshot identity is authoritative when restoring them too.
 	if p.Identity.StableID != "" {
 		account, err := json.Marshal(OAuthAccount{AccountUUID: p.Identity.StableID, Email: p.Identity.Email})
 		if err != nil {
-			return err
+			return nil, err
 		}
 		p.OAuthAccount = string(account)
 	}
 	h, err := a.AutoBlockers(home)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if h.ManualBusy() {
-		return &adapter.BusyError{Holders: h}
+		return nil, &adapter.BusyError{Holders: h}
 	}
-	// Update the CLI's account metadata first; the credentials write commits
-	// the switch. A credentials failure rolls the metadata back so the live
-	// pair never mixes two accounts.
-	credPath := credentialsPath(home)
-	metaPath := claudeJSONPath(home)
-	oldMeta, metaErr := os.ReadFile(metaPath)
-	metaOK := metaErr == nil
-	if metaErr != nil && !os.IsNotExist(metaErr) {
-		return metaErr
-	}
+	var files []snapshot.FileWrite
 	if p.OAuthAccount != "" {
-		baseMeta := oldMeta
-		if !metaOK {
-			baseMeta = []byte("{}")
+		metaPath := claudeJSONPath(home)
+		oldMeta, err := os.ReadFile(metaPath)
+		if os.IsNotExist(err) {
+			oldMeta = []byte("{}")
+		} else if err != nil {
+			return nil, err
 		}
-		newMeta, err := mergeOAuthAccount(baseMeta, p.OAuthAccount)
+		newMeta, err := mergeOAuthAccount(oldMeta, p.OAuthAccount)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		if err := livefile.AtomicWrite(metaPath, newMeta, 0o600); err != nil {
-			return err
-		}
+		files = append(files, snapshot.FileWrite{Path: metaPath, Data: newMeta, Mode: 0600})
 	}
-	if err := livefile.AtomicWrite(credPath, []byte(p.Credentials), 0o600); err != nil {
-		if p.OAuthAccount != "" {
-			var rollbackErr error
-			if metaOK {
-				rollbackErr = livefile.AtomicWrite(metaPath, oldMeta, 0o600)
-			} else {
-				rollbackErr = os.Remove(metaPath)
-			}
-			if rollbackErr != nil {
-				return errors.Join(err, fmt.Errorf("claude: restore account metadata rollback: %w", rollbackErr))
-			}
-		}
-		return err
-	}
-	return nil
+	files = append(files, snapshot.FileWrite{Path: credentialsPath(home), Data: []byte(p.Credentials), Mode: 0600})
+	return snapshot.WriteFiles(files...)
 }
 
 func mergeOAuthAccount(metaRaw []byte, acctJSON string) ([]byte, error) {
@@ -317,11 +304,11 @@ func (a Adapter) KillCLI(home string) error {
 }
 
 func isClaudeCLI(command string) bool {
-	f := strings.Fields(command)
+	f := busy.CommandArgs(command)
 	if len(f) == 0 {
 		return false
 	}
-	name := filepath.Base(f[0])
+	name := busy.ExecutableName(f[0])
 	if name == "claude" {
 		return true
 	}
@@ -333,7 +320,7 @@ func isClaudeCLI(command string) bool {
 		if len(args) == 0 {
 			return false
 		}
-		script := filepath.ToSlash(args[0])
+		script := strings.ReplaceAll(args[0], `\`, "/")
 		return filepath.Base(script) == "claude" ||
 			strings.Contains(script, "/@anthropic-ai/claude-code/")
 	}

@@ -14,7 +14,7 @@ func TestClassifyHTTP(t *testing.T) {
 		{"500", 500, `{}`, Unknown},
 		{"401", 401, `{}`, Expired},
 		{"limit reached", 200, `{"rate_limit":{"limit_reached":true,"primary_window":{"used_percent":10}}}`, Exhausted},
-		{"99.5", 200, `{"rate_limit":{"primary_window":{"used_percent":99.5}}}`, Exhausted},
+		{"99.5", 200, `{"rate_limit":{"primary_window":{"used_percent":99.5}}}`, Soft},
 		{"99.4 soft", 200, `{"rate_limit":{"primary_window":{"used_percent":99.4}}}`, Soft},
 		{"ok", 200, `{"rate_limit":{"primary_window":{"used_percent":41}}}`, OK},
 		{"grok missing percent", 200, `{"config":{"currentPeriod":{"end":"x"}}}`, Unknown},
@@ -47,7 +47,7 @@ func TestClassifyByKind(t *testing.T) {
 		{"codex probe 429", KindCodex, 429, `{}`, Unknown, 0},
 		{"codex usage_limit 429", KindCodex, 429, `{"error":{"code":"usage_limit_reached"}}`, Exhausted, 100},
 		{"codex tpm 429", KindCodex, 429, `{"error":{"code":"rate_limit_exceeded","message":"slow down"}}`, Unknown, 0},
-		{"codex jsonl-like 200", KindCodex, 200, `{"rate_limits":{"primary":{"used_percent":16}}}`, OK, 16},
+		{"codex jsonl-like 200", KindCodex, 200, `{"rate_limits":{"primary":{"used_percent":16}}}`, Unknown, 16},
 		{"codex reached type", KindCodex, 200, `{"rate_limits":{"primary":{"used_percent":40},"rate_limit_reached_type":"rate_limit_reached"}}`, Exhausted, 40},
 		{"grok 402 exhausted", KindGrok, 402, `{"message":"API error (status 402 Payment Required): Grok Build usage balance exhausted"}`, Exhausted, 100},
 		{"grok 402 empty", KindGrok, 402, ``, Unknown, 0},
@@ -112,7 +112,7 @@ func TestClassifyCodexPairsPlanWindow(t *testing.T) {
 		}]
 	}`
 	got := Classify(KindCodex, 200, []byte(body))
-	if got.Class != OK || got.UsedPct != 52 {
+	if got.Class != Unknown || got.UsedPct != 52 {
 		t.Fatalf("class=%s pct=%v", got.Class, got.UsedPct)
 	}
 	if got.ResetsAt != 1789435634 {

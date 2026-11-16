@@ -1,0 +1,154 @@
+package web
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+
+	"qswitch/internal/adapter"
+	"qswitch/internal/app"
+)
+
+// ServingInstance identifies a local listener before a CLI recommends its URL.
+// A different data directory must not silently route a user to that listener.
+func ServingInstance(addr string) (app.InstanceInfo, error) {
+	if err := CheckLoopback(addr); err != nil {
+		return app.InstanceInfo{}, err
+	}
+	c := &http.Client{Timeout: 800 * time.Millisecond, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("unexpected redirect") }}
+	res, err := c.Get("http://" + addr + "/api/health")
+	if err != nil {
+		return app.InstanceInfo{}, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != 200 {
+		return app.InstanceInfo{}, fmt.Errorf("health status %d", res.StatusCode)
+	}
+	var body struct {
+		Instance app.InstanceInfo `json:"instance"`
+	}
+	if err := json.NewDecoder(io.LimitReader(res.Body, 64<<10)).Decode(&body); err != nil {
+		return app.InstanceInfo{}, err
+	}
+	if body.Instance.ID == "" {
+		return app.InstanceInfo{}, errors.New("listener has no verified instance identity")
+	}
+	return body.Instance, nil
+}
+
+const instanceHeader = "X-Qswitch-Instance"
+
+func (s *Server) checkInstance(w http.ResponseWriter, r *http.Request) bool {
+	if !strings.HasPrefix(r.URL.Path, "/api/") {
+		return true
+	}
+	want := r.Header.Get(instanceHeader)
+	if want == "" && r.Method == http.MethodPost {
+		writeErr(w, 400, "missing X-Qswitch-Instance")
+		return false
+	}
+	if want != "" && (s.App.Instance().ID == "" || want != s.App.Instance().ID) {
+		writeErr(w, 409, "instance mismatch; no operation was performed")
+		return false
+	}
+	if expected := r.URL.Query().Get("expected_instance"); expected != "" && expected != s.App.Instance().ID {
+		writeErr(w, 409, "instance mismatch; no operation was performed")
+		return false
+	}
+	return true
+}
+
+func (s *Server) requireTool(w http.ResponseWriter, tool adapter.Tool, action string) bool {
+	if err := s.App.CheckScope(tool); err != nil {
+		writeErr(w, 403, err.Error())
+		return false
+	}
+	if action != "" {
+		if err := s.App.CheckAction(tool, action); err != nil {
+			writeErr(w, 409, err.Error())
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Server) postAuto(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Tool    string `json:"tool"`
+		Enabled *bool  `json:"enabled"`
+	}
+	if !readJSON(w, r, &req) {
+		return
+	}
+	tool, err := adapter.ParseTool(req.Tool)
+	if err != nil || req.Enabled == nil {
+		writeErr(w, 400, "tool and enabled are required")
+		return
+	}
+	if !s.requireTool(w, tool, "") {
+		return
+	}
+	if err := s.App.SetAuto(tool, *req.Enabled); err != nil {
+		writeErr(w, 409, err.Error())
+		return
+	}
+	writeJSON(w, 200, s.App.Overview())
+}
+
+func (s *Server) getDiagnostics(w http.ResponseWriter, r *http.Request) {
+	tool, err := adapter.ParseTool(r.URL.Query().Get("tool"))
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	if !s.requireTool(w, tool, "") {
+		return
+	}
+	writeJSON(w, 200, map[string]any{"instance": s.App.Instance(), "tool": tool, "capabilities": s.App.Capabilities(tool), "diagnostics": s.App.DoctorTool(tool)})
+}
+
+func (s *Server) getEnvironments(w http.ResponseWriter, r *http.Request) {
+	items, err := s.App.Environments()
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"instance": s.App.Instance(), "environments": items})
+}
+
+func (s *Server) postEnvironments(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Environments *[]app.Environment `json:"environments"`
+	}
+	if !readJSON(w, r, &req) {
+		return
+	}
+	if req.Environments == nil {
+		writeErr(w, 400, "environments array is required")
+		return
+	}
+	if err := s.App.SetEnvironments(*req.Environments); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	s.getEnvironments(w, r)
+}
+
+func loginTool(r *http.Request) adapter.Tool {
+	if strings.HasPrefix(r.URL.Path, "/api/login/grok") {
+		return adapter.Grok
+	}
+	return adapter.Codex
+}
+
+func preserveExpected(path, expected string) string {
+	if expected == "" {
+		return path
+	}
+	return path + "?" + url.Values{"expected_instance": []string{expected}}.Encode()
+}

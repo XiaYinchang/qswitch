@@ -10,7 +10,6 @@ import (
 
 	"qswitch/internal/adapter"
 	"qswitch/internal/adapter/kimi"
-	"qswitch/internal/livefile"
 	"qswitch/internal/secutil"
 )
 
@@ -87,6 +86,10 @@ func (a *App) keepAliveLiveKimiLocked(ctx context.Context, b adapter.Blob, live 
 	}
 	refreshCtx, cancel := context.WithTimeout(lock.Context(), 15*time.Second)
 	defer cancel()
+	recovery, err := a.beginKimiRecovery(b, path)
+	if err != nil {
+		return b, "", a.recordRefreshResult(adapter.Kimi, b.Identity.StableID, false, err)
+	}
 	tok, err := a.HTTP.KimiRefresh(refreshCtx, current.RefreshToken)
 	if err != nil {
 		return b, "", a.recordRefreshResult(adapter.Kimi, b.Identity.StableID, tok.Permanent, err)
@@ -95,22 +98,23 @@ func (a *App) keepAliveLiveKimiLocked(ctx context.Context, b adapter.Blob, live 
 	if err != nil {
 		return b, "", a.recordRefreshResult(adapter.Kimi, b.Identity.StableID, false, err)
 	}
-	// Retain the rotated refresh token even if an unrelated writer changed the
-	// live slot. A consumed token must never replace this newer vault snapshot.
-	if err := a.saveBlob(updated); err != nil {
+	// Persist the exchange result before either account or live writeback.
+	// Recovery uses the same native lock, without acquiring it twice here.
+	recovery.Updated = &updated
+	if err := a.putKimiRecovery(recovery); err != nil {
+		return updated, "", a.recordRefreshResult(adapter.Kimi, b.Identity.StableID, false, err)
+	}
+	if err := a.saveBlobUnchecked(updated); err != nil {
 		return updated, "", a.recordRefreshResult(adapter.Kimi, b.Identity.StableID, false, err)
 	}
 	after, err := os.ReadFile(path)
 	if err != nil || !bytes.Equal(raw, after) || !lock.OwnsPath() || lock.Context().Err() != nil {
 		return updated, "", a.recordRefreshResult(adapter.Kimi, b.Identity.StableID, false, errors.New("kimi: live credentials or auth lock changed during refresh"))
 	}
-	var refreshed struct {
-		Credentials string `json:"credentials_json"`
+	if err := a.writeKimiRecoveryLiveLocked(recovery, lock); err != nil {
+		return updated, "", a.recordRefreshResult(adapter.Kimi, b.Identity.StableID, false, err)
 	}
-	if err := json.Unmarshal(updated.Payload, &refreshed); err != nil {
-		return updated, "", err
-	}
-	if err := livefile.AtomicWrite(path, []byte(refreshed.Credentials), 0600); err != nil {
+	if err := a.deleteKimiRecovery(recovery); err != nil {
 		return updated, "", a.recordRefreshResult(adapter.Kimi, b.Identity.StableID, false, err)
 	}
 	a.rememberFP(adapter.Kimi)

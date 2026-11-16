@@ -97,7 +97,7 @@ func sessionCookieOf(t *testing.T, w *httptest.ResponseRecorder) *http.Cookie {
 func TestLoopbackNeverAsksForPassword(t *testing.T) {
 	s, _, _ := passwordServer(t, "127.0.0.1:7432", "")
 	h := s.Handler()
-	if w := do(h, local(http.MethodGet, "/")); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"api/overview"`) {
+	if w := do(h, local(http.MethodGet, "/")); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `api/overview`) {
 		t.Fatalf("page: %d", w.Code)
 	}
 	if w := do(h, local(http.MethodGet, "/api/session")); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"login_required":false`) {
@@ -315,7 +315,7 @@ func TestProxiedThroughDeck(t *testing.T) {
 	r := proxied(http.MethodGet, "/")
 	r.AddCookie(ck)
 	w := do(h, r)
-	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"api/overview"`) || strings.Contains(w.Body.String(), `"/api/`) {
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `api/overview`) || strings.Contains(w.Body.String(), `"/api/`) {
 		t.Fatalf("page must use relative api paths: %d", w.Code)
 	}
 	csp := w.Header().Get("Content-Security-Policy")

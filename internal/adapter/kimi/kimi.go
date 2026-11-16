@@ -13,8 +13,8 @@ import (
 	toml "github.com/pelletier/go-toml/v2"
 	"qswitch/internal/adapter"
 	"qswitch/internal/busy"
-	"qswitch/internal/livefile"
 	"qswitch/internal/quota"
+	"qswitch/internal/snapshot"
 )
 
 type Adapter struct {
@@ -134,6 +134,9 @@ func readPayload(blob adapter.Blob) (payload, error) {
 	if _, err := ParseCreds([]byte(p.Credentials)); err != nil {
 		return p, err
 	}
+	if blob.Identity.StableID != "" && p.Identity.StableID != "" && blob.Identity.StableID != p.Identity.StableID {
+		return p, errors.New("kimi: snapshot identity mismatch")
+	}
 	return p, nil
 }
 
@@ -179,29 +182,34 @@ func (Adapter) IdentityOf(blob adapter.Blob) (adapter.Identity, error) {
 	return id, nil
 }
 
-func (a Adapter) Restore(home string, blob adapter.Blob, _ adapter.RestoreOpts) error {
+func (a Adapter) Restore(home string, blob adapter.Blob, opts adapter.RestoreOpts) error {
+	_, err := a.RestoreWithRollback(home, blob, opts)
+	return err
+}
+
+func (a Adapter) RestoreWithRollback(home string, blob adapter.Blob, _ adapter.RestoreOpts) (func() error, error) {
 	p, err := readPayload(blob)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := validateConfig(home); err != nil {
-		return err
+		return nil, err
 	}
 	h, err := a.ManualBlockers(home)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if h.ManualBusy() {
-		return &adapter.BusyError{Holders: h}
+		return nil, &adapter.BusyError{Holders: h}
 	}
 	// Official Kimi uses a proper-lockfile directory, not flock. Do not claim
 	// interoperability with qswitch's flock or remove a possibly live lock.
 	if _, err := os.Lstat(filepath.Join(dataDir(home), "oauth", "kimi-code.lock")); err == nil {
-		return errors.New("kimi: OAuth refresh lock is present")
+		return nil, errors.New("kimi: OAuth refresh lock is present")
 	} else if !os.IsNotExist(err) {
-		return err
+		return nil, err
 	}
-	return livefile.AtomicWrite(credentialsPath(home), []byte(p.Credentials), 0600)
+	return snapshot.WriteFiles(snapshot.FileWrite{Path: credentialsPath(home), Data: []byte(p.Credentials), Mode: 0600})
 }
 
 func (a Adapter) procs() ([]adapter.Proc, error) {
@@ -244,11 +252,11 @@ func (a Adapter) KillCLI(home string) error {
 }
 
 func isKimiCLI(command string) bool {
-	f := strings.Fields(command)
+	f := busy.CommandArgs(command)
 	if len(f) == 0 {
 		return false
 	}
-	name := filepath.Base(f[0])
+	name := busy.ExecutableName(f[0])
 	if name == "kimi" {
 		return true
 	}
@@ -260,7 +268,7 @@ func isKimiCLI(command string) bool {
 		if len(args) > 0 && args[0] == "--" {
 			args = args[1:]
 		}
-		if len(args) > 0 && filepath.Base(args[0]) == "kimi" {
+		if len(args) > 0 && busy.ExecutableName(args[0]) == "kimi" {
 			return true
 		}
 		return len(args) > 1 && args[0] == "-m" && args[1] == "kimi_cli"
@@ -272,7 +280,7 @@ func isKimiCLI(command string) bool {
 		if len(args) > 0 && args[0] == "--" {
 			args = args[1:]
 		}
-		return len(args) > 0 && strings.HasSuffix(filepath.ToSlash(args[0]), "/@moonshot-ai/kimi-code/dist/main.mjs")
+		return len(args) > 0 && strings.HasSuffix(strings.ReplaceAll(args[0], `\`, "/"), "/@moonshot-ai/kimi-code/dist/main.mjs")
 	}
 	return false
 }

@@ -60,7 +60,7 @@ func TestDerivedBotPreservesUnconfirmedParentState(t *testing.T) {
 		t.Run(class, func(t *testing.T) {
 			parent := accountView(state.Account{Tool: "cursor", StableID: "fixture", LastQuotaClass: class, QuotaDetail: quota.EncodeBuckets([]quota.Bucket{{ID: "bot", UsedPct: 20}})}, "fixture", 1)
 			_, bot := splitCursorBot(ToolView{Tool: "cursor", Accounts: []AccountView{parent}})
-			if len(bot.Accounts) != 1 || bot.Accounts[0].Class != class || bot.Accounts[0].RemainingPct != nil || !bot.Accounts[0].QuotaStale {
+			if len(bot.Accounts) != 1 || bot.Accounts[0].Class != "unknown" || bot.Accounts[0].RemainingPct != nil || !bot.Accounts[0].QuotaStale {
 				t.Fatal("derived Bot converted an unconfirmed parent into usable quota")
 			}
 		})

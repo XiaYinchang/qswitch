@@ -262,19 +262,16 @@ func tailBytes(path string, n int) ([]byte, error) {
 
 func DirIdle(root string, grace time.Duration, now time.Time) bool {
 	newest := time.Time{}
-	_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info == nil || info.IsDir() {
-			return nil
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
 		}
-		if info.ModTime().After(newest) {
+		if info.Mode().IsRegular() && info.ModTime().After(newest) {
 			newest = info.ModTime()
 		}
 		return nil
 	})
-	if newest.IsZero() {
-		return true
-	}
-	return now.Sub(newest) >= grace
+	return err == nil && !newest.IsZero() && now.Sub(newest) >= grace
 }
 
 func Prefer(a, b Result) Result {

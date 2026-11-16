@@ -36,18 +36,23 @@ const (
 )
 
 type Config struct {
-	General     General `toml:"general"`
-	Quota       Quota   `toml:"quota"`
-	Notify      Notify  `toml:"notify"`
-	Codex       Tool    `toml:"codex"`
-	Grok        Tool    `toml:"grok"`
-	Cursor      Tool    `toml:"cursor"`
-	Devin       Tool    `toml:"devin"`
-	ZCode       Tool    `toml:"zcode"`
-	Kimi        Tool    `toml:"kimi"`
-	Claude      Tool    `toml:"claude"`
-	Antigravity Tool    `toml:"antigravity"`
-	Web         Web     `toml:"web"`
+	Instance    Instance `toml:"instance"`
+	General     General  `toml:"general"`
+	Quota       Quota    `toml:"quota"`
+	Notify      Notify   `toml:"notify"`
+	Codex       Tool     `toml:"codex"`
+	Grok        Tool     `toml:"grok"`
+	Cursor      Tool     `toml:"cursor"`
+	Devin       Tool     `toml:"devin"`
+	ZCode       Tool     `toml:"zcode"`
+	Kimi        Tool     `toml:"kimi"`
+	Claude      Tool     `toml:"claude"`
+	Antigravity Tool     `toml:"antigravity"`
+	Web         Web      `toml:"web"`
+}
+
+type Instance struct {
+	Name string `toml:"name"`
 }
 
 type General struct {

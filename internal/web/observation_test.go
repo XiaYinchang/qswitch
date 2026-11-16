@@ -65,6 +65,7 @@ func TestProbeFailureHTTPReportsRetainedQuota(t *testing.T) {
 		raw, _ := json.Marshal(map[string]string{"tool": tc.tool, "id": tc.id})
 		req := httptest.NewRequest(http.MethodPost, "/api/probe", strings.NewReader(string(raw)))
 		req.Host = "127.0.0.1:7432"
+		req.Header.Set(instanceHeader, a.Instance().ID)
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, req)
 		var result struct {
@@ -95,8 +96,8 @@ func TestProbeFailureHTTPReportsRetainedQuota(t *testing.T) {
 	if cursor.Class != "expired" || !cursor.QuotaStale || cursor.LastProbeClass != "expired" || len(cursor.Buckets) != 2 || cursor.Buckets[0].UsedPct != 25 {
 		t.Fatalf("expired Cursor quota not marked historical: %+v", cursor)
 	}
-	if bot.Class != "expired" || !bot.QuotaStale || bot.RemainingPct != nil {
-		t.Fatalf("derived Bot lost expired auth state: %+v", bot)
+	if bot.Class != "unknown" || !bot.QuotaStale || bot.RemainingPct != nil {
+		t.Fatalf("failed Bot request did not become unknown: %+v", bot)
 	}
 }
 

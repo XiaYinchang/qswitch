@@ -1,26 +1,26 @@
 # qswitch
 
-本机多账号配额轮换器：把 Codex / Grok / Cursor / Devin CLI / Kimi Code / Antigravity 的官方登录收进加密仓库，当前号用尽后自动切到下一个有余量的号。Antigravity 仅在 Gemini 与第三方模型两组额度均耗尽时自动切号。Devin 展示套餐及适用的日/周额度；ZCode 桌面 Coding Plan 支持独立的订阅监控。
+本机多账号配额轮换器：把 Codex / Grok / Cursor / Devin CLI / Kimi Code / Claude Code / Antigravity 的官方登录收进加密仓库，当前号用尽后自动切到下一个有余量的号。Antigravity 仅在 Gemini 与第三方模型两组额度均耗尽时自动切号。Devin 展示套餐及适用的日/周额度；ZCode 桌面 Coding Plan 支持独立的订阅监控。
 
 硬约束：
 
-- 正在生成不杀。Antigravity 等待原生 App 和 CLI 会话空闲后统一更新认证，不结束客户端进程。其他工具切号时：空闲后结束对应 CLI；关掉并重启 ChatGPT.app / Cursor.app / Grok Bot.app；写入官方登录文件。Cursor 只改 `cursorAuth/*`，不碰聊天和 13GB 状态库。普通 CLI 不自动重启；通过 `qswitch run claude` 启动的受管会话保存工作目录和会话 ID，在受控切号后恢复原对话。
+- 正在生成不杀。Antigravity 等待原生 App 和 CLI 会话空闲后统一更新认证，不结束客户端进程。其他工具只在有可靠空闲证据时结束对应 CLI 并写入官方登录文件。无法验证 Codex/ChatGPT 或 Cursor 桌面生成状态时，要求先自行退出桌面 App；Grok CLI 切号不改 Grok Bot。Cursor 只改认证字段，不替换整个状态库和聊天。普通 CLI 不自动重启；通过 `qswitch run claude` 启动的受管会话保存工作目录和会话 ID，在受控切号后恢复原对话。
 - 关闭桌面前先确认 CLI 可以切换，`--cli-only --kill-cli` 同样必须等待空闲。关闭桌面后若切换失败，会尝试重新打开原应用，并保留切换和重启错误。已排队的耗尽切换若遇到账号恢复、当前账号变化或自动切换关闭，会取消。
 - 保活、探测、切号和删除按工具互斥；等待锁后重新读取凭据，避免重复使用轮换的 refresh token。daemon 每个工具独立调度，一个工具的慢请求不延误其他工具的收录、探测与待切换执行。保活临时失败保留已有配额并等待 2 分钟再试；永久失效标记需要重新登录，并使用较长的认证退避。保活与配额查询使用独立退避，查询接口故障不阻断安全续期。daemon 每 2 秒重载配置，关闭自动切换不必重启服务。
 - 本地日志采用配额事件的时间，旧事件不会覆盖更新的探测结果或刚切换的账号。没有事件时间的旧格式日志只在尚未探测或切号时作为初始线索。
 - 配额接口认证成功但无法按工具协议识别额度时，将历史登录失效改为用量未知；已有明确配额仍保留。网络失败保留已知状态并退避。Antigravity 例外：未知或失败会将当前配额标为未知，旧记录不再授权自动切换。
-- 自动切号只使用最近一次有效的配额观测；历史“正常”不能覆盖后续查询失败。候选号的证据过期时先核验，待切任务执行前也会复查，失败退避期间不反复请求。除 Antigravity 外，当前号确认耗尽后，后续查询失败或被限流不推翻这一结论：在接口给出的重置时间前（ChatGPT 为下一次恢复检查前）照常排队并完成切号。页面用量条的颜色和百分比只表示已知用量；查询失败、历史记录及记录时间单独说明。当前账号超过查询上限、闲置账号超过 30 分钟，另留一个后台调度周期后，旧记录会隐藏“正常”等状态并标为历史数据；跨过额度重置时间也须重新确认。除 Antigravity 外，确认耗尽的记录在重置前一直有效，不标为历史数据，即使之后的查询失败。Antigravity 只使用最近一次完整、成功且仍有效的双组额度结果；后续查询失败、限流、缺失窗口或阻断窗口的重置时间未知时，停止据此排队或执行自动切换，等退避结束并重新核验。页面的“刷新”“刷新用量”和 `qswitch probe` 不查询确认耗尽、尚未重置的号，也不重复查询 1 分钟内查过的号，避免连续刷新把查询接口打到限流；单个账号的“查询”按钮照常查询。
+- 自动切号只使用最近一次有效的配额观测；历史“正常”不能覆盖后续查询失败。候选号的证据过期时先核验，待切任务执行前也会复查，失败退避期间不反复请求。除 Antigravity 外，当前号确认耗尽后，后续查询失败或被限流不推翻这一结论：在接口给出的重置时间前（ChatGPT 为下一次恢复检查前）照常排队并完成切号。页面用量条的颜色和百分比只表示已知用量；查询失败、历史记录及记录时间单独说明。当前账号超过查询上限、闲置账号超过 30 分钟，另留一个后台调度周期后，旧记录会隐藏“正常”等状态并标为历史数据；跨过额度重置时间也须重新确认。除 Antigravity 外，确认耗尽的记录在重置前一直有效，不标为历史数据，即使之后的查询失败。Antigravity 只使用最近一次完整、成功且仍有效的双组额度结果；后续查询失败、限流、缺失窗口或阻断窗口的重置时间未知时，停止据此排队或执行自动切换，等退避结束并重新核验。页面的“查询额度”和 `qswitch probe` 不查询确认耗尽、尚未重置的号，也不重复查询 1 分钟内查过的号，避免连续刷新把查询接口打到限流；单个账号的“查询”按钮照常查询。
 - 多个候选号都有余量时，严格按最长额度窗口（如周额度）的重置时间先后选号，先用掉即将作废的余量，接近上限的号也不例外；重置时间已知的号排在未知的前面；重置时间相同或都未知时，先选“正常”再选“接近上限”，再选用量最低的号。
 - Claude 受管会话的当前号还有额度时，如果另一个号的最长窗口在 12 小时内重置、还剩至少 10%、而且比当前号先重置，daemon 会主动切过去先用掉它：等所有受管会话都空闲（没有进行中的 turn、后台任务、定时任务或正在编辑的草稿）才开始，开始前会再查一次那个号；刚开始就有会话变忙，立刻放开它、稍后再试，不会扣住任何会话的输入。条件不再成立时取消，切号日志写明原因。刚切过号的 10 分钟内不做这种切换。
 - Grok 通过官方 `GET /v1/billing?format=credits` 读取当前共享额度，并显示周/月周期和重置时间。与官方 `/usage` 一致，完整有效的统一计费周期省略百分比时按 0% 处理；空配置、无效周期或错误字段仍未知。只使用当前账期，不把历史用量或按量付费比例当作套餐比例；达到 100% 才判套餐耗尽，99.9% 不提前切号。有可用预付费余额或按量额度时仍保留可用状态。
-- Codex/Grok 的 `--cli-only` 不恢复桌面快照。完整恢复先验证快照，桌面写入或最后的 CLI 写入失败时回滚受影响文件；回滚失败会明确报错。这不包含进程或主机突然中断后的自动恢复。
-- 查配额按工具适配，不把裸 429 当作用尽。Codex 看会话 JSONL 的 `rate_limits` / `usage_limit_reached`；Grok 看本地 `billing: fetched credits config` 和 HTTP 402 `usage balance exhausted`；Cursor 看 `GetCurrentPeriodUsage` 的 Auto（自家模型）与高级模型；Grok Bot 周额度走 `GetSandUsageStatus`，页面上和 Codex/Grok/Cursor 并列。忽略 `resource_exhausted`（那是容量）。当前账号按消耗速度在默认 5–15 分钟内查询，独立于本地日志更新；闲置账号约每 30 分钟更新，每个工具每轮最多查一个，优先最久未查询的账号，`probe_idle_accounts=false` 可关闭。ChatGPT 用尽号不按显示的重置时间死等（窗口可能提前恢复），大约每 30 分钟点探一次；其他工具耗尽后仍等到显示的重置时间再查。普通查询连续失败按 2、4、8、15 分钟退避，成功后清零；429/503 的有效 `Retry-After` 会作为最短等待时间。`http_backoff` 保留为认证失效的较长退避。
+- Codex/Grok 只恢复已核实身份的 CLI 凭据，不再收录或恢复无法绑定账号的桌面浏览器快照，旧快照中的此类附录也不使用。各可切换工具在凭据写入或状态提交失败时撤销已完成的文件修改；Cursor 仅撤销受管认证字段并保留数据库其他变化。回滚失败会明确报错；这不等同于进程或主机突然中断后的完整切号恢复。
+- 查配额按工具适配，不把裸 429 当作用尽。Codex 看会话 JSONL 的 `rate_limits` / `usage_limit_reached`；Grok 看本地 `billing: fetched credits config` 和 HTTP 402 `usage balance exhausted`；Cursor 看 `GetCurrentPeriodUsage` 的 Auto（自家模型）与高级模型；Grok Bot 周额度走 `GetSandUsageStatus`，显示在关联 Cursor 的只读用量页中，使用自己的成功/失败状态和观测时间。忽略 `resource_exhausted`（那是容量）。当前账号按消耗速度在默认 5–15 分钟内查询，独立于本地日志更新；闲置账号约每 30 分钟更新，每个工具每轮最多查一个，优先最久未查询的账号，`probe_idle_accounts=false` 可关闭。ChatGPT 用尽号不按显示的重置时间死等（窗口可能提前恢复），大约每 30 分钟点探一次；其他工具耗尽后仍等到显示的重置时间再查。普通查询连续失败按 2、4、8、15 分钟退避，成功后清零；429/503 的有效 `Retry-After` 会作为最短等待时间。`http_backoff` 保留为认证失效的较长退避。
 - Cursor 桌面和 cursor-agent 共用同一套 token：`switch cursor` 会把选中账号同时写进 IDE 和 CLI。
 - 官方客户端登录第二个号时，`qswitchd` 会自己收进仓库，不必再跑 `qswitch capture`。
 - ChatGPT 闲置号会保活。加号请用 `qswitch login codex`：优先拉起本机官方 `codex login --device-auth`（隔离 `CODEX_HOME`，强制 file 存储，不改当前 `auth.json` / 不 logout）。流量、轮询间隔和换票格式与官方 CLI 相同。在 ChatGPT.app 里切换账号等于官方 logout，会作废上一份 refresh。
 - Grok 加号同样走 Device Code：`qswitch login grok` 优先拉起本机官方 `grok login --device-auth`（隔离 `GROK_HOME`，不改当前 `auth.json` / 不 logout）。页面加号走同一套 `auth.x.ai` device code。不要在当前 grok 里换号或 `grok logout`。
 - 同一登录下的多个 workspace 共用当前 live 的 access token 去查用量；不同邮箱的 refresh_token 按官方 OAuth 刷新写回仓库。换号时若仍是同一 Gmail，会把 live token 合并进目标 workspace。
-- Grok 闲置号同样保活：access 大约 6 小时过期，官方 CLI 会在到期前用 `refresh_token` 向 `auth.x.ai` 换票并轮换 refresh。仓库里的闲置号按同一条 OIDC 刷新写回；当前 Grok CLI 运行时由官方客户端续期；CLI 已退出时，qswitch 持有官方 `auth.json.lock` 并重读凭据后续期，轮换结果同时写回登录文件和加密仓库。Grok Bot.app 运行不阻断这项 CLI 保活。Cursor 桌面/CLI 存的是约 60 天的 session JWT，access 与 refresh 是同一张票，没有可安全调用的续期接口，过期或登出作废后只能重新登录。
+- Grok 闲置号同样保活：access 大约 6 小时过期，官方 CLI 会在到期前用 `refresh_token` 向 `auth.x.ai` 换票并轮换 refresh。仓库里的闲置号按同一条 OIDC 刷新写回；当前 Grok CLI 运行时由官方客户端续期；CLI 已退出时，qswitch 持有官方 `auth.json.lock` 并重读凭据后续期，轮换结果同时写回登录文件和加密仓库。Grok Bot.app 运行不阻断这项 CLI 保活。Cursor 桌面/CLI 存的是约 60 天的 session JWT，access 与 refresh 是同一张票，当前未实现可核验的安全续期接口，过期或登出作废后需要重新登录。
 
 ## Antigravity 桌面 App 与 CLI
 
@@ -128,7 +128,7 @@ qswitch run claude --resume-continuation=continue --dangerously-skip-permissions
 ## 新增订阅
 
 - **ZCode**：读取桌面客户端 `~/.zcode/v2/credentials.json` 中当前 BigModel / Z.ai 个人 Coding Plan，支持官方加密格式。使用官方 `/api/monitor/usage/quota/limit`，显示套餐、5 小时/周模型额度及月度 MCP 额度。MCP 用尽不误判模型额度耗尽；切换套餐后删除旧窗口。当前仅监控订阅，账号在 ZCode 中切换；不修改独立的 ZCode CLI 配置。
-- **Kimi Code**：读取 `~/.kimi-code/credentials/kimi-code.json`（支持 `KIMI_CODE_HOME`），用 `/coding/v1/me` 确认账号身份，优先显示接口返回的手机号，缺省时显示昵称或账号 ID；用 `/coding/v1/usages` 展示 5 小时、7 天、月度总额度及编程分项；`usages` 缺少某窗口时从响应的 `limits` 数组按窗口时长补齐（含月度窗口）。月度总额度另从桌面版 Kimi.app 订阅页同款的会员网关读取：只读复用桌面 App localStorage 里的网页会话（要求会话属于同一账号且未过期），不刷新、不轮换桌面登录，桌面 App 未运行或会话过期时自动跳过。编程分项不作为独立耗尽门限。切号只原子替换凭据文件，保留 config/hooks；有 Kimi 会话运行时阻断切换。闲置账号按官方 OAuth 协议续期写入加密仓库；当前 CLI 运行时由官方客户端续期，退出后由 qswitch 持有官方 OAuth 目录锁续期，并同时更新登录文件和加密仓库。续期门限跟随官方客户端，至少预留 5 分钟。身份无法确认时不收录、不抢用 refresh token。
+- **Kimi Code**：读取 `~/.kimi-code/credentials/kimi-code.json`（支持 `KIMI_CODE_HOME`），用 `/coding/v1/me` 确认账号身份，优先显示接口返回的手机号，缺省时显示昵称或账号 ID；用 `/coding/v1/usages` 展示 5 小时、7 天、月度总额度及编程分项；`usages` 缺少某窗口时从响应的 `limits` 数组按窗口时长补齐（含月度窗口）。月度总额度另从桌面版 Kimi.app 订阅页同款的会员网关读取：只读复用桌面 App localStorage 里的网页会话（要求会话属于同一账号且未过期），不刷新、不轮换桌面登录，桌面 App 未运行或会话过期时自动跳过。编程分项不作为独立耗尽门限。切号只原子替换凭据文件，保留 config/hooks；有 Kimi 会话运行时阻断切换。闲置账号按官方 OAuth 协议续期写入加密仓库；当前 CLI 运行时由官方客户端续期，退出后由 qswitch 持有官方 OAuth 目录锁续期，并同时更新登录文件和加密仓库。续期门限跟随官方客户端，至少预留 5 分钟。续期意图与结果先加密落盘，写回中断后可恢复；结果不明时不复用旧 refresh token。Windows 的 Kimi 续期锁与持久恢复尚未支持，由原生客户端续期后重新收录。身份无法确认时不收录、不抢用 refresh token。
 - **Claude Code**：管理 `~/.claude/.credentials.json` 中的官方 OAuth 登录（Linux/macOS 文件布局，支持 `CLAUDE_CONFIG_DIR`；macOS Keychain 存储暂不支持）。收录前用官方 `/api/oauth/profile` 确认账号 uuid、邮箱和套餐（Pro/Max/Team），确认失败不收录。用量走官方状态栏同款 `GET /api/oauth/usage`：5 小时与 7 天窗口决定是否耗尽（达到 100% 才切号），Sonnet/Opus 专项周额度和按量付费余额只展示、不作为切换门限。切号原子替换凭据文件并同步 `~/.claude.json` 的 oauthAccount 显示信息；普通非受管 Claude 不阻断自动或手动切号，qswitch 只协调受管会话。refresh token 一次性轮换：闲置账号续期只写加密仓库；当前账号在 CLI 退出后由 qswitch 复核文件内容续期，同时写回登录文件和仓库。
 
   收录以官方 profile 返回的身份为准，同时修正快照中的账号显示信息；切号也会修正旧快照的显示信息，并在缺少 `.claude.json` 时创建该文件。凭据写入失败会回滚账号元数据，回滚失败单独报错。
@@ -139,7 +139,7 @@ qswitch run claude --resume-continuation=continue --dangerously-skip-permissions
 
   **终端输入**：Claude Code 2.1.311 的 `auth login` 在 TTY 输入下会关闭回显，但其按行读取器不显示输入字符；这与普通 `claude` 登录 TUI 不同。qswitch 保留终端正常回显，通过系统 `cat` 子进程把输入送至官方登录程序的 stdin 管道，官方 OAuth、浏览器回调与换票流程保持由 Claude Code 执行。登录结束或取消时一并结束输入转发进程，不在后台等待用户敲回车。
 
-  **macOS 限制**：macOS 上凭据存系统 Keychain，qswitch 暂不支持直接管理。请在 Linux 服务器（如 novix）上运行 qswitch 管理 Claude 账号。
+  **macOS 限制**：原生 Keychain 登录暂不支持直接管理；已有受支持文件凭据布局时保留文件模式。页面按实际能力显示原因。新账号推荐在 Linux 服务器（如 novix）使用隔离授权入口。
 
   **tmux / Rex 无人值守续接（Claude Code 2.1.312+）**：在 tmux 窗格或 Rex 终端的项目目录里通过 `qswitch run claude` 启动，启用 `qswitch enable-auto --tool claude`，并保持 `qswitchd` 运行。使用默认 OAuth 配置与同一个 qswitch 数据目录；不接受 API key、云厂商、独立凭据目录、无持久化或会绕过受管插件的启动选项。只有 `qswitch run claude` 受管会话参与切号协调；普通 `claude` 进程不阻断切换。准备切号、确认退出和重启前，runner 都向 tmux 或 Rex 服务器核实自己仍在启动时的窗格或终端里：该终端的进程是 runner 的上级进程，且 runner 读的就是这个终端。核实不了的会话不参与切号。在 Rex 终端里开的 tmux 按 tmux 窗格核实。
 
@@ -203,19 +203,21 @@ qswitch sessions [--json] [--forget <runner>]    # 会话状态与异常恢复�
 qswitch enable-auto [--tool ...]                  # 打开自动切换（disable-auto 关闭）
 qswitch list
 qswitch status
-qswitch probe [--tool codex|grok|cursor|devin|zcode|kimi|claude]
+qswitch probe [--tool codex|grok|cursor|devin|zcode|kimi|claude|antigravity] [--account <账号ID或邮箱>]
 qswitch switch codex <id-or-email>
-qswitch switch cursor <id-or-email>                # 会关掉并重启 Cursor.app
-qswitch doctor
+qswitch switch cursor <id-or-email>                # 先退出 Cursor 桌面 App，随后同时更新 IDE/CLI
+qswitch doctor [--tool ...]
 qswitch serve [--addr 127.0.0.1:7432]
 qswitch web set-password <用户名> [--stdin]     # 页面登录密码，见「页面登录」
 
-scripts/deploy.sh [--ref <commit>] [novix|macmini ...]   # 新 clone 构建并部署到两台机器，见下文
+scripts/deploy.sh --release <tag> --dry-run           # 核对发布包、实例状态和切号任务
+scripts/deploy.sh --release <tag>                     # 按 deploy/hosts.tsv 部署三台实例
+scripts/deploy.sh --release <tag> --check             # 只读核对版本和管理范围
 ```
 
 本机页面默认 `http://127.0.0.1:7432`（只绑 loopback）。`qswitchd` 起来后也能开；这时再跑 `qswitch serve` 会打印现成地址然后退出，不会跟 daemon 抢端口。用来看余量、收录当前登录、ChatGPT / Grok Device Code 加号、删除仓库里的号。页面上不会出现 token。
 
-`GET /api/health` 返回服务存活状态和构建版本；配额与账号状态以 `/api/overview` 为准。网页写入要求同源请求，命令行无 Origin 的本地请求仍可使用。
+`GET /api/health` 返回服务存活状态，以及 `instance.id/name/version/os/managed_tools`；配额与账号状态以 `/api/overview` 为准。所有 `POST /api/*` 必须带健康接口返回的 `X-Qswitch-Instance`，缺失返回 400、实例不符返回 409；浏览器写入还要求同源。命令行无 Origin 的本地请求也需要实例标识。
 
 普通 Git 工作区构建自动从 Go 嵌入的 VCS 信息读取提交号，未提交改动带 `-dirty`；发布构建可通过 `-ldflags "-X qswitch/internal/buildinfo.Version=<release>"` 显式指定版本。无 VCS 信息且未指定版本时显示 `dev`。CLI 的 `version`、daemon 的 `--version`、健康接口与页面标题使用同一个版本标识。
 
@@ -225,9 +227,23 @@ scripts/deploy.sh [--ref <commit>] [novix|macmini ...]   # 新 clone 构建并�
 
 `qswitch web set-password <用户名>` 设置页面密码（至少 10 个字符；交互输入不回显，`--stdin` 从标准输入读一行给脚本用）。密码以 PBKDF2-SHA256 存在 `~/.qswitch/web-auth.json`（0600），daemon 在一秒内自动读到，不用重启。密码只管经反向代理（Deck）和公网监听进来的请求：这些请求要先登录才能看页面和 `/api/*`，只有 `GET /api/health` 不用；脚本仍可用 `Authorization: Bearer <[web] token>`，`?token=` 不再接受。直接打到 loopback 监听的请求（本机页面、`ssh -N -L 7432:127.0.0.1:7432 <host>` 隧道）从不要密码：能到这里的人已经通过了本机或 SSH 登录，此时页面也不显示退出登录。登录态是 30 天的 HttpOnly Cookie，由随密码一起轮换的密钥签名：改密码后所有浏览器都要重新登录，daemon 重启不掉线，「退出登录」只清当前浏览器。同一来源连续输错 5 次暂停登录 15 分钟，登录成功、失败暂停都记一行日志。页面上不会出现密码和 token。
 
-### 经 Deck 访问（novix）
+### 多环境与 Deck
 
-novix 的页面挂在 `https://deck.xiayinchang.top/qswitch/`，Deck 首页有入口卡片。链路是：novix 上的用户单元 `qswitch-tunnel.service`（`contrib/deck/qswitch-tunnel.service`）用专用密钥向 lisa-hk 建反向 SSH 隧道 `-R 127.0.0.1:7432:127.0.0.1:7432`，lisa-hk 上的 `qswitch-tunnel` 账号只允许这一个 remote forward（`contrib/deck/sshd-qswitch-tunnel.conf`），lisa-hk 的 nginx 把 `deck.xiayinchang.top/qswitch/` 代理到隧道并带上 `X-Forwarded-Host / -Proto / -Prefix / -For`（`contrib/deck/nginx-deck-qswitch.conf`）。qswitch 只信任来自 loopback 对端的这几个头，用它们判断同源、给 Cookie 加 `Secure` 和 `Path=/qswitch`、按真实来源计登录失败；页面里的请求都是相对路径，挂在任何前缀下都能用。经代理的请求在既没有密码也没有 token 时一律 403。本机仍可用 `ssh -N -L 7432:127.0.0.1:7432 novix` 打开 `http://127.0.0.1:7432`，不要登录。
+各主机是独立实例，管理该主机上的客户端和账号；环境目录只保存名称、网址和实例 ID。切换环境会打开目标的完整页面，并核对 `expected_instance`；实例不符时阻止登录和写操作。账号凭据、网页登录密码和 Cookie 不同步，多台机器上的同一个账号也不合并计算额度。
+
+| 环境 | 入口 | daemon 管理范围 |
+|---|---|---|
+| novix | [Deck / qswitch](https://deck.xiayinchang.top/qswitch/) | 全部适配器 |
+| Mac mini | [Deck / qswitch-mini](https://deck.xiayinchang.top/qswitch-mini/) | 全部适配器 |
+| MacBook | [Deck / qswitch-book](https://deck.xiayinchang.top/qswitch-book/) | Antigravity |
+
+`qswitchd --tool <tool>` 固定该 daemon 的范围：工作线程、总览和全部 Web 操作一致，范围之外的操作直接拒绝。CLI 的单次命令仍可按明确的 `--tool` 在本机独立运行；非法或缺值的工具参数会在打开账号存储前报错。
+
+实例 ID 首次启动随机生成并持久保存在数据目录；已有 ID 损坏时拒绝启动，不静默生成新身份。显示名称来自 `[instance].name`，缺省使用主机名。页面的“环境管理”集中编辑导航目录，不承载跨机操作或账号代理。
+
+三条入口均由 lisa-hk 的 nginx 终止 TLS，通过各主机独立密钥的反向 SSH 隧道连到本机 loopback。服务器只允许对应 key 监听自己的端口：novix 7432、Mini 7433、Book 7434。Mac 的 launchd 和 novix 的 systemd 在连接断开后重连；主机休眠期间页面明确报不可达。模板在 `contrib/deck/`。
+
+代理传递 `X-Forwarded-Host / -Proto / -Prefix / -For`，qswitch 只信任来自 loopback 对端的这些头。三个入口使用兄弟路径，Cookie 各有自己的 Path、签名密钥和登录；不使用父子路径叠放同名 Cookie。Cookie Path 只负责请求路由，不是安全隔离边界。未经登录只能读取无账号信息的健康接口；没有密码和 token 时代理请求拒绝访问。
 
 公网暴露：`[web] addr` 设为非 loopback 地址时必须先设密码或 `[web] token`，否则拒绝启动；这时所有请求都要登录或 Bearer，Origin 同源校验照常生效。明文 HTTP 下密码会经过链路，只应放在 TLS 反向代理之后。
 
@@ -240,7 +256,9 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.qswitch.plist
 
 launchd 样例见 `contrib/launchd/`（占位符，须用 `qswitch init` 生成带本机路径的 plist）。默认 `KeepAlive=false`，先确认 Keychain 无弹窗。
 
-日常升级两台机器用 `scripts/deploy.sh [--ref <commit>] [novix|macmini ...]`，在 Mac mini 上运行：从 origin 新 clone 指定提交（默认 `origin/main`）构建 linux/amd64 和 darwin/arm64，核对嵌入的提交号和校验和；目标机有排队的切号就停下；否则把两个程序放到 `~/.local/bin` 替换并重启 daemon，60 秒内健康接口没报出新版本就换回备份重启；之后等第一次额度探测再删备份，并报告 novix 上还没换到新程序的受管会话 runner（它们空闲时自己升级）。首次安装仍按下面的步骤手动做。
+日常升级使用显式发布标签和 `deploy/hosts.tsv` 清单。先执行 `scripts/deploy.sh --release <tag> --dry-run`，再执行同样命令去掉 `--dry-run`。脚本从 GitHub Release 下载平台制品并校验 SHA-256，停止 daemon 后再次确认没有待切任务，原子替换两个程序并重启；校验实例 ID、版本、管理范围和总览，稳态通过后删除回滚文件，写入本机 `deployment.json`。失败会恢复原程序；回滚也失败时保留恢复文件并明确报错。安装不改账号或自动切换设置，也不需要先登录供应商账号。已有受管 Claude runner 沿用空闲自升级机制，不强制结束正在工作的会话。
+
+构建和测试在 devbox 或 CI 执行；Mac 只安装已校验制品。发布包覆盖 macOS Intel/Apple Silicon、Linux x64/ARM64、Windows x64；各工具可用能力仍以当前平台后端返回的 capability 为准。
 
 Linux 服务器（如只跑 Claude Code 的 VPS）用 systemd，样例见 `contrib/systemd/`：
 

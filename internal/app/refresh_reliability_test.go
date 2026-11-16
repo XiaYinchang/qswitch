@@ -191,7 +191,7 @@ func TestManualProbeCanRetryRefreshDuringBackoff(t *testing.T) {
 			a, blob, _ := parkedRefreshAccount(t, tool)
 			refreshes := 0
 			a.HTTP.Client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-				status, body := 200, `{"rate_limit":{"primary_window":{"used_percent":12}}}`
+				status, body := 200, `{"rate_limit":{"primary_window":{"used_percent":12},"secondary_window":{"used_percent":0}}}`
 				if tool == adapter.Grok {
 					body = `{"config":{"creditUsagePercent":12}}`
 				}

@@ -127,8 +127,40 @@ func (a *App) keepAliveClaudeLocked(ctx context.Context, b adapter.Blob, force, 
 		return b, c.AccessToken, nil
 	}
 	if liveErr == nil {
-		// The parked identity differs from live; the live CLI owns its own
-		// renewal, so only the parked snapshot is refreshed here.
+		// Different opaque tokens do not prove different accounts: the native
+		// CLI may already have rotated this account's one-time refresh token.
+		if a.HTTP.Client == nil && secutil.InTest() {
+			return b, "", errors.New("claude: profile HTTP client is required in tests")
+		}
+		raw, status, err := a.HTTP.ClaudeProfile(ctx, live.AccessToken)
+		if err != nil || status != 200 {
+			return b, "", a.recordRefreshResult(adapter.Claude, b.Identity.StableID, false, errors.New("claude: cannot establish live account identity"))
+		}
+		liveID, _, _, _ := quota.ClaudeIdentity(raw)
+		if liveID == "" {
+			return b, "", a.recordRefreshResult(adapter.Claude, b.Identity.StableID, false, errors.New("claude: live profile missing account uuid"))
+		}
+		if liveID == b.Identity.StableID {
+			raw, readErr := os.ReadFile(a.Adapters[adapter.Claude].LivePaths(a.UserHome)[0])
+			current, parseErr := claude.ParseCreds(raw)
+			if readErr != nil || parseErr != nil || !sameClaudeTokens(live, current) {
+				return b, "", errors.New("claude: live credentials changed during identity verification")
+			}
+			var env map[string]json.RawMessage
+			if err := json.Unmarshal(b.Payload, &env); err != nil {
+				return b, "", err
+			}
+			env["credentials_json"], _ = json.Marshal(string(raw))
+			b.Payload, err = json.Marshal(env)
+			if err != nil {
+				return b, "", err
+			}
+			if err := a.saveBlob(b); err != nil {
+				return b, "", err
+			}
+			force = false // The rejected stored token has already been replaced.
+			return a.keepAliveLiveClaudeLocked(ctx, b, live, force, bypassBackoff)
+		}
 	} else if !os.IsNotExist(liveErr) {
 		return b, "", a.recordRefreshResult(adapter.Claude, b.Identity.StableID, false, errors.New("claude: cannot read live credentials"))
 	}
