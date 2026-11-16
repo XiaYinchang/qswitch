@@ -506,13 +506,14 @@ func (s *Server) loginPage(w http.ResponseWriter, status int, x external, user, 
 	h.Set("Content-Type", "text/html; charset=utf-8")
 	h.Set("Cache-Control", "no-store")
 	h.Set("X-Qswitch", "1")
-	h.Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
+	h.Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; manifest-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
 	w.WriteHeader(status)
 	errLine := ""
 	if msg != "" {
 		errLine = `<p class="err" role="alert">` + html.EscapeString(msg) + `</p>`
 	}
-	fmt.Fprintf(w, loginHTML, x.path("/login"), html.EscapeString(user), errLine, lockAfter, int(lockFor/time.Minute))
+	page := fmt.Sprintf(loginHTML, x.path("/login"), html.EscapeString(user), errLine, lockAfter, int(lockFor/time.Minute))
+	fmt.Fprint(w, strings.Replace(page, iconPlaceholder, iconLinks(x), 1))
 }
 
 const loginHTML = `<!DOCTYPE html>
@@ -521,6 +522,7 @@ const loginHTML = `<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>登录 · qswitch</title>
+<!-- qswitch-icons -->
 <style>
   :root { --bg: #111318; --card: #1a1d24; --line: #2a2e38; --text: #e8eaed; --muted: #9aa0a6; --bad: #f07178; --live: #7aa2f7; }
   * { box-sizing: border-box; }
