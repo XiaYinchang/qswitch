@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"os"
@@ -107,21 +108,30 @@ func TestDisabledAutoStillProbesAndDoesNotSwitch(t *testing.T) {
 	}
 }
 
-func TestEnvironmentDirectoryContainsMetadataAndRejectsCredentials(t *testing.T) {
+func TestEnvironmentDirectoryContainsOnlyInstanceMetadata(t *testing.T) {
 	a, _ := setup(t)
-	items := []Environment{{ID: "remote-fixture", Name: "远端测试", URL: "https://example.test/qsw/"}}
+	const id = "11111111111111111111111111111111"
+	items := []Environment{{ID: id, Name: "远端测试"}}
 	if err := a.SetEnvironments(items); err != nil {
 		t.Fatal(err)
 	}
-	for _, u := range []string{"https://user:secret@example.test/", "https://example.test/?token=secret", "javascript:alert(1)"} {
-		items[0].URL = u
+	for _, badID := range []string{"", "remote-fixture", "../escape", strings.Repeat("1", 31), strings.Repeat("1", 33), strings.Repeat("g", 32), strings.Repeat("A", 32)} {
+		items[0].ID = badID
 		if err := a.SetEnvironments(items); err == nil {
-			t.Fatalf("accepted credential or non-navigation URL %q", u)
+			t.Fatalf("accepted invalid instance ID %q", badID)
 		}
 	}
 	got, err := a.Environments()
-	if err != nil || len(got) != 1 || got[0].URL != "https://example.test/qsw/" {
+	if err != nil || len(got) != 1 || got[0].ID != id {
 		t.Fatal("invalid write replaced directory")
+	}
+	raw, err := os.ReadFile(filepath.Join(a.DataDir, "environments.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields []map[string]any
+	if json.Unmarshal(raw, &fields) != nil || len(fields) != 1 || len(fields[0]) != 2 || fields[0]["id"] != id || fields[0]["name"] != "远端测试" {
+		t.Fatal("environment directory persisted more than instance metadata")
 	}
 	st, err := os.Stat(filepath.Join(a.DataDir, "environments.json"))
 	if err != nil {
@@ -129,6 +139,30 @@ func TestEnvironmentDirectoryContainsMetadataAndRejectsCredentials(t *testing.T)
 	}
 	if runtime.GOOS != "windows" && st.Mode().Perm()&0077 != 0 {
 		t.Fatal("environment directory is not private")
+	}
+}
+
+func TestOverviewDoesNotReadEnvironmentDirectory(t *testing.T) {
+	a, _ := setup(t)
+	if err := os.WriteFile(filepath.Join(a.DataDir, "environments.json"), []byte(`invalid-directory`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(a.Overview())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fields["environments"]; ok {
+		t.Fatal("business overview contains the global environment directory")
+	}
+	if _, ok := fields["environments_error"]; ok {
+		t.Fatal("global directory errors leaked into the business overview")
+	}
+	if len(fields["tools"]) == 0 {
+		t.Fatal("invalid directory interrupted the business overview")
 	}
 }
 

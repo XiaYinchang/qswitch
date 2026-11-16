@@ -668,41 +668,19 @@
         margin: 10px 0;
         overflow-wrap: anywhere;
       }
-      .env-intro {
-        font-size: 13px;
-        color: var(--muted);
-        margin: 6px 0 22px;
-      }
-      .environment-rows {
-        display: grid;
-        gap: 12px;
-      }
+      .environment-rows { display: grid; gap: 12px; }
       .environment-row {
-        display: grid;
-        grid-template-columns:
-          160px minmax(180px, 1fr) minmax(160px, 0.7fr)
-          auto;
-        gap: 12px;
-        padding: 16px;
-        border: 1px solid var(--line);
-        border-radius: 10px;
+        display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px;
+        padding: 16px; border: 1px solid var(--line); border-radius: 10px;
         background: var(--surface);
-        align-items: end;
       }
+      .environment-row span { color: var(--muted); font-size: 13px; }
       .field {
         display: grid;
         gap: 6px;
         min-width: 0;
         font-size: 12px;
         color: var(--muted);
-      }
-      .form-actions {
-        margin-top: 18px;
-        display: flex;
-        gap: 10px;
-      }
-      .environment-row button {
-        min-height: 40px;
       }
       .settings-page {
         max-width: 980px;
@@ -857,15 +835,6 @@
         .quota-groups {
           grid-template-columns: 1fr;
         }
-        .environment-row {
-          grid-template-columns: 1fr 1fr;
-        }
-        .environment-row .field:nth-child(2) {
-          grid-column: 2;
-        }
-        .environment-row button {
-          justify-self: end;
-        }
         .connection {
           font-size: 11px;
         }
@@ -1004,16 +973,6 @@
         .more > summary {
           min-height: 44px;
         }
-        .environment-row {
-          grid-template-columns: minmax(0, 1fr);
-          padding: 14px;
-        }
-        .environment-row .field:nth-child(2) {
-          grid-column: auto;
-        }
-        .environment-row button {
-          justify-self: start;
-        }
         .dialog {
           padding: 22px 18px;
         }
@@ -1067,6 +1026,7 @@
           class="ghost"
           data-act="refresh-state"
           data-focus="refresh-state"
+          id="refreshState"
         >
           刷新状态
         </button>
@@ -1171,6 +1131,11 @@
       // qswitch-ui-start
       const $ = (id) => document.getElementById(id);
       const state = {
+        gateway: null,
+        envID: "",
+        apiBase: "",
+        epoch: 0,
+        connecting: false,
         instance: null,
         expected:
           new URL(location.href).searchParams.get("expected_instance") || "",
@@ -1186,12 +1151,8 @@
         readSequence: 0,
         readController: null,
         environments: [],
-        envDirty: false,
-        envDraft: [],
         lastRead: 0,
         connectionError: "",
-        environmentsError: "",
-        environmentsMessage: null,
       };
       const ui = {
         accountNodes: new Map(),
@@ -1295,10 +1256,19 @@
         (ac.tool === "kimi"
           ? ac.phone || ac.display_name || ac.email
           : ac.email || ac.display_name || ac.phone) || "未提供账号名称";
-      const busy = (tool) => state.operations.has(actionTool(tool));
+      const requestContext = () => ({
+        envID: state.envID,
+        apiBase: state.apiBase,
+        epoch: state.epoch,
+      });
+      const isCurrent = (context) =>
+        context.epoch === state.epoch && context.envID === state.envID;
+      const operationKey = (tool, context = requestContext()) =>
+        context.envID + ":" + actionTool(tool);
+      const busy = (tool) => state.operations.has(operationKey(tool));
       const canWrite = () =>
         Boolean(
-          state.instance && state.trustedID && state.online && !state.fatal,
+          state.instance && state.trustedID === state.envID && state.online && !state.fatal,
         );
       function clampPct(value) {
         if (value == null || value === "") return null;
@@ -1567,6 +1537,7 @@
         }
       }
       function renderConnection() {
+        $("refreshState").disabled = state.connecting;
         const el = $("connection");
         el.className =
           "connection " + (state.online && !state.fatal ? "online" : "offline");
@@ -1574,12 +1545,12 @@
           ? "实例不匹配"
           : state.online
             ? "已连接"
-            : "连接中断";
+            : state.connecting ? "连接中" : "连接中断";
         el.title = state.lastRead ? "最近更新 " + fmtTime(state.lastRead) : "";
         setNotice(
           $("globalNotice"),
           state.fatal ||
-            (!state.online
+            (!state.online && !state.connecting
               ? state.connectionError ||
                 "连接中断，操作已暂停；请刷新状态重试。"
               : ""),
@@ -1587,43 +1558,25 @@
         );
       }
       function environmentURL(env) {
-        try {
-          const u = new URL(env.url, location.href);
-          if (
-            !["http:", "https:"].includes(u.protocol) ||
-            u.username ||
-            u.password ||
-            !env.id
-          )
-            return "";
-          u.searchParams.set("expected_instance", env.id);
-          return u.href;
-        } catch {
-          return "";
-        }
+        const url = new URL(location.href);
+        url.searchParams.set("env", env.id);
+        return url.pathname + url.search + url.hash;
       }
       function renderEnvironmentNav() {
-        const entries = state.environments.slice();
-        if (state.instance && !entries.some((e) => e.id === state.instance.id))
-          entries.unshift({
-            id: state.instance.id,
-            name: state.instance.name,
-            url: location.href,
-          });
+        const logout = new URL("logout", location.href);
+        if (state.envID) logout.searchParams.set("env", state.envID);
+        if (state.gateway?.id) logout.searchParams.set("expected_instance", state.gateway.id);
+        $("logoutForm").action = logout.pathname + logout.search;
         patchHTML(
           $("environmentNav"),
-          entries
-            .map((e) => {
-              const url = environmentURL(e);
-              return url
-                ? `<a class="environment" href="${attr(url)}" ${e.id === state.instance?.id ? 'aria-current="page"' : ""}>${attr(e.name || e.id)}</a>`
-                : "";
-            })
-            .join(""),
+          state.environments.map((env) =>
+            `<a class="environment" data-environment="${attr(env.id)}" href="${attr(environmentURL(env))}" ${env.id === state.envID ? 'aria-current="page"' : ""}>${attr(env.name || env.id)}</a>`,
+          ).join(""),
         );
-        if (state.instance)
-          $("instanceMeta").textContent =
-            `${state.instance.name} · ${state.instance.os || ""}\n${state.instance.version || ""}`;
+        const selected = state.environments.find((env) => env.id === state.envID);
+        $("instanceMeta").textContent = state.instance
+          ? `${state.instance.name} · ${state.instance.os || ""}\n${state.instance.version || ""}`
+          : selected?.name || "";
       }
       function renderNavigation() {
         const nav = $("toolNav"),
@@ -1664,8 +1617,10 @@
           );
       }
       function render() {
-        state.view = normalizedView(state.view);
-        replaceViewHash();
+        if (state.overview) {
+          state.view = normalizedView(state.view);
+          replaceViewHash();
+        }
         renderConnection();
         renderEnvironmentNav();
         renderNavigation();
@@ -1681,19 +1636,22 @@
         if (!tool) {
           patchHTML(
             root,
-            `<div class="empty"><strong>尚未添加账号</strong>${addableTools().length ? `<p>添加此环境的账号后，工具会显示在这里。</p><button class="primary" data-act="add-account" data-focus="empty-add-account" ${!canWrite() ? "disabled" : ""}>添加账号</button>` : "<p>当前实例没有可添加账号的工具。</p>"}</div>`,
+            !state.online
+              ? `<div class="empty"><strong>${state.connecting ? "正在连接环境" : "环境不可用"}</strong><p>${attr(state.fatal || state.connectionError || "请刷新状态重试。")}</p></div>`
+              : `<div class="empty"><strong>尚未添加账号</strong>${addableTools().length ? `<p>添加此环境的账号后，工具会显示在这里。</p><button class="primary" data-act="add-account" data-focus="empty-add-account" ${!canWrite() ? "disabled" : ""}>添加账号</button>` : "<p>当前实例没有可添加账号的工具。</p>"}</div>`,
           );
           ui.tool = "";
           ui.accountNodes.clear();
           return;
         }
         if (ui.tool !== tool.tool || !$("accountList")) {
+          root._html = null;
           root.innerHTML =
             '<div id="toolHeading"></div><div id="toolStatus"></div><div id="toolMessage" class="notice" role="status" aria-live="polite" hidden></div><div id="toolProblem" class="notice warn" role="status" hidden></div><div class="workspace" id="workspace"><div class="account-list" id="accountList" aria-label="已收录账号"></div><article class="account-detail" id="accountDetail" aria-labelledby="accountTitle"></article></div><div id="emptyAccounts"></div><div id="toolSettings"></div>';
           ui.tool = tool.tool;
           ui.accountNodes.clear();
         }
-        const op = state.operations.get(actionTool(tool.tool));
+        const op = state.operations.get(operationKey(tool.tool));
         $("workspace").setAttribute("aria-busy", Boolean(op));
         patchHTML(
           $("toolHeading"),
@@ -1853,11 +1811,10 @@
           throw new Error("返回数据来自其他实例，已停止操作。");
         state.instance = ov.instance;
         state.overview = ov;
-        state.environments = ov.environments || state.environments;
-        state.environmentsError = ov.environments_error || "";
         state.view = normalizedView(state.view || hashView());
         replaceViewHash();
         state.online = true;
+        state.connecting = false;
         state.connectionError = "";
         state.lastRead = Date.now() / 1000;
         render();
@@ -1869,12 +1826,17 @@
       }
       async function api(
         path,
-        { method = "GET", body, signal, timeout = 20000 } = {},
+        { method = "GET", body, signal, timeout = 20000,
+          context = requestContext(), global = false, cancel = false } = {},
       ) {
-        if (method !== "GET" && !canWrite())
-          throw new Error(
-            state.fatal || "尚未连接并核对目标实例，无法执行操作。",
-          );
+        // A detached request is only allowed to cancel an authorization that
+        // was started in its original environment; it cannot mutate accounts.
+        const cleanup = cancel && /^api\/login\/(codex|grok)\/cancel$/.test(path);
+        if (!global && (!context.envID || !context.apiBase))
+          throw new Error("尚未选择有效环境。");
+        if (method !== "GET" && !global && !cleanup &&
+            (!isCurrent(context) || !canWrite()))
+          throw new Error(state.fatal || "尚未连接并核对目标实例，无法执行操作。");
         const controller = new AbortController();
         let timedOut = false;
         const abort = () => controller.abort();
@@ -1886,154 +1848,159 @@
         }, timeout);
         try {
           const headers = { "Content-Type": "application/json" };
-          if (state.trustedID) headers["X-Qswitch-Instance"] = state.trustedID;
-          const res = await fetch(path, {
-            method,
-            headers,
+          const id = global ? state.gateway?.id : context.envID;
+          if (id) headers["X-Qswitch-Instance"] = id;
+          const url = global ? path : context.apiBase + path.replace(/^api\//, "");
+          const res = await fetch(url, {
+            method, headers,
             body: body === undefined ? undefined : JSON.stringify(body),
-            cache: "no-store",
-            signal: controller.signal,
+            cache: "no-store", signal: controller.signal,
           });
+          if (controller.signal.aborted) throw new Error("请求已取消");
           if (res.status === 401) {
-            const u = new URL("login", location.href);
-            if (state.expected || state.trustedID)
-              u.searchParams.set(
-                "expected_instance",
-                state.expected || state.trustedID,
-              );
-            location.assign(u.href);
-            throw new Error("登录已过期，请重新登录管理页面。");
+            if ((global || res.headers?.get("X-Qswitch-Login-Required") === "1") &&
+                (global || isCurrent(context))) {
+              const url = new URL("login", location.href);
+              if (state.expected || state.gateway?.id)
+                url.searchParams.set("expected_instance", state.expected || state.gateway.id);
+              if (state.envID) url.searchParams.set("env", state.envID);
+              url.hash = location.hash;
+              location.assign(url.href);
+            }
+            const reason = global || res.headers?.get("X-Qswitch-Login-Required") === "1"
+              ? "登录已过期，请重新登录管理页面。"
+              : "目标环境认证失败，请检查该环境的连接配置。";
+            if (!global && !cleanup && isCurrent(context)) disconnect(reason);
+            throw new Error(reason);
           }
           let data = {};
-          try {
-            data = await res.json();
-          } catch {}
+          try { data = await res.json(); } catch {}
+          if (controller.signal.aborted) throw new Error("请求已取消");
           if (!res.ok) {
             const message = data.error || `请求失败（${res.status}）`;
-            if (res.status === 409 && /instance|实例/i.test(message)) {
+            if (!global && isCurrent(context) && res.status === 409 && /instance|实例/i.test(message)) {
               state.fatal = message;
-              renderConnection();
+              disconnect(message);
             }
-            throw new Error(message);
+            if (!global && !cleanup && isCurrent(context) && [502, 503, 504].includes(res.status))
+              disconnect(message);
+            throw requestError(message,
+              method !== "GET" && method !== "HEAD" && data.result_unknown === true);
           }
           return data;
         } catch (e) {
           if (controller.signal.aborted) {
-            if (signal?.aborted)
-              throw requestError("请求已被较新的状态读取替代");
-            throw requestError(
-              timedOut
-                ? method === "GET"
-                  ? "读取状态超时，请重试。"
-                  : "请求超时，操作结果尚未确认。请刷新状态核对，不要重复提交。"
-                : "请求已取消",
-              method !== "GET",
-            );
+            if (signal?.aborted) throw requestError("请求已被较新的状态读取替代");
+            const reason = timedOut
+              ? method === "GET" ? "读取状态超时，请重试。"
+                : "请求超时，操作结果尚未确认。请刷新状态核对，不要重复提交。"
+              : "请求已取消";
+            if (!global && !cleanup && isCurrent(context)) disconnect(reason);
+            throw requestError(reason, method !== "GET");
           }
-          if (e instanceof TypeError)
-            throw requestError(
-              method === "GET"
-                ? "暂时无法连接服务，请重试。"
-                : "连接中断，操作结果尚未确认。请刷新状态核对，不要重复提交。",
-              method !== "GET",
-            );
+          if (e instanceof TypeError) {
+            const reason = method === "GET" ? "暂时无法连接服务，请重试。"
+              : "连接中断，操作结果尚未确认。请刷新状态核对，不要重复提交。";
+            if (!global && !cleanup && isCurrent(context)) disconnect(reason);
+            throw requestError(reason, method !== "GET");
+          }
           throw e;
         } finally {
           clearTimeout(timer);
           signal?.removeEventListener("abort", abort);
         }
       }
-      async function connect() {
+      function disconnect(reason) {
+        clearEnvironmentUI(false);
+        state.online = false;
+        state.connecting = false;
+        state.connectionError = reason;
+        state.overview = null;
+        state.instance = null;
+        state.trustedID = "";
+        state.selected.clear();
+        ui.accountNodes.clear();
+        ui.tool = "";
+        render();
+      }
+      async function connect(context = requestContext()) {
+        if (!isCurrent(context) || !context.apiBase) return false;
+        state.connecting = true;
+        renderConnection();
         try {
-          const health = await api("api/health", { timeout: 10000 });
+          const health = await api("api/health", { timeout: 10000, context });
+          if (!isCurrent(context)) return false;
           const id = health.instance?.id;
-          if (!id)
-            throw new Error("当前服务尚不支持实例核对，请升级 qswitchd。");
-          const expected = state.expected || state.trustedID;
-          if (expected && expected !== id) {
-            state.fatal = `目标实例不匹配：期望 ${expected}，当前连接为 ${health.instance.name || id}。请检查环境地址。`;
-            state.online = false;
-            renderConnection();
+          if (!id || id !== context.envID) {
+            state.fatal = "目标实例不匹配，已停止操作。请检查环境配置。";
+            disconnect(state.fatal);
             return false;
           }
           state.instance = health.instance;
           state.trustedID = id;
           state.fatal = "";
-          state.online = true;
-          renderConnection();
-          return await loadSnapshot();
+          // Writes stay disabled until a complete overview is accepted.
+          return await loadSnapshot(context);
         } catch (e) {
-          state.online = false;
-          state.connectionError = e.message;
-          renderConnection();
+          if (isCurrent(context)) disconnect(e.message);
           return false;
         }
       }
-      async function loadSnapshot() {
-        const sequence = ++state.readSequence,
-          revision = state.revision;
+      async function loadSnapshot(context = requestContext()) {
+        if (!isCurrent(context)) return false;
+        const sequence = ++state.readSequence, revision = state.revision;
         state.readController?.abort();
         const controller = new AbortController();
         state.readController = controller;
         try {
-          const ov = await api("api/overview", { signal: controller.signal });
-          if (sequence !== state.readSequence || revision !== state.revision)
+          const ov = await api("api/overview", { signal: controller.signal, context });
+          if (!isCurrent(context) || sequence !== state.readSequence || revision !== state.revision)
             return false;
           acceptOverview(ov);
           return true;
         } catch (e) {
-          if (sequence !== state.readSequence || controller.signal.aborted)
+          if (!isCurrent(context) || sequence !== state.readSequence || controller.signal.aborted)
             return false;
-          state.online = false;
-          state.connectionError = e.message;
           if (/其他实例/.test(e.message)) state.fatal = e.message;
-          renderConnection();
+          disconnect(e.message);
           return false;
         } finally {
           if (state.readController === controller) state.readController = null;
         }
       }
       async function mutate(tool, label, path, body, onSuccess) {
-        const key = actionTool(tool);
+        const context = requestContext(), key = operationKey(tool, context);
         const focusKey = document.activeElement?.dataset?.focus;
         if (state.operations.has(key)) return false;
         if (!canWrite()) {
           message(tool, state.fatal || "服务未连接，操作尚未执行。", true);
           return false;
         }
-        state.operations.set(key, { label });
+        const operation = { label };
+        state.operations.set(key, operation);
         state.revision++;
         render();
         try {
-          const result = await api(path, {
-            method: "POST",
-            body,
-            timeout: 95000,
-          });
+          const result = await api(path, { method: "POST", body, timeout: 95000, context });
+          if (!isCurrent(context)) return false;
           state.revision++;
-          const fresh = await loadSnapshot();
+          const fresh = await loadSnapshot(context);
+          if (!isCurrent(context)) return false;
           const success = onSuccess ? onSuccess(result) : label + "完成。";
-          message(
-            tool,
-            success +
-              (fresh
-                ? ""
-                : " 操作已返回成功，但页面状态未能更新；请刷新状态核对。"),
-            !fresh,
-          );
+          message(tool, success + (fresh ? "" : " 操作已返回成功，但页面状态未能更新；请刷新状态核对。"), !fresh);
           return true;
         } catch (e) {
+          if (!isCurrent(context)) return false;
           message(tool, e.message, true);
-          if (e.unknown) await loadSnapshot();
+          if (e.unknown) {
+            if (state.online) await loadSnapshot(context);
+            else await connect(context);
+          }
           return false;
         } finally {
-          state.operations.delete(key);
-          render();
-          if (
-            focusKey &&
-            (!document.activeElement ||
-              document.activeElement === document.body)
-          )
+          if (state.operations.get(key) === operation) state.operations.delete(key);
+          if (context.envID === state.envID) render();
+          if (isCurrent(context) && focusKey && (!document.activeElement || document.activeElement === document.body))
             restoreFocus(null, focusKey);
         }
       }
@@ -2072,7 +2039,7 @@
           "目标环境：" + (state.instance?.name || "");
         $("confirmAccept").textContent = label;
         $("confirmAccept").className = danger ? "danger" : "primary";
-        ui.confirm = { run, opener, focusKey: opener?.dataset?.focus };
+        ui.confirm = { run, opener, context: requestContext(), focusKey: opener?.dataset?.focus };
         $("confirmDlg").showModal();
         $("confirmCancel").focus();
       }
@@ -2106,87 +2073,12 @@
         }
       }
       function renderEnvironments() {
-        const root = $("root");
-        if (ui.tool === "environments" && state.envDirty) return;
-        if (ui.tool !== "environments") {
-          root.innerHTML =
-            '<div class="settings-page"><div class="page-heading"><div><h1>环境管理</h1><p class="env-intro">切换环境会打开对应实例，各环境独立管理本机账号。</p></div></div><div id="environmentMessage" class="notice" role="status" hidden></div><form id="environmentForm"><div id="environmentRows" class="environment-rows"></div><div class="form-actions"><button type="button" data-act="add-environment">添加环境</button><button class="primary" type="submit" id="saveEnvironments">保存目录</button></div></form><details class="details"><summary>当前实例信息</summary><div class="details-content" id="instanceDetails"></div></details></div>';
-          ui.tool = "environments";
-          if (!state.envDirty)
-            state.envDraft = state.environments.map((e) => ({ ...e }));
-        }
-        if (!state.envDirty)
-          state.envDraft = state.environments.map((e) => ({ ...e }));
-        renderEnvironmentRows();
-        if (state.environmentsMessage)
-          setNotice(
-            $("environmentMessage"),
-            state.environmentsMessage.text,
-            state.environmentsMessage.error,
-          );
-        else if (state.environmentsError)
-          setNotice($("environmentMessage"), state.environmentsError, true);
-        patchHTML(
-          $("instanceDetails"),
-          `<dl class="facts"><dt>名称</dt><dd>${attr(state.instance?.name)}</dd><dt>实例 ID</dt><dd><code>${attr(state.instance?.id)}</code></dd><dt>版本</dt><dd>${attr(state.instance?.version)}</dd><dt>系统</dt><dd>${attr(state.instance?.os)}</dd><dt>管理工具</dt><dd>${attr((state.instance?.managed_tools || []).map(toolTitle).join("、"))}</dd></dl>`,
-        );
-        $("saveEnvironments").disabled = !canWrite() || busy("environments");
-      }
-      function renderEnvironmentRows() {
-        patchHTML(
-          $("environmentRows"),
-          state.envDraft
-            .map(
-              (e, i) =>
-                `<div class="environment-row" data-env-row="${i}"><label class="field">显示名称<input name="name-${i}" value="${attr(e.name)}" maxlength="80" required data-env-field="name" data-focus="env-name:${i}"></label><label class="field">访问地址<input type="url" name="url-${i}" value="${attr(e.url)}" placeholder="https://example.com/qswitch/" required data-env-field="url" data-focus="env-url:${i}"></label><label class="field">目标实例 ID<input name="id-${i}" value="${attr(e.id)}" required spellcheck="false" data-env-field="id" data-focus="env-id:${i}" aria-label="目标实例 ID，可在目标环境的环境管理中查看"></label><button type="button" class="ghost danger" data-act="remove-environment" data-index="${i}">移除</button></div>`,
-            )
-            .join(""),
-        );
-      }
-      function collectEnvironmentDraft() {
-        state.envDraft = Array.from(
-          $("environmentRows").querySelectorAll("[data-env-row]"),
-        ).map((row) =>
-          Object.fromEntries(
-            Array.from(row.querySelectorAll("[data-env-field]")).map(
-              (input) => [input.dataset.envField, input.value.trim()],
-            ),
-          ),
-        );
-      }
-      function environmentMessage(text, error = false) {
-        state.environmentsMessage = { text, error };
-        setNotice($("environmentMessage"), text, error);
-      }
-      async function saveEnvironments(event) {
-        event.preventDefault();
-        if (busy("environments") || !canWrite()) return;
-        collectEnvironmentDraft();
-        state.operations.set("environments", { label: "保存目录" });
-        state.revision++;
-        $("saveEnvironments").disabled = true;
-        try {
-          const result = await api("api/environments", {
-            method: "POST",
-            body: { environments: state.envDraft },
-            timeout: 20000,
-          });
-          if (result.instance && result.instance.id !== state.trustedID)
-            throw new Error("保存结果来自其他实例。");
-          state.revision++;
-          state.environments = result.environments || state.envDraft;
-          state.envDraft = state.environments.map((e) => ({ ...e }));
-          state.envDirty = false;
-          state.environmentsError = "";
-          renderEnvironmentNav();
-          environmentMessage("环境目录已保存；账号与凭据没有跨环境传输。");
-        } catch (e) {
-          environmentMessage(e.message, true);
-        } finally {
-          state.operations.delete("environments");
-          if ($("saveEnvironments"))
-            $("saveEnvironments").disabled = !canWrite();
-        }
+        patchHTML($("root"),
+          `<div class="settings-page"><div class="page-heading"><h1>环境管理</h1></div><div class="environment-rows">${state.environments.map((env) =>
+            `<div class="environment-row"><a data-environment="${attr(env.id)}" href="${attr(environmentURL(env))}">${attr(env.name || env.id)}</a><span>${env.id === state.envID ? state.online ? "当前环境 · 已连接" : state.connecting ? "当前环境 · 连接中" : "当前环境 · 连接中断" : "未连接"}</span></div>`
+          ).join("")}</div><details class="details"><summary>当前实例信息</summary><div class="details-content"><dl class="facts"><dt>名称</dt><dd>${attr(state.instance?.name || state.environments.find((env) => env.id === state.envID)?.name || "")}</dd><dt>版本</dt><dd>${attr(state.instance?.version || "未知")}</dd><dt>系统</dt><dd>${attr(state.instance?.os || "未知")}</dd><dt>管理工具</dt><dd>${attr((state.instance?.managed_tools || []).map(toolTitle).join("、") || "未知")}</dd></dl></div></details></div>`);
+        ui.tool = "environments";
+        ui.accountNodes.clear();
       }
       function renderAccountPicker() {
         const tools = addableTools();
@@ -2214,13 +2106,13 @@
       }
       function openAddAccount(opener) {
         if (!canWrite() || !addableTools().length || $("loginDlg").open) return;
-        ui.login.mode = "picker";
-        ui.login.opener = opener;
-        ui.login.focusKey = opener?.dataset?.focus || "add-account";
-        ui.login.tool =
-          addableTools().find((tool) => tool.tool === state.view)?.tool ||
-          addableTools()[0].tool;
-        ui.login.id = "";
+        ui.login = {
+          mode: "picker", generation: ui.login.generation + 1,
+          context: requestContext(), opener,
+          focusKey: opener?.dataset?.focus || "add-account",
+          tool: addableTools().find((tool) => tool.tool === state.view)?.tool || addableTools()[0].tool,
+          id: "", timer: null, polling: false, starting: false,
+        };
         $("loginTitle").textContent = "添加账号";
         $("loginHint").textContent =
           "当前环境：" + (state.instance?.name || "");
@@ -2235,25 +2127,24 @@
       }
       async function startLogin(tool, opener) {
         if (!canWrite() || busy(tool)) return;
-        const login = ui.login;
-        if ($("loginDlg").open && login.mode === "picker") opener = login.opener;
-        login.mode = "device";
+        const previous = ui.login;
+        if ($("loginDlg").open && previous.mode === "picker") opener = previous.opener;
+        clearTimeout(previous.timer);
+        const login = ui.login = {
+          mode: "device", generation: previous.generation + 1,
+          context: requestContext(), id: "", tool, opener: opener || previous.opener,
+          focusKey: opener?.dataset?.focus || previous.focusKey,
+          expires: 0, polling: false, timer: null, starting: true,
+          operation: { label: "等待账号授权" },
+        };
+        const generation = login.generation;
         $("loginPicker").hidden = true;
         $("loginAuthorization").hidden = false;
-        login.generation++;
-        const generation = login.generation;
-        clearTimeout(login.timer);
-        login.id = "";
-        login.tool = tool;
-        login.opener = opener || login.opener;
-        login.focusKey = opener?.dataset?.focus || login.focusKey;
-        login.expires = 0;
-        login.polling = false;
-        state.operations.set(actionTool(tool), { label: "等待账号授权" });
+        state.operations.set(operationKey(tool, login.context), login.operation);
         render();
         $("loginTitle").textContent = `添加 ${toolTitle(tool)} 账号`;
         $("loginHint").textContent =
-          "在官方授权页输入一次性代码，当前客户端的登录保持不变。";
+          `当前环境：${state.instance?.name || ""}。在官方授权页输入一次性代码。`;
         $("loginCode").textContent = "…";
         $("copyLoginCode").disabled = true;
         $("loginUrl").hidden = true;
@@ -2265,24 +2156,22 @@
         if (!$("loginDlg").open) $("loginDlg").showModal();
         try {
           const r = await api("api/login/" + tool, {
-            method: "POST",
-            body: {},
-            timeout: 25000,
+            method: "POST", body: {}, timeout: 25000, context: login.context,
           });
-          if (generation !== login.generation) {
-            if (r.id)
-              await api("api/login/" + tool + "/cancel", {
-                method: "POST",
-                body: { id: r.id },
-              }).catch(() => {});
+          login.starting = false;
+          if (!loginCurrent(login, generation)) {
+            if (r.id) await cancelAuthorization(login, r.id);
+            releaseLoginTool(login);
             return;
           }
+          // Keep the ID even if the returned authorization URL is invalid, so
+          // closing the dialog still cancels the original server operation.
+          login.id = r.id;
           const url = new URL(r.url);
           if (url.protocol !== "https:") throw new Error("官方授权地址无效。");
-          login.id = r.id;
           login.expires = Date.parse(r.expires_at);
-          if (!Number.isFinite(login.expires))
-            throw new Error("服务未返回有效授权期限。");
+          if (!login.id || !Number.isFinite(login.expires))
+            throw new Error("服务未返回有效授权信息。");
           $("loginCode").textContent = r.user_code;
           $("copyLoginCode").disabled = false;
           $("loginUrl").href = url.href;
@@ -2290,19 +2179,25 @@
           loginMessage("等待你在官方页面完成授权…");
           scheduleLoginPoll(generation, 0);
         } catch (e) {
-          if (generation !== login.generation) return;
-          loginMessage(e.message, true);
-          $("loginRetry").hidden = false;
-          releaseLoginTool();
+          login.starting = false;
+          if (loginCurrent(login, generation)) {
+            loginMessage(e.message, true);
+            $("loginRetry").hidden = false;
+          }
+          releaseLoginTool(login);
         }
+      }
+      function loginCurrent(login, generation) {
+        return ui.login === login && login.generation === generation && isCurrent(login.context);
       }
       function loginMessage(text, error = false) {
         $("loginMsg").textContent = text;
         $("loginMsg").className = "dialog-status" + (error ? " error" : "");
       }
-      function releaseLoginTool() {
-        state.operations.delete(actionTool(ui.login.tool));
-        render();
+      function releaseLoginTool(login = ui.login) {
+        const key = operationKey(login.tool, login.context);
+        if (state.operations.get(key) === login.operation) state.operations.delete(key);
+        if (login.context.envID === state.envID) render();
       }
       function scheduleLoginPoll(generation, delay = 2000) {
         clearTimeout(ui.login.timer);
@@ -2310,8 +2205,7 @@
       }
       async function pollLogin(generation) {
         const login = ui.login;
-        if (generation !== login.generation || !login.id || login.polling)
-          return;
+        if (!loginCurrent(login, generation) || !login.id || login.polling) return;
         const remaining = Math.ceil((login.expires - Date.now()) / 1000);
         if (remaining <= 0) {
           loginMessage("授权代码已过期，请重新获取。", true);
@@ -2319,7 +2213,7 @@
           $("loginUrl").hidden = true;
           $("copyLoginCode").disabled = true;
           $("loginRetry").hidden = false;
-          releaseLoginTool();
+          releaseLoginTool(login);
           return;
         }
         $("loginExpiry").textContent =
@@ -2327,11 +2221,9 @@
         login.polling = true;
         let again = true;
         try {
-          const r = await api(
-            "api/login/" + login.tool + "?id=" + encodeURIComponent(login.id),
-            { timeout: 10000 },
-          );
-          if (generation !== login.generation) return;
+          const r = await api("api/login/" + login.tool + "?id=" + encodeURIComponent(login.id),
+            { timeout: 10000, context: login.context });
+          if (!loginCurrent(login, generation)) return;
           if (r.status === "ok") {
             again = false;
             loginMessage("账号已添加，当前登录保持不变。");
@@ -2339,51 +2231,61 @@
             $("loginExpiry").textContent = "授权完成";
             $("loginUrl").hidden = true;
             $("copyLoginCode").disabled = true;
-            releaseLoginTool();
+            releaseLoginTool(login);
             state.revision++;
-            await loadSnapshot();
-            if (visibleTools().some((tool) => tool.tool === login.tool))
-              selectView(login.tool);
+            await loadSnapshot(login.context);
+            if (!loginCurrent(login, generation)) return;
+            if (visibleTools().some((tool) => tool.tool === login.tool)) selectView(login.tool);
             message(login.tool, "账号已添加，当前登录保持不变。");
           } else if (r.status === "error") {
             again = false;
             loginMessage(r.error || "授权未完成，请重试。", true);
             $("loginRetry").hidden = false;
-            releaseLoginTool();
+            releaseLoginTool(login);
           }
         } catch (e) {
-          if (generation === login.generation)
-            loginMessage(e.message + " 正在等待连接恢复。", true);
+          if (loginCurrent(login, generation)) loginMessage(e.message + " 正在等待连接恢复。", true);
         } finally {
-          if (generation === login.generation) {
+          if (loginCurrent(login, generation)) {
             login.polling = false;
             if (again) scheduleLoginPoll(generation);
           }
         }
       }
-      async function cancelLogin() {
-        const login = ui.login;
-        const id = login.id,
-          tool = login.tool;
+      async function cancelAuthorization(login, id) {
+        await api("api/login/" + login.tool + "/cancel", {
+          method: "POST", body: { id }, timeout: 10000,
+          context: login.context, cancel: true,
+        });
+      }
+      async function cancelLogin(focus = true) {
+        const login = ui.login, id = login.id;
         login.generation++;
         clearTimeout(login.timer);
         login.id = "";
         $("loginDlg").close();
-        if (login.mode === "device") releaseLoginTool();
-        else render();
-        restoreFocus(login.opener, login.focusKey);
-        if (id)
-          try {
-            await api("api/login/" + tool + "/cancel", {
-              method: "POST",
-              body: { id },
-              timeout: 10000,
-            });
-          } catch (e) {
-            message(tool, "已关闭授权窗口；取消请求未确认。" + e.message, true);
-          }
+        $("loginCode").textContent = "";
+        $("loginUrl").hidden = true;
+        $("loginUrl").removeAttribute("href");
+        if (focus) restoreFocus(login.opener, login.focusKey);
+        try {
+          if (id) await cancelAuthorization(login, id);
+        } catch (e) {
+          if (isCurrent(login.context)) message(login.tool, "已关闭授权窗口；取消请求未确认。" + e.message, true);
+        } finally {
+          // A still-pending start response owns the operation until its ID is
+          // received and cancelled; switching away and back cannot duplicate it.
+          if (login.mode === "device" && !login.starting) releaseLoginTool(login);
+        }
       }
       async function onClick(event) {
+        const environment = event.target.closest("[data-environment]");
+        if (environment) {
+          event.preventDefault();
+          await switchEnvironment(environment.dataset.environment);
+          return;
+        }
+        const context = requestContext();
         const nav = event.target.closest("[data-view]");
         if (nav) {
           event.preventDefault();
@@ -2400,8 +2302,9 @@
           }
           if (act === "refresh-state") {
             b.disabled = true;
-            await connect();
-            b.disabled = false;
+            if (state.gateway) await connect(context);
+            else await bootstrap();
+            if (isCurrent(context)) b.disabled = false;
             return;
           }
           if (act === "select-account") {
@@ -2409,6 +2312,7 @@
             render();
             if (window.matchMedia?.("(max-width: 760px)")?.matches) {
               requestAnimationFrame(() => {
+                if (!isCurrent(context)) return;
                 $("accountTitle")?.focus({ preventScroll: true });
                 $("accountDetail")?.scrollIntoView({
                   block: "start",
@@ -2436,6 +2340,7 @@
           }
           if (act === "copy-code") {
             const ok = await copyText($("loginCode").textContent);
+            if (!isCurrent(context)) return;
             loginMessage(
               ok ? "代码已复制。" : "复制失败，请选中代码手动复制。",
               !ok,
@@ -2450,7 +2355,7 @@
             const t = ui.login.tool,
               opener = ui.login.opener;
             await cancelLogin();
-            await startLogin(t, opener);
+            if (isCurrent(context)) await startLogin(t, opener);
             return;
           }
           if (act === "cancel-login") {
@@ -2463,31 +2368,15 @@
           }
           if (act === "accept-confirm") {
             const c = closeConfirm();
-            if (c) await c.run();
-            return;
-          }
-          if (act === "add-environment") {
-            collectEnvironmentDraft();
-            state.envDraft.push({ name: "", url: "", id: "" });
-            state.envDirty = true;
-            renderEnvironmentRows();
-            $("environmentRows")
-              .lastElementChild?.querySelector("input")
-              ?.focus();
-            return;
-          }
-          if (act === "remove-environment") {
-            collectEnvironmentDraft();
-            state.envDraft.splice(Number(b.dataset.index), 1);
-            state.envDirty = true;
-            renderEnvironmentRows();
+            if (c && isCurrent(c.context) && canWrite()) await c.run();
             return;
           }
           if (act === "diagnostics") {
             b.disabled = true;
             const r = await api(
-              "api/diagnostics?tool=" + encodeURIComponent(actionTool(tool)),
+              "api/diagnostics?tool=" + encodeURIComponent(actionTool(tool)), { context },
             );
+            if (!isCurrent(context) || !state.online) return;
             const el = $("diagnostics");
             if (el && ui.tool === tool) {
               el.hidden = false;
@@ -2521,12 +2410,13 @@
               },
             );
             if (
+              isCurrent(context) &&
               adding &&
               captured &&
               visibleTools().some((entry) => entry.tool === tool)
             ) {
               await cancelLogin();
-              selectView(tool);
+              if (isCurrent(context)) selectView(tool);
             }
           } else if (act === "probe" || act === "probe-tool") {
             await mutate(
@@ -2584,35 +2474,122 @@
             });
           }
         } catch (e) {
+          if (!isCurrent(context)) return;
           if (tool) message(tool, e.message, true);
           else setNotice($("globalNotice"), e.message, true);
           b.disabled = false;
         }
       }
+      function clearEnvironmentUI(clearMessages = true) {
+        if ($("confirmDlg").open) $("confirmDlg").close();
+        ui.confirm = null;
+        // cancelLogin captures the old request context before the epoch changes.
+        if ($("loginDlg").open || ui.login.starting) void cancelLogin(false);
+        clearTimeout(ui.login.timer);
+        state.selected.clear();
+        if (clearMessages) state.messages.clear();
+        ui.accountNodes.clear();
+        ui.tool = "";
+      }
+      async function switchEnvironment(id, push = true, view = hashView()) {
+        clearTimeout(ui.overviewTimer);
+        state.readController?.abort();
+        state.readController = null;
+        clearEnvironmentUI();
+        state.epoch++;
+        state.readSequence++;
+        state.revision++;
+        state.envID = id;
+        state.view = view;
+        state.instance = null;
+        state.trustedID = "";
+        state.overview = null;
+        state.online = false;
+        state.lastRead = 0;
+        state.connectionError = "";
+        const env = state.environments.find((entry) => entry.id === id);
+        state.apiBase = env?.api_base || "";
+        state.fatal = env ? "" : "环境不存在或未配置，未连接任何实例。";
+        state.connecting = Boolean(env);
+        const url = new URL(location.href);
+        url.searchParams.set("env", id);
+        url.hash = view ? "#" + encodeURIComponent(view) : "";
+        if (push) history.pushState(null, "", url.pathname + url.search + url.hash);
+        else history.replaceState(null, "", url.pathname + url.search + url.hash);
+        render();
+        const context = requestContext();
+        if (env) await connect(context);
+        if (isCurrent(context)) {
+          clearTimeout(ui.overviewTimer);
+          ui.overviewTimer = setTimeout(pollOverview, 15000);
+        }
+      }
+      async function routeFromURL() {
+        if (!state.gateway) return;
+        const url = new URL(location.href);
+        const id = url.searchParams.has("env") ? url.searchParams.get("env") : state.gateway.id;
+        if (id !== state.envID) await switchEnvironment(id, false, hashView());
+        else {
+          state.view = state.overview ? normalizedView(hashView()) : hashView();
+          render();
+        }
+      }
+      async function bootstrap() {
+        if (ui.bootstrapping) return;
+        ui.bootstrapping = true;
+        try {
+          const catalog = await api("api/environments", { global: true });
+          const gateway = catalog.instance;
+          if (!gateway?.id || (state.expected && state.expected !== gateway.id))
+            throw new Error("入口实例不匹配，已停止连接。");
+          if (!Array.isArray(catalog.environments) || !catalog.environments.length)
+            throw new Error("环境目录为空，未连接任何实例。");
+          const seen = new Set();
+          const apiRoot = new URL("api/", location.href).pathname;
+          for (const env of catalog.environments) {
+            if (!/^[a-f0-9]{32}$/.test(env.id) || seen.has(env.id) ||
+                !(env.api_base === `${apiRoot}instances/${env.id}/` ||
+                  (env.api_base === apiRoot && env.id === gateway.id && catalog.environments.length === 1)))
+              throw new Error("环境目录无效，已停止连接。");
+            seen.add(env.id);
+          }
+          state.gateway = gateway;
+          state.environments = catalog.environments;
+          const session = await api("api/session", { global: true });
+          if (session.instance && session.instance.id !== gateway.id)
+            throw new Error("入口会话实例不匹配，已停止连接。");
+          $("logoutForm").hidden = !session.login_required;
+          const url = new URL(location.href);
+          await switchEnvironment(url.searchParams.has("env") ? url.searchParams.get("env") : gateway.id, false, hashView());
+        } catch (e) {
+          state.gateway = null;
+          state.environments = [];
+          state.apiBase = "";
+          state.fatal = e.message;
+          disconnect(e.message);
+        } finally {
+          ui.bootstrapping = false;
+        }
+      }
       async function pollOverview() {
         clearTimeout(ui.overviewTimer);
-        if (!document.hidden && !state.fatal) {
-          if (state.instance) await loadSnapshot();
-          else await connect();
+        const context = requestContext();
+        if (!document.hidden && !state.fatal && context.apiBase) {
+          if (state.online) await loadSnapshot(context);
+          else await connect(context);
         }
-        ui.overviewTimer = setTimeout(pollOverview, 15000);
+        if (isCurrent(context)) {
+          clearTimeout(ui.overviewTimer);
+          ui.overviewTimer = setTimeout(pollOverview, 15000);
+        }
       }
       // qswitch-ui-bootstrap
       document.addEventListener("click", onClick);
-      document.addEventListener("input", (e) => {
-        if (e.target.closest("#environmentForm")) {
-          state.envDirty = true;
-          collectEnvironmentDraft();
-        }
-      });
       document.addEventListener("change", (e) => {
         if (e.target.id === "addTool") {
           ui.login.tool = e.target.value;
           renderAccountPicker();
         }
-      });
-      document.addEventListener("submit", (e) => {
-        if (e.target.id === "environmentForm") saveEnvironments(e);
       });
       $("loginDlg").addEventListener("cancel", (e) => {
         e.preventDefault();
@@ -2625,18 +2602,9 @@
       document.addEventListener("visibilitychange", () => {
         if (!document.hidden) pollOverview();
       });
-      window.addEventListener("hashchange", () => {
-        state.view = normalizedView(hashView());
-        render();
-      });
-      (async () => {
-        await connect();
-        try {
-          const session = await api("api/session");
-          $("logoutForm").hidden = !session.login_required;
-        } catch {}
-        ui.overviewTimer = setTimeout(pollOverview, 15000);
-      })();
+      window.addEventListener("hashchange", routeFromURL);
+      window.addEventListener("popstate", routeFromURL);
+      void bootstrap();
     </script>
   </body>
 </html>

@@ -232,21 +232,25 @@ scripts/deploy.sh --release <tag> --check             # 只读核对版本和管
 
 ### 多环境与 Deck
 
-各主机是独立实例，管理该主机上的客户端和账号；环境目录只保存名称、网址和实例 ID。切换环境会打开目标的完整页面，并核对 `expected_instance`；实例不符时阻止登录和写操作。账号凭据、网页登录密码和 Cookie 不同步，多台机器上的同一个账号也不合并计算额度。
+Deck 使用一个 `/qswitch/` 页面和一次网页登录，通过顶部环境 Tab 切换 novix、Mac mini、MacBook。账号操作仍由对应主机执行，供应商凭据留在本机，同账号的多机观测不合并计算额度。地址的 `env` 参数保存所选环境，工具使用页面锚点；刷新和前进后退恢复原选择，未知环境不会自动落到另一台机器。
 
 | 环境 | 入口 | daemon 管理范围 |
 |---|---|---|
-| novix | [Deck / qswitch](https://deck.xiayinchang.top/qswitch/) | 全部适配器 |
-| Mac mini | [Deck / qswitch-mini](https://deck.xiayinchang.top/qswitch-mini/) | 全部适配器 |
-| MacBook | [Deck / qswitch-book](https://deck.xiayinchang.top/qswitch-book/) | Antigravity |
+| novix | qswitch → novix | 全部适配器 |
+| Mac mini | qswitch → Mac mini | 全部适配器 |
+| MacBook | qswitch → MacBook | Antigravity |
 
 `qswitchd --tool <tool>` 固定该 daemon 的范围：工作线程、总览和全部 Web 操作一致，范围之外的操作直接拒绝。CLI 的单次命令仍可按明确的 `--tool` 在本机独立运行；非法或缺值的工具参数会在打开账号存储前报错。
 
-实例 ID 首次启动随机生成并持久保存在数据目录；已有 ID 损坏时拒绝启动，不静默生成新身份。显示名称来自 `[instance].name`，缺省使用主机名。页面的“环境管理”集中编辑导航目录，不承载跨机操作或账号代理。
+实例 ID 首次启动随机生成并持久保存在数据目录；已有 ID 损坏时拒绝启动，不静默生成新身份。显示名称来自 `[instance].name`，缺省使用主机名。环境目录由部署维护，只保存名称与实例 ID；页面的“环境管理”展示已配置环境和当前实例信息，不提供任意目标地址编辑。直接打开各机器的 loopback 页面时只管理本机。
 
-三条入口均由 lisa-hk 的 nginx 终止 TLS，通过各主机独立密钥的反向 SSH 隧道连到本机 loopback。服务器只允许对应 key 监听自己的端口：novix 7432、Mini 7433、Book 7434。Mac 的 launchd 和 novix 的 systemd 在连接断开后重连；主机休眠期间页面明确报不可达。模板在 `contrib/deck/`。
+统一入口由 lisa-hk 的 nginx 终止 TLS，复用各主机独立密钥的反向 SSH 隧道。服务器只允许对应 key 监听自己的端口：novix 7432、Mini 7433、Book 7434。`/qswitch/api/instances/<实例ID>/` 固定映射到对应端口，不能传入任意 URL、主机或端口。Mac 的 launchd 和 novix 的 systemd 在连接断开后重连；设备离线时仅对应 Tab 显示不可达，清空旧账号内容并暂停操作。模板在 `contrib/deck/`，实际 nginx 合成验证运行 `python3 scripts/nginx_gateway_test.py`（需要 nginx 或 Linux Docker）。
 
-代理传递 `X-Forwarded-Host / -Proto / -Prefix / -For`，qswitch 只信任来自 loopback 对端的这些头。三个入口使用兄弟路径，Cookie 各有自己的 Path、签名密钥和登录；不使用父子路径叠放同名 Cookie。Cookie Path 只负责请求路由，不是安全隔离边界。未经登录只能读取无账号信息的健康接口；没有密码和 token 时代理请求拒绝访问。
+网页登录沿用 novix 的管理账号。每次环境请求先由 nginx 的内部认证请求向 novix 校验统一 Cookie 或入口 Bearer；目标服务使用各自独立的服务端 token，不接收浏览器 Cookie 或入口 Bearer。这些 token 只存在目标配置与代理的私有文件中，不进页面、环境目录或仓库。novix 认证服务不可达时，统一入口停止所有远程操作。
+
+代理传递可信的 `X-Forwarded-Host / -Proto / -Prefix / -For`，保留 Origin 和浏览器给出的目标 `X-Qswitch-Instance`。所有环境请求（包括健康查询）都必须携带与路径一致的实例 ID，目标服务再核对自身 ID；接错隧道、未知实例或范围之外的操作均拒绝。代理不重放失败的写请求。切 Tab 后旧请求仍归原环境，晚到结果不能覆盖新环境；已经提交的操作不因换 Tab 被视作取消。退出统一登录后，各环境请求都需重新认证。原独立 Mini、Book 页面路径退役。
+
+部署统一入口时，把主片段和三个共享片段装入 `/etc/nginx/qswitch-gateway/`，根据实测实例 ID 与端口渲染 `instances.conf`。目标 token 单独放入 `secrets/<环境名>.conf`，内容仅为该目标的 Authorization 配置；私有目录权限 0700、文件 0600，不使用会展开密钥的 `nginx -T`。先更新各主机程序和入口 `environments.json`（仅 `id`、`name`），再用候选 nginx 配置执行 `nginx -t`，最后一次 reload 启用新路由并退役旧路径。统一入口的 shell 代理固定设置 `X-Qswitch-Portal: 1`；只有来自 loopback 可信代理的此标志才启用目录路由。普通代理、升级过渡期及本机直连均返回单机目录，不会提前请求尚未启用的路由。
 
 公网暴露：`[web] addr` 设为非 loopback 地址时必须先设密码或 `[web] token`，否则拒绝启动；这时所有请求都要登录或 Bearer，Origin 同源校验照常生效。明文 HTTP 下密码会经过链路，只应放在 TLS 反向代理之后。
 

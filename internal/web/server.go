@@ -63,7 +63,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/auto", s.postAuto)
 	mux.HandleFunc("GET /api/diagnostics", s.getDiagnostics)
 	mux.HandleFunc("GET /api/environments", s.getEnvironments)
-	mux.HandleFunc("POST /api/environments", s.postEnvironments)
 	mux.HandleFunc("GET /api/session", s.getSession)
 	mux.HandleFunc("GET /api/overview", s.getOverview)
 	mux.HandleFunc("POST /api/capture", s.postCapture)

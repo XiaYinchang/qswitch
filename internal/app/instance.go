@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -25,11 +24,11 @@ type InstanceInfo struct {
 	ManagedTools []adapter.Tool `json:"managed_tools"`
 }
 
-// Environment describes a navigation destination, never a credential or proxy.
+// Environment is deployment-maintained instance metadata. API routes are
+// derived by the web transport; neither URLs nor credentials belong here.
 type Environment struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
-	URL  string `json:"url"`
 }
 
 func persistentInstanceID(dir string) (string, error) {
@@ -141,22 +140,19 @@ func validateEnvironments(items []Environment) error {
 	if len(items) > 64 {
 		return errors.New("at most 64 environments are supported")
 	}
-	ids, urls := map[string]bool{}, map[string]bool{}
+	ids := map[string]bool{}
 	for _, item := range items {
-		if strings.TrimSpace(item.ID) != item.ID || item.ID == "" || len(item.ID) > 128 || strings.ContainsAny(item.ID, "\r\n\t /?#") {
+		decoded, err := hex.DecodeString(item.ID)
+		if err != nil || len(decoded) != 16 || item.ID != strings.ToLower(item.ID) {
 			return errors.New("environment requires a valid instance id")
 		}
 		if strings.TrimSpace(item.Name) != item.Name || item.Name == "" || len(item.Name) > 128 || strings.ContainsAny(item.Name, "\r\n\t") {
 			return errors.New("environment requires a name")
 		}
-		u, err := url.Parse(item.URL)
-		if err != nil || len(item.URL) > 2048 || (u.Scheme != "https" && u.Scheme != "http") || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.Opaque != "" {
-			return errors.New("environment URL must be an absolute http(s) URL without credentials, query or fragment")
+		if ids[item.ID] {
+			return errors.New("duplicate environment id")
 		}
-		if ids[item.ID] || urls[item.URL] {
-			return errors.New("duplicate environment id or URL")
-		}
-		ids[item.ID], urls[item.URL] = true, true
+		ids[item.ID] = true
 	}
 	return nil
 }

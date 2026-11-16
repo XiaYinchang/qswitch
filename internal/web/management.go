@@ -113,30 +113,41 @@ func (s *Server) getDiagnostics(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getEnvironments(w http.ResponseWriter, r *http.Request) {
-	items, err := s.App.Environments()
-	if err != nil {
-		writeErr(w, 500, err.Error())
-		return
+	x := externalOf(r)
+	instance := s.App.Instance()
+	items := []app.Environment{{ID: instance.ID, Name: instance.Name}}
+	portal := false
+	if x.proxied && r.Header.Get("X-Qswitch-Portal") == "1" {
+		configured, err := s.App.Environments()
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		if len(configured) != 0 {
+			found := false
+			for _, item := range configured {
+				found = found || item.ID == instance.ID
+			}
+			if !found {
+				writeErr(w, 500, "environment directory does not contain the gateway instance")
+				return
+			}
+			items, portal = configured, true
+		}
 	}
-	writeJSON(w, 200, map[string]any{"instance": s.App.Instance(), "environments": items})
-}
-
-func (s *Server) postEnvironments(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Environments *[]app.Environment `json:"environments"`
+	type environmentRoute struct {
+		app.Environment
+		APIBase string `json:"api_base"`
 	}
-	if !readJSON(w, r, &req) {
-		return
+	routes := make([]environmentRoute, 0, len(items))
+	for _, item := range items {
+		base := x.path("/api/")
+		if portal {
+			base = x.path("/api/instances/" + item.ID + "/")
+		}
+		routes = append(routes, environmentRoute{Environment: item, APIBase: base})
 	}
-	if req.Environments == nil {
-		writeErr(w, 400, "environments array is required")
-		return
-	}
-	if err := s.App.SetEnvironments(*req.Environments); err != nil {
-		writeErr(w, 400, err.Error())
-		return
-	}
-	s.getEnvironments(w, r)
+	writeJSON(w, 200, map[string]any{"instance": instance, "environments": routes})
 }
 
 func loginTool(r *http.Request) adapter.Tool {
@@ -146,9 +157,15 @@ func loginTool(r *http.Request) adapter.Tool {
 	return adapter.Codex
 }
 
-func preserveExpected(path, expected string) string {
-	if expected == "" {
+func preserveNavigation(path string, query url.Values) string {
+	values := url.Values{}
+	for _, key := range []string{"expected_instance", "env"} {
+		if value := query.Get(key); value != "" {
+			values.Set(key, value)
+		}
+	}
+	if len(values) == 0 {
 		return path
 	}
-	return path + "?" + url.Values{"expected_instance": []string{expected}}.Encode()
+	return path + "?" + values.Encode()
 }
