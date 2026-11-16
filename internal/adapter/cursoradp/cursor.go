@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -31,10 +32,19 @@ var cursorAuthKeys = []string{
 }
 
 type Adapter struct {
-	List func() ([]adapter.Proc, error)
+	List     func() ([]adapter.Proc, error)
+	Platform string // Test override; empty uses the host operating system.
 }
 
 func (a Adapter) Name() adapter.Tool { return adapter.Cursor }
+
+func (a Adapter) SupportsDesktopSync() bool {
+	platform := a.Platform
+	if platform == "" {
+		platform = runtime.GOOS
+	}
+	return platform == "darwin"
+}
 
 func cliAuth(home string) string { return filepath.Join(home, ".cursor", "auth.json") }
 func cliCfg(home string) string  { return filepath.Join(home, ".cursor", "cli-config.json") }
@@ -43,7 +53,11 @@ func vscdb(home string) string {
 }
 
 func (a Adapter) LivePaths(home string) []string {
-	return []string{cliAuth(home), cliCfg(home), vscdb(home)}
+	paths := []string{cliAuth(home), cliCfg(home)}
+	if a.SupportsDesktopSync() {
+		paths = append(paths, vscdb(home))
+	}
+	return paths
 }
 
 func HashCLI(home string) ([32]byte, error) {
@@ -89,6 +103,9 @@ func HashDesktop(home string) ([32]byte, error) {
 
 func (a Adapter) Fingerprint(home string) ([32]byte, error) {
 	cli, cliErr := HashCLI(home)
+	if !a.SupportsDesktopSync() {
+		return cli, cliErr
+	}
 	desk, deskErr := HashDesktop(home)
 	return CombineFP(cli, cliErr, desk, deskErr)
 }
@@ -121,7 +138,10 @@ func (a Adapter) ManualBlockers(home string) (adapter.Holders, error) {
 	if err != nil {
 		return adapter.Holders{}, err
 	}
-	app := busy.CursorApp(list)
+	var app []adapter.Proc
+	if a.SupportsDesktopSync() {
+		app = busy.CursorApp(list)
+	}
 	ag := busy.CursorAgent(list)
 	h := adapter.Holders{Manual: append(app, ag...), CursorApp: len(app) > 0}
 	if len(app) > 0 {
@@ -147,9 +167,13 @@ type payload struct {
 }
 
 func (a Adapter) Capture(home string) ([]adapter.Blob, []adapter.Warning, error) {
-	desk, err := readDesktop(home)
-	if err != nil && !os.IsNotExist(err) {
-		return nil, nil, err
+	var desk map[string]string
+	if a.SupportsDesktopSync() {
+		var err error
+		desk, err = readDesktop(home)
+		if err != nil && !os.IsNotExist(err) {
+			return nil, nil, err
+		}
 	}
 	cliTok, _ := readJSONMap(cliAuth(home))
 	cfg, _ := readObject(cliCfg(home))
@@ -186,7 +210,7 @@ func (a Adapter) Capture(home string) ([]adapter.Blob, []adapter.Warning, error)
 	if id.StableID == "" {
 		return nil, warn, errors.New("cursor: no identity")
 	}
-	inc := str(desk["cursorAuth/accessToken"]) == "" || str(cliTok["accessToken"]) == ""
+	inc := str(cliTok["accessToken"]) == "" || (a.SupportsDesktopSync() && str(desk["cursorAuth/accessToken"]) == "")
 	if inc {
 		warn = append(warn, adapter.WarnIncompleteBlob)
 	}
@@ -227,13 +251,57 @@ func (a Adapter) Restore(home string, blob adapter.Blob, opts adapter.RestoreOpt
 	return err
 }
 
+// ValidateCLI checks the saved native CLI identity without borrowing credentials
+// from the desktop plane or reading or writing the current client's files.
+func ValidateCLI(blob adapter.Blob) error {
+	_, err := CLIAccessToken(blob)
+	return err
+}
+
+// CLIAccessToken returns only a validated native CLI credential. In particular,
+// a desktop token in a legacy dual-plane snapshot is never used as a fallback.
+func CLIAccessToken(blob adapter.Blob) (string, error) {
+	var p payload
+	if err := json.Unmarshal(blob.Payload, &p); err != nil {
+		return "", err
+	}
+	if err := validateCLI(p, blob.Identity.StableID); err != nil {
+		return "", err
+	}
+	return str(p.CLIAuth["accessToken"]), nil
+}
+
+func validateCLI(p payload, id string) error {
+	if id == "" || (p.Identity.StableID != "" && p.Identity.StableID != id) {
+		return errors.New("cursor: snapshot identity mismatch")
+	}
+	cliID := first(str(p.CLIInfo["authId"]), str(p.CLIInfo["email"]))
+	if cliID == "" || cliID != id {
+		return errors.New("cursor: CLI credential identity mismatch")
+	}
+	if strings.TrimSpace(str(p.CLIAuth["accessToken"])) == "" {
+		return errors.New("cursor: snapshot has no usable CLI access token")
+	}
+	return nil
+}
+
 func (a Adapter) RestoreWithRollback(home string, blob adapter.Blob, opts adapter.RestoreOpts) (func() error, error) {
 	var p payload
 	if err := json.Unmarshal(blob.Payload, &p); err != nil {
 		return nil, err
 	}
-	p = align(p)
-	if incomplete(p) {
+	if a.SupportsDesktopSync() {
+		p = align(p)
+	} else {
+		// A foreign desktop snapshot is not evidence of a usable native CLI
+		// credential. Never synthesize CLI tokens from it on these platforms.
+		opts.CLIOnly = true
+		p.Desktop = nil
+		if err := validateCLI(p, blob.Identity.StableID); err != nil {
+			return nil, err
+		}
+	}
+	if str(p.CLIAuth["accessToken"]) == "" || (a.SupportsDesktopSync() && incomplete(p)) {
 		return nil, errors.New("cursor: snapshot has no usable access token")
 	}
 	if blob.Identity.StableID == "" || (p.Identity.StableID != "" && p.Identity.StableID != blob.Identity.StableID) {
@@ -543,7 +611,7 @@ func (a Adapter) Idle(home string, grace time.Duration) bool {
 	if err != nil {
 		return false
 	}
-	if len(busy.CursorApp(list)) > 0 {
+	if a.SupportsDesktopSync() && len(busy.CursorApp(list)) > 0 {
 		return false
 	}
 	if len(busy.CursorAgent(list)) == 0 {

@@ -546,18 +546,37 @@ func (a *App) switchLocked(tool adapter.Tool, ref string, opts adapter.RestoreOp
 	}
 	cfg := a.cfgSnapshot()
 	ad := a.Adapters[tool]
+	if tool == adapter.Cursor && !a.cursorDesktopSync() {
+		opts.CLIOnly = true
+		opts.ForceAlign = false
+	}
 	blob, err := a.loadBlob(tool, ref)
 	if err != nil {
 		return err
 	}
+	if tool == adapter.Cursor && !a.cursorDesktopSync() && blob.Incomplete {
+		id, err := a.resolveAccount(string(tool), ref)
+		if err != nil {
+			return err
+		}
+		ac, err := a.State.GetAccount(string(tool), id)
+		if err != nil {
+			return err
+		}
+		ac, err = a.recheckCursorCLILocked(ac)
+		if err != nil {
+			return err
+		}
+		blob.Incomplete = ac.Incomplete
+	}
 	if tool == adapter.Cursor && !opts.CLIOnly {
 		opts.ForceAlign = true
 	}
-	if tool == adapter.Cursor && blob.Incomplete && !opts.ForceAlign {
+	if tool == adapter.Cursor && blob.Incomplete && !opts.CLIOnly && !opts.ForceAlign {
 		return errors.New("cursor blob incomplete; quit Cursor.app then: qswitch switch cursor <desktop-id> --force-align")
 	}
-	// Check CLI blockers before quitting a desktop app. Cursor itself will be
-	// closed below, but its CLI must pass the same idle check as other tools.
+	// Check CLI blockers separately. A supported desktop must already be
+	// closed; unsupported desktop storage is never part of a CLI-only switch.
 	preflight, err := a.switchBlockers(tool)
 	if err != nil {
 		return err
@@ -819,7 +838,7 @@ func (a *App) Status() string {
 			plan = "-"
 		}
 		fmt.Fprintf(&b, "%s  active=%s plan=%s id=%s class=%s used=%.1f%% auto=%v desync=%v busy=%v blocked_by_pid=%v queued_since=%s chatgpt_app=%v\n",
-			t, label, plan, p.StableID, class, acc.LastUsedPct, cfg.General.AutoSwitch && cfg.ToolEnabled(string(t)) && a.Capabilities(t)["auto_switch"].Available, p.Desync, man.ManualBusy(), man.ManualPIDs(), queued(pend), aut.ChatGPTApp)
+			t, label, plan, p.StableID, class, acc.LastUsedPct, cfg.General.AutoSwitch && cfg.ToolEnabled(string(t)) && a.Capabilities(t)["auto_switch"].Available, (p.Desync && (t != adapter.Cursor || a.cursorDesktopSync())), man.ManualBusy(), man.ManualPIDs(), queued(pend), aut.ChatGPTApp)
 		if t == adapter.Antigravity {
 			fmt.Fprintf(&b, "  %s\n", AntigravityQuotaSummary(acc))
 		}
@@ -878,7 +897,7 @@ func (a *App) SaveConfig() error {
 }
 
 func (a *App) liveFingerprint(tool adapter.Tool) ([32]byte, error) {
-	if tool != adapter.Cursor {
+	if tool != adapter.Cursor || !a.cursorDesktopSync() {
 		return a.Adapters[tool].Fingerprint(a.UserHome)
 	}
 	cfg := a.cfgSnapshot()
@@ -1795,6 +1814,13 @@ func (a *App) probeAccountLocked(ctx context.Context, tool adapter.Tool, id stri
 	if err != nil {
 		return quota.Result{Class: quota.Unknown}
 	}
+	if tool == adapter.Cursor && !a.cursorDesktopSync() && blob.Incomplete {
+		acc, err = a.recheckCursorCLILocked(acc)
+		if err != nil {
+			return quota.Result{Class: quota.Unknown}
+		}
+		blob.Incomplete = acc.Incomplete
+	}
 	var res quota.Result
 	switch tool {
 	case adapter.Antigravity:
@@ -1832,7 +1858,12 @@ func (a *App) probeAccountLocked(ctx context.Context, tool adapter.Tool, id stri
 			}
 		}
 	case adapter.Cursor:
-		tok, err := cursoradp.AccessToken(blob)
+		var tok string
+		if a.cursorDesktopSync() {
+			tok, err = cursoradp.AccessToken(blob)
+		} else {
+			tok, err = cursoradp.CLIAccessToken(blob)
+		}
 		if err != nil {
 			return quota.Result{Class: quota.Unknown}
 		}
@@ -2056,7 +2087,7 @@ func (a *App) pickNext(tool adapter.Tool, current string) string {
 	defer cancel()
 	now := a.now().Unix()
 	for _, ac := range accs {
-		if ac.StableID == current || ac.Incomplete || ac.StaleCLI || strings.HasPrefix(ac.StableID, "desktop:") {
+		if ac.StableID == current || (ac.Incomplete && (tool != adapter.Cursor || a.cursorDesktopSync())) || ac.StaleCLI || strings.HasPrefix(ac.StableID, "desktop:") {
 			continue
 		}
 		if ac.CoolingUntil > now {
@@ -2082,6 +2113,10 @@ func (a *App) candidateRank(ctx context.Context, tool adapter.Tool, ac state.Acc
 	}
 	defer lock.Close()
 	ac, err = a.State.GetAccount(string(tool), ac.StableID)
+	if err != nil {
+		return unusable
+	}
+	ac, err = a.recheckCursorCLILocked(ac)
 	if err != nil || ac.Incomplete || ac.StaleCLI || ac.CoolingUntil > a.now().Unix() {
 		return unusable
 	}
@@ -2152,6 +2187,10 @@ func (a *App) TryApply(tool adapter.Tool, killCLI bool) (retErr error) {
 		target, err := a.State.GetAccount(string(tool), pend.ToID)
 		if err != nil {
 			return err
+		}
+		target, err = a.recheckCursorCLILocked(target)
+		if err != nil {
+			return a.cancelSwitch(tool, pend, err.Error())
 		}
 		if target.Incomplete || target.StaleCLI || target.CoolingUntil > a.now().Unix() {
 			return a.cancelSwitch(tool, pend, "the next account cannot be used now")
@@ -2424,7 +2463,7 @@ func (a *App) doctorTools(tools []adapter.Tool) string {
 		}
 		p, _ := a.State.GetPointer(string(t))
 		fmt.Fprintf(&b, "%s live=%s desync=%v manual_busy=%v auto_busy=%v chatgpt=%v cursor_app=%v pids=%v enabled=%v\n",
-			t, p.StableID, p.Desync, h.ManualBusy(), au.AutoBusy(), au.ChatGPTApp, h.CursorApp, h.ManualPIDs(), cfg.ToolEnabled(string(t)))
+			t, p.StableID, (p.Desync && (t != adapter.Cursor || a.cursorDesktopSync())), h.ManualBusy(), au.AutoBusy(), au.ChatGPTApp, h.CursorApp, h.ManualPIDs(), cfg.ToolEnabled(string(t)))
 		for _, pth := range ad.LivePaths(a.UserHome) {
 			st, err := os.Stat(pth)
 			if err != nil {
@@ -2435,7 +2474,7 @@ func (a *App) doctorTools(tools []adapter.Tool) string {
 		}
 	}
 	vsc := filepath.Join(a.UserHome, "Library", "Application Support", "Cursor", "User", "globalStorage", "state.vscdb")
-	if containsTool(tools, adapter.Cursor) {
+	if containsTool(tools, adapter.Cursor) && a.cursorDesktopSync() {
 		if st, err := os.Stat(vsc); err == nil {
 			fmt.Fprintf(&b, "cursor vscdb size=%d (read-only doctor; tests must not open live db)\n", st.Size())
 		}

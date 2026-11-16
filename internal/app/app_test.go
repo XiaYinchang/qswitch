@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"qswitch/internal/adapter"
+	"qswitch/internal/adapter/cursoradp"
 	"qswitch/internal/clock"
 	"qswitch/internal/notify"
 	"qswitch/internal/secutil"
@@ -207,6 +208,7 @@ func TestSwitchWaitsForCursorExit(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { a.Close() })
+	a.Adapters[adapter.Cursor] = cursoradp.Adapter{List: list, Platform: "darwin"}
 	writeCursor(t, home, "auth0|b", "b@x.com", "tok-b")
 	if _, _, err := a.Capture(adapter.Cursor); err != nil {
 		t.Fatal(err)

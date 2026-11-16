@@ -16,6 +16,13 @@ type Capability struct {
 
 func (a *App) Capabilities(tool adapter.Tool) map[string]Capability {
 	out := capabilities(tool, runtime.GOOS, a.CheckScope(tool))
+	if tool == adapter.Cursor && a.CheckScope(tool) == nil {
+		if a.cursorDesktopSync() {
+			out["desktop_sync"] = Capability{Available: true}
+		} else {
+			out["desktop_sync"] = Capability{Reason: "此平台仅管理 Cursor CLI，不读取或写入桌面账号"}
+		}
+	}
 	if tool == adapter.Claude && runtime.GOOS == "darwin" && a.CheckScope(tool) == nil {
 		supported := false
 		if ad := a.Adapters[tool]; ad != nil {
@@ -109,4 +116,13 @@ func (a *App) CheckAction(tool adapter.Tool, action string) error {
 		return fmt.Errorf("%s 操作不可用：%s", tool, cap.Reason)
 	}
 	return nil
+}
+
+// Cursor's adapter owns the supported storage layout. Tests can select its
+// platform explicitly; callers must not infer desktop support from CLI support.
+func (a *App) cursorDesktopSync() bool {
+	if capable, ok := a.Adapters[adapter.Cursor].(interface{ SupportsDesktopSync() bool }); ok {
+		return capable.SupportsDesktopSync()
+	}
+	return runtime.GOOS == "darwin"
 }

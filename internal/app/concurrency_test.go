@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"qswitch/internal/adapter"
+	"qswitch/internal/adapter/cursoradp"
 )
 
 func TestReloadConfigPreservesLastValidSettings(t *testing.T) {
@@ -164,6 +165,7 @@ func TestOverviewConcurrentConfigChanges(t *testing.T) {
 
 func TestConcurrentFingerprints(t *testing.T) {
 	a, _ := setup(t)
+	a.Adapters[adapter.Cursor] = cursoradp.Adapter{List: a.ListProcs, Platform: "darwin"}
 	writeCursor(t, a.UserHome, "cursor-fixture", "fixture@example.test", "fake-token")
 	var wg sync.WaitGroup
 	start := make(chan struct{})

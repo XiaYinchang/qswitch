@@ -16,7 +16,7 @@
 - Grok 通过官方 `GET /v1/billing?format=credits` 读取当前共享额度，并显示周/月周期和重置时间。与官方 `/usage` 一致，完整有效的统一计费周期省略百分比时按 0% 处理；空配置、无效周期或错误字段仍未知。只使用当前账期，不把历史用量或按量付费比例当作套餐比例；达到 100% 才判套餐耗尽，99.9% 不提前切号。有可用预付费余额或按量额度时仍保留可用状态。
 - Codex/Grok 只恢复已核实身份的 CLI 凭据，不再收录或恢复无法绑定账号的桌面浏览器快照，旧快照中的此类附录也不使用。各可切换工具在凭据写入或状态提交失败时撤销已完成的文件修改；Cursor 仅撤销受管认证字段并保留数据库其他变化。回滚失败会明确报错；这不等同于进程或主机突然中断后的完整切号恢复。
 - 查配额按工具适配，不把裸 429 当作用尽。Codex 看会话 JSONL 的 `rate_limits` / `usage_limit_reached`；Grok 看本地 `billing: fetched credits config` 和 HTTP 402 `usage balance exhausted`；Cursor 看 `GetCurrentPeriodUsage` 的 Auto（自家模型）与高级模型；Grok Bot 周额度走 `GetSandUsageStatus`，显示在关联 Cursor 的只读用量页中，使用自己的成功/失败状态和观测时间。忽略 `resource_exhausted`（那是容量）。当前账号按消耗速度在默认 5–15 分钟内查询，独立于本地日志更新；闲置账号约每 30 分钟更新，每个工具每轮最多查一个，优先最久未查询的账号，`probe_idle_accounts=false` 可关闭。ChatGPT 用尽号不按显示的重置时间死等（窗口可能提前恢复），大约每 30 分钟点探一次；其他工具耗尽后仍等到显示的重置时间再查。普通查询连续失败按 2、4、8、15 分钟退避，成功后清零；429/503 的有效 `Retry-After` 会作为最短等待时间。`http_backoff` 保留为认证失效的较长退避。
-- Cursor 桌面和 cursor-agent 共用同一套 token：`switch cursor` 会把选中账号同时写进 IDE 和 CLI。
+- Cursor 在 macOS 上同步更新 IDE 和 CLI 的登录字段，须先退出桌面端；Linux / Windows 仅管理 CLI，核验保存的 CLI 身份与凭据，不读取或创建桌面数据库。
 - 官方客户端登录第二个号时，`qswitchd` 会自己收进仓库，不必再跑 `qswitch capture`。
 - ChatGPT 闲置号会保活。加号请用 `qswitch login codex`：优先拉起本机官方 `codex login --device-auth`（隔离 `CODEX_HOME`，强制 file 存储，不改当前 `auth.json` / 不 logout）。流量、轮询间隔和换票格式与官方 CLI 相同。在 ChatGPT.app 里切换账号等于官方 logout，会作废上一份 refresh。
 - Grok 加号同样走 Device Code：`qswitch login grok` 优先拉起本机官方 `grok login --device-auth`（隔离 `GROK_HOME`，不改当前 `auth.json` / 不 logout）。页面加号走同一套 `auth.x.ai` device code。不要在当前 grok 里换号或 `grok logout`。
@@ -206,7 +206,7 @@ qswitch list
 qswitch status
 qswitch probe [--tool codex|grok|cursor|devin|zcode|kimi|claude|antigravity] [--account <账号ID或邮箱>]
 qswitch switch codex <id-or-email>
-qswitch switch cursor <id-or-email>                # 先退出 Cursor 桌面 App，随后同时更新 IDE/CLI
+qswitch switch cursor <id-or-email>                # macOS 先退出桌面端并同步 IDE/CLI；Linux/Windows 仅更新 CLI
 qswitch doctor [--tool ...]
 qswitch serve [--addr 127.0.0.1:7432]
 qswitch web set-password <用户名> [--stdin]     # 页面登录密码，见「页面登录」
@@ -248,7 +248,7 @@ scripts/deploy.sh --release <tag> --check             # 只读核对版本和管
 
 公网暴露：`[web] addr` 设为非 loopback 地址时必须先设密码或 `[web] token`，否则拒绝启动；这时所有请求都要登录或 Bearer，Origin 同源校验照常生效。明文 HTTP 下密码会经过链路，只应放在 TLS 反向代理之后。
 
-Cursor 切号会同时写入 IDE 和 CLI 的登录字段。
+Cursor 在 macOS 上同时更新 IDE 和 CLI 的登录字段；Linux / Windows 只更新 CLI。
 
 ```
 cp ~/.qswitch/com.qswitch.plist ~/Library/LaunchAgents/com.qswitch.plist

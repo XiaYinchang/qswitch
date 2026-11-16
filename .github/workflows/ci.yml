@@ -59,7 +59,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force $env:USERPROFILE, $env:APPDATA, $env:LOCALAPPDATA, $env:XDG_CONFIG_HOME, $env:QSWITCH_DIR | Out-Null
           try {
-            go test ./internal/livefile ./internal/busy ./internal/hostapp ./internal/secutil ./internal/quota ./internal/adapter/antigravity
+            go test ./internal/livefile ./internal/busy ./internal/hostapp ./internal/secutil ./internal/quota ./internal/adapter/antigravity ./internal/adapter/cursoradp
             if ($LASTEXITCODE -ne 0) { throw 'Windows native tests failed' }
           } finally {
             Remove-Item -Recurse -Force $env:USERPROFILE, $env:QSWITCH_DIR

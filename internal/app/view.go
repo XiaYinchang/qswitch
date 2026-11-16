@@ -125,7 +125,7 @@ func (a *App) Overview() Overview {
 			Enabled:      cfg.ToolEnabled(string(t)),
 			Auto:         cfg.General.AutoSwitch && cfg.ToolEnabled(string(t)) && caps["auto_switch"].Available,
 			Switchable:   caps["switch"].Available,
-			Desync:       p.Desync,
+			Desync:       p.Desync && (t != adapter.Cursor || a.cursorDesktopSync()),
 			Busy:         man.ManualBusy(),
 			ChatGPTApp:   aut.ChatGPTApp,
 			CursorApp:    aut.CursorApp || man.CursorApp,

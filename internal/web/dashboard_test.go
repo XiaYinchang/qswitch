@@ -121,3 +121,68 @@ const native={tool:'antigravity',auto_reason:'自动切换已关闭',capabilitie
 assert(!loginGuidance(native).includes('自动切换已关闭'));assert(loginGuidance(native).includes('请在官方客户端登录'));
 `)
 }
+
+func TestDashboardAutoConfigurationAndEffectiveState(t *testing.T) {
+	dashboardScript(t, `
+(async()=>{
+ state.instance={id:'fixture-a'};state.trustedID='fixture-a';state.online=true;
+ const tool={tool:'antigravity',enabled:true,auto:false,auto_reason:'全局自动切换已关闭；仅开启此工具不会开启全局开关',capabilities:{auto_switch:{available:true}}};
+ state.overview={tools:[tool]};renderToolSettings(tool);
+ assert($('toolSettings').innerHTML.includes('aria-checked="true"'));assert($('toolSettings').innerHTML.includes('已启用'));
+ let sent,feedback;mutate=async(t,label,path,body,done)=>{sent=body;feedback=done({tools:[{tool:t,enabled:false,auto:false}]})};
+ const button={disabled:false,dataset:{act:'auto',tool:'antigravity'}};
+ await onClick({target:{closest:s=>s==='[data-act]'?button:null}});
+ assert.equal(sent.enabled,false);assert(feedback.includes('已停用'));
+ tool.enabled=false;renderToolSettings(tool);assert($('toolSettings').innerHTML.includes('aria-checked="false"'));
+ mutate=async(t,label,path,body,done)=>{sent=body;feedback=done({tools:[{...tool,enabled:true}]})};
+ await onClick({target:{closest:s=>s==='[data-act]'?button:null}});
+ assert.equal(sent.enabled,true);assert(feedback.includes('已启用，尚未生效'));assert(feedback.includes('全局自动切换已关闭'));assert(!feedback.includes('已启用并生效'));
+ assert(autoResult({tools:[{...tool,enabled:true,auto:true}]},tool.tool).includes('已启用并生效'));
+ assert(autoResult({tools:[]},tool.tool).includes('请刷新状态核对'));
+})().catch(e=>{console.error(e);process.exitCode=1});
+`)
+}
+
+func TestDashboardSwitchGuidanceMatchesClientBoundaries(t *testing.T) {
+	dashboardScript(t, `
+assert(switchImpact('codex').includes('需先退出'));assert(switchImpact('codex').includes('只更新 Codex CLI'));assert(switchImpact('codex').includes('不恢复桌面登录'));
+assert(switchImpact('grok').includes('只更新 Grok CLI'));assert(switchImpact('grok').includes('不修改 Grok Bot 桌面登录'));
+state.overview={tools:[{tool:'cursor',capabilities:{desktop_sync:{available:true}}}]};
+assert(switchImpact('cursor').includes('请先退出 Cursor 桌面端'));assert(switchImpact('cursor').includes('同步更新 IDE 和 CLI'));assert(switchImpact('cursor').includes('桌面端需自行重新打开'));
+for(const tool of ['codex','grok','cursor'])assert(!switchImpact(tool).includes('关闭并重启'));
+assert(switchNote({tool:'codex',busy:true}).includes('需先退出'));assert(switchNote({tool:'cursor',busy:true,capabilities:{desktop_sync:{available:true}}}).includes('请先退出'));
+state.overview.tools[0].capabilities.desktop_sync.available=false;
+assert(switchImpact('cursor').includes('只更新 Cursor CLI'));assert(switchImpact('cursor').includes('不管理 Cursor IDE'));assert(!switchImpact('cursor').includes('请先退出'));
+assert(switchNote({tool:'cursor',busy:true}).includes('不管理 Cursor IDE'));assert(!switchNote({tool:'cursor',busy:true}).includes('请先退出'));
+`)
+}
+
+func TestDashboardUnavailableAutoCanStillBeDisabled(t *testing.T) {
+	dashboardScript(t, `
+state.instance={id:'fixture-a'};state.trustedID='fixture-a';state.online=true;
+const tool={tool:'cursor',enabled:true,auto:false,capabilities:{auto_switch:{available:false,reason:'当前平台不可用'}}};
+const toggle=()=>{renderToolSettings(tool);return $('toolSettings').innerHTML.match(/<button[^>]+data-act="auto"[^>]*>/)[0]};
+assert(!toggle().includes('disabled'));tool.enabled=false;assert(toggle().includes('disabled'));
+tool.enabled=true;state.online=false;assert(toggle().includes('disabled'));state.online=true;state.operations.set('cursor',{label:'查询'});assert(toggle().includes('disabled'));
+`)
+}
+
+func TestDashboardBotProbeFeedbackUsesIndependentResult(t *testing.T) {
+	dashboardScript(t, `
+(async()=>{
+ const bot=(cls)=>({class:'ok',updated:true,buckets:[{id:'api',class:'ok'},{id:'bot',class:cls}]});
+ for(const cls of ['unknown','expired','']){const text=probeFeedback(bot(cls),'grokbot','account');assert(text.includes('未能确认')||text.includes('未确认'));assert(!text.includes('查询完成'))}
+ assert(probeFeedback({class:'ok',updated:true},'grokbot','account').includes('未能确认'));
+ assert(probeFeedback({class:'unknown',updated:false,buckets:[{id:'bot',class:'ok'}]},'grokbot','account').includes('查询完成'));
+ assert(probeFeedback({tools:[{tool:'cursor',accounts:[{class:'ok'}]},{tool:'grokbot',accounts:[{class:'unknown'},{class:'expired'},{class:'ok',quota_stale:true},{class:'ok'}]}]},'grokbot','').includes('1 个账号已确认，3 个尚未确认（1 个认证已失效'));
+ assert(probeFeedback({tools:[{tool:'cursor',accounts:[{class:'ok'}]}]},'grokbot','').includes('未能确认'));
+ assert(probeFeedback({tools:[{tool:'codex',accounts:[{class:'ok',last_probe_class:'unknown'}]}]},'codex','').includes('1 个尚未确认'));
+ state.overview={tools:[{tool:'grokbot',derived_from:'cursor',accounts:[{stable_id:'account'}]}]};
+ let sent,feedback;mutate=async(t,label,path,body,done)=>{sent=body;feedback=done(bot('unknown'))};
+ let button={disabled:false,dataset:{act:'probe',tool:'grokbot',id:'account'}};
+ await onClick({target:{closest:s=>s==='[data-act]'?button:null}});assert.equal(sent.tool,'cursor');assert.equal(sent.id,'account');assert(feedback.includes('未能确认'));
+ mutate=async(t,label,path,body,done)=>{sent=body;feedback=done({tools:[{tool:'cursor',accounts:[{class:'ok'}]},{tool:'grokbot',accounts:[{class:'unknown'}]}]})};
+ button.dataset.act='probe-tool';await onClick({target:{closest:s=>s==='[data-act]'?button:null}});assert.equal(sent.id,'');assert(feedback.includes('1 个尚未确认'));
+})().catch(e=>{console.error(e);process.exitCode=1});
+`)
+}

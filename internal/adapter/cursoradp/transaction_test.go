@@ -11,7 +11,7 @@ import (
 )
 
 func TestDesktopTurnCannotBeInferredFromAbsentCLI(t *testing.T) {
-	ad := Adapter{List: func() ([]adapter.Proc, error) {
+	ad := Adapter{Platform: "darwin", List: func() ([]adapter.Proc, error) {
 		return []adapter.Proc{{PID: 42, Command: `"C:\Cursor\Cursor.exe"`}}, nil
 	}}
 	if ad.Idle(t.TempDir(), time.Second) {
@@ -28,7 +28,7 @@ func TestUndoReportsFailedCredentialRollback(t *testing.T) {
 	if err := os.WriteFile(cliAuth(home), []byte("old"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	ad := Adapter{List: func() ([]adapter.Proc, error) { return nil, nil }}
+	ad := Adapter{Platform: "darwin", List: func() ([]adapter.Proc, error) { return nil, nil }}
 	undo, err := ad.RestoreWithRollback(home, transactionBlob(t), adapter.RestoreOpts{CLIOnly: true})
 	if err != nil {
 		t.Fatal(err)
@@ -61,7 +61,7 @@ func TestRestoreUndoPreservesAbsentFilesAndUnrelatedDB(t *testing.T) {
 			t.Run(map[bool]string{false: "full", true: "cli"}[cliOnly]+map[bool]string{false: "-absent", true: "-existing"}[exists], func(t *testing.T) {
 				t.Setenv("QSWITCH_IN_TEST", "1")
 				home := t.TempDir()
-				ad := Adapter{List: func() ([]adapter.Proc, error) { return nil, nil }}
+				ad := Adapter{Platform: "darwin", List: func() ([]adapter.Proc, error) { return nil, nil }}
 				if exists {
 					if err := writeDesktop(home, map[string]string{"cursorAuth/accessToken": "old-token", "cursorAuth/cachedEmail": "old@example.test"}); err != nil {
 						t.Fatal(err)
@@ -143,7 +143,7 @@ func TestUnreadableOrMalformedConfigPreventsPartialSwitch(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			ad := Adapter{List: func() ([]adapter.Proc, error) { return nil, nil }}
+			ad := Adapter{Platform: "darwin", List: func() ([]adapter.Proc, error) { return nil, nil }}
 			if _, err := ad.RestoreWithRollback(home, transactionBlob(t), adapter.RestoreOpts{CLIOnly: true}); err == nil {
 				t.Fatal("unsafe config accepted")
 			}

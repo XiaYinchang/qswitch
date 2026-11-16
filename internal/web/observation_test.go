@@ -23,7 +23,7 @@ func observationApp(t *testing.T) *app.App {
 	if err := a.State.UpsertAccount(state.Account{Tool: "cursor", StableID: cursorID, Email: "cursor@example.test", LastQuotaClass: "ok", LastUsedPct: 25}); err != nil {
 		t.Fatal(err)
 	}
-	payload := `{"kind":"cursor.auth.v1","identity":{"tool":"cursor","stable_id":"cursor-observation-fixture","email":"cursor@example.test"},"desktop":{"cursorAuth/accessToken":"fixture-cursor-access"}}`
+	payload := `{"kind":"cursor.auth.v1","identity":{"tool":"cursor","stable_id":"cursor-observation-fixture","email":"cursor@example.test"},"cli_auth_json":{"accessToken":"fixture-cursor-access"},"cli_auth_info":{"authId":"cursor-observation-fixture","email":"cursor@example.test"}}`
 	if err := a.Vault.Put("cursor", cursorID, []byte(payload)); err != nil {
 		t.Fatal(err)
 	}

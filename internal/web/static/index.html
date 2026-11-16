@@ -1404,7 +1404,13 @@
           parts.push(
             tool.tool === "kimi"
               ? "请在对应终端退出 Kimi 会话；仅空闲不会解除阻塞。"
-              : "当前客户端仍在使用，切换前须满足空闲条件。",
+              : tool.tool === "codex"
+                ? "ChatGPT 桌面端若在运行，需先退出；Codex CLI 须满足空闲条件后才能切换。"
+                : tool.tool === "cursor"
+                  ? capability(tool, "desktop_sync").available
+                    ? "请先退出 Cursor 桌面端；Cursor CLI 须满足空闲条件后才能切换。"
+                    : "Cursor CLI 须满足空闲条件后才能切换；当前实例不管理 Cursor IDE 登录。"
+                  : "当前客户端仍在使用，切换前须满足空闲条件。",
           );
         }
         return parts.join(" ");
@@ -1701,7 +1707,58 @@
         const cap = capability(tool, "auto_switch");
         patchHTML(
           $("toolSettings"),
-          `<details class="tool-settings" data-detail="tool-settings"><summary data-focus="tool-settings">${attr(toolTitle(tool.tool))} 设置与诊断</summary><div class="settings-row"><div class="setting-copy"><strong>自动切换</strong><p>${attr(tool.auto_reason || cap.reason || (tool.tool === "antigravity" ? "两组额度都耗尽且会话空闲时切换。" : "按此工具的额度与会话条件切换账号。"))}</p></div><button class="switch" role="switch" aria-label="${attr(toolTitle(tool.tool))} 自动切换" aria-checked="${Boolean(tool.auto)}" data-act="auto" data-tool="${attr(tool.tool)}" data-focus="auto:${attr(tool.tool)}" ${!canWrite() || busy(tool.tool) || !cap.available ? "disabled" : ""}>${tool.auto ? "已开启" : "已关闭"}</button></div>${!["codex", "grok"].includes(tool.tool) ? `<div class="details-content">${loginGuidance(tool)}</div>` : ""}<div class="actions"><button class="ghost" data-act="diagnostics" data-tool="${attr(tool.tool)}" data-focus="diagnostics:${attr(tool.tool)}">查看诊断</button></div><div class="diagnostics" id="diagnostics" hidden></div></details>`,
+          `<details class="tool-settings" data-detail="tool-settings"><summary data-focus="tool-settings">${attr(toolTitle(tool.tool))} 设置与诊断</summary><div class="settings-row"><div class="setting-copy"><strong>自动切换</strong><p>${attr(tool.auto_reason || cap.reason || (tool.tool === "antigravity" ? "两组额度都耗尽且会话空闲时切换。" : "按此工具的额度与会话条件切换账号。"))}</p></div><button class="switch" role="switch" aria-label="${attr(toolTitle(tool.tool))} 自动切换配置" aria-checked="${Boolean(tool.enabled)}" data-act="auto" data-tool="${attr(tool.tool)}" data-focus="auto:${attr(tool.tool)}" ${!canWrite() || busy(tool.tool) || (!cap.available && !tool.enabled) ? "disabled" : ""}>${tool.enabled ? "已启用" : "已停用"}</button></div>${!["codex", "grok"].includes(tool.tool) ? `<div class="details-content">${loginGuidance(tool)}</div>` : ""}<div class="actions"><button class="ghost" data-act="diagnostics" data-tool="${attr(tool.tool)}" data-focus="diagnostics:${attr(tool.tool)}">查看诊断</button></div><div class="diagnostics" id="diagnostics" hidden></div></details>`,
+        );
+      }
+      function probeFeedback(result, tool, id) {
+        const label = tool === "grokbot" ? "Bot 用量" : "用量";
+        const known = (value) => ["ok", "soft", "exhausted"].includes(value);
+        if (!id) {
+          const accounts = result?.tools?.find(
+            (entry) => entry.tool === tool,
+          )?.accounts;
+          if (!Array.isArray(accounts))
+            return `本次未能确认${label}，请刷新状态核对。`;
+          if (!accounts.length) return `暂无可查询的${label}账号。`;
+          const unconfirmed = accounts.filter(
+            (account) =>
+              !known(account.class) ||
+              account.quota_stale ||
+              ["unknown", "expired"].includes(account.last_probe_class),
+          );
+          if (!unconfirmed.length)
+            return `${label}查询完成，${accounts.length} 个账号已确认。`;
+          const expired = unconfirmed.filter(
+            (account) =>
+              account.class === "expired" ||
+              account.last_probe_class === "expired",
+          ).length;
+          return `${label}查询完成：${accounts.length - unconfirmed.length} 个账号已确认，${unconfirmed.length} 个尚未确认${expired ? `（${expired} 个认证已失效，请重新登录）` : ""}。`;
+        }
+        const cls =
+          tool === "grokbot"
+            ? result?.buckets?.find((bucket) => bucket.id === "bot")?.class
+            : result?.class;
+        if (cls === "expired")
+          return `${label}未确认，认证已失效，请重新登录。`;
+        if (!known(cls) || (tool !== "grokbot" && result?.updated === false))
+          return `本次未能确认${label}，请查看账号的查询详情与历史记录。`;
+        return `${label}查询完成。`;
+      }
+      function autoResult(overview, tool) {
+        const updated = overview?.tools?.find(
+          (entry) => entry.tool === actionTool(tool),
+        );
+        if (
+          typeof updated?.enabled !== "boolean" ||
+          typeof updated?.auto !== "boolean"
+        )
+          return "设置请求已完成，但服务未返回此工具的配置状态；请刷新状态核对。";
+        if (!updated.enabled) return "此工具的自动切换配置已停用。";
+        if (updated.auto) return "此工具的自动切换配置已启用并生效。";
+        return (
+          "此工具的自动切换配置已启用，尚未生效。" +
+          (updated.auto_reason || "请查看工具设置中的生效条件。")
         );
       }
       function acceptOverview(ov) {
@@ -1901,10 +1958,12 @@
       function switchImpact(tool) {
         return (
           {
-            codex: "会关闭并重启 ChatGPT.app，空闲的 Codex CLI 会结束。",
-            grok: "会关闭并重启 Grok Bot.app，空闲的 Grok CLI 会结束。",
-            cursor:
-              "会关闭并重启 Cursor.app，空闲 CLI 会结束；只修改登录字段，保留聊天记录。",
+            codex:
+              "ChatGPT 桌面端若在运行，需先退出。只更新 Codex CLI 账号，不恢复桌面登录；空闲的 Codex CLI 会结束。",
+            grok: "只更新 Grok CLI 账号，不修改 Grok Bot 桌面登录；空闲的 Grok CLI 会结束。",
+            cursor: capability(toolView(tool), "desktop_sync").available
+              ? "请先退出 Cursor 桌面端。同步更新 IDE 和 CLI 的登录字段，保留聊天记录；空闲 CLI 会结束，桌面端需自行重新打开。"
+              : "只更新 Cursor CLI 账号，不管理 Cursor IDE 登录；空闲 CLI 会结束。",
             devin:
               "只切换 Devin CLI，新进程使用新账号；Devin App 使用独立登录。",
             kimi: "须先退出全部 Kimi 会话；仅空闲不会解除阻塞，新进程使用新账号。",
@@ -2328,20 +2387,16 @@
               "查询用量",
               "api/probe",
               { tool: actionTool(tool), id: act === "probe" ? id : "" },
-              (r) =>
-                r.class === "expired"
-                  ? "认证已失效，请重新登录。"
-                  : r.updated === false
-                    ? "本次未能确认用量，详情中已标明历史记录。"
-                    : "用量查询完成。",
+              (result) =>
+                probeFeedback(result, tool, act === "probe" ? id : ""),
             );
           } else if (act === "auto") {
             await mutate(
               tool,
               "更新自动切换",
               "api/auto",
-              { tool: actionTool(tool), enabled: !t.auto },
-              () => `自动切换已${t.auto ? "关闭" : "开启"}。`,
+              { tool: actionTool(tool), enabled: !t.enabled },
+              (result) => autoResult(result, tool),
             );
           } else if (act === "switch" && ac) {
             askConfirm({

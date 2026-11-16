@@ -68,7 +68,7 @@ func (a *App) updateConfig(change func(*config.Config) error) error {
 }
 
 func (a *App) SetAuto(tool adapter.Tool, enabled bool) error {
-	if enabled && tool == adapter.Cursor {
+	if enabled && tool == adapter.Cursor && a.cursorDesktopSync() {
 		if p, err := a.State.GetPointer(string(tool)); err == nil && p.Desync {
 			return errors.New("cursor accounts are desynchronized; align the account before enabling automatic switching")
 		}

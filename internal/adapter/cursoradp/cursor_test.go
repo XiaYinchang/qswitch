@@ -31,7 +31,7 @@ func TestDualWriteAndIncomplete(t *testing.T) {
 	os.WriteFile(cliAuth(home), []byte(`{"accessToken":"c-tok","refreshToken":"c-ref"}`), 0o600)
 	os.WriteFile(cliCfg(home), []byte(`{"authInfo":{"email":"cli@x.com","authId":"google-oauth2|cli"}}`), 0o644)
 
-	ad := Adapter{List: func() ([]adapter.Proc, error) { return nil, nil }}
+	ad := Adapter{Platform: "darwin", List: func() ([]adapter.Proc, error) { return nil, nil }}
 	blobs, warn, err := ad.Capture(home)
 	if err != nil {
 		t.Fatal(err)
