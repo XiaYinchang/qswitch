@@ -159,10 +159,11 @@ func loginTool(r *http.Request) adapter.Tool {
 
 func preserveNavigation(path string, query url.Values) string {
 	values := url.Values{}
-	for _, key := range []string{"expected_instance", "env"} {
-		if value := query.Get(key); value != "" {
-			values.Set(key, value)
-		}
+	if expected := query.Get("expected_instance"); expected != "" {
+		values.Set("expected_instance", expected)
+	}
+	if query.Has("env") {
+		values.Set("env", query.Get("env"))
 	}
 	if len(values) == 0 {
 		return path

@@ -174,3 +174,65 @@ func TestNavigationQueryValuesCannotChangeRedirectDestination(t *testing.T) {
 		t.Fatalf("navigation query changed redirect identity or destination: %s", got)
 	}
 }
+
+func TestEmptyEnvironmentLoginNeverFallsBackToGateway(t *testing.T) {
+	a := setupApp(t)
+	if err := SetPassword(a.DataDir, testUser, testPass); err != nil {
+		t.Fatal(err)
+	}
+	s := New(a, "127.0.0.1:7432")
+	h := s.Handler()
+	query := url.Values{"env": {""}, "expected_instance": {a.Instance().ID}}
+	login := "/qswitch/login?" + query.Encode()
+	root := "/qswitch/?" + query.Encode()
+	w := do(h, proxied("GET", "/?"+query.Encode()))
+	if w.Code != 303 || w.Header().Get("Location") != login {
+		t.Errorf("unauthorized redirect discarded explicit empty env: %d %s", w.Code, w.Header().Get("Location"))
+	}
+	w = do(h, proxied("GET", "/login?"+query.Encode()))
+	if w.Code != 200 || !strings.Contains(html.UnescapeString(w.Body.String()), `action="`+login+`"`) {
+		t.Error("login form discarded explicit empty env")
+	}
+	w = do(h, withForm(proxied("POST", "/login?"+query.Encode()), testUser, "wrong-password"))
+	if w.Code != 401 || !strings.Contains(html.UnescapeString(w.Body.String()), `action="`+login+`"`) {
+		t.Error("failed login form discarded explicit empty env")
+	}
+	w = do(h, withForm(proxied("POST", "/login?"+query.Encode()), testUser, testPass))
+	if w.Code != 303 || w.Header().Get("Location") != root {
+		t.Errorf("successful login fell back to gateway: %d %s", w.Code, w.Header().Get("Location"))
+	}
+	cookie := sessionCookieOf(t, w)
+	r := proxied("GET", "/login?"+query.Encode())
+	r.AddCookie(cookie)
+	if w := do(h, r); w.Code != 303 || w.Header().Get("Location") != root {
+		t.Error("authenticated login navigation discarded explicit empty env")
+	}
+	s.Now = func() time.Time { return time.Now().Add(sessionTTL + time.Minute) }
+	r = proxied("GET", "/?"+query.Encode())
+	r.AddCookie(cookie)
+	if w := do(h, r); w.Code != 303 || w.Header().Get("Location") != login {
+		t.Error("expired session discarded explicit empty env")
+	}
+	w = do(h, proxied("GET", "/login?"+query.Encode()))
+	if w.Code != 200 || !strings.Contains(html.UnescapeString(w.Body.String()), `action="`+login+`"`) {
+		t.Error("expired session login form discarded explicit empty env")
+	}
+	w = do(h, withForm(proxied("POST", "/login?"+query.Encode()), testUser, testPass))
+	if w.Code != 303 || w.Header().Get("Location") != root {
+		t.Error("renewed login fell back to gateway")
+	}
+}
+
+func TestNavigationDistinguishesAbsentAndEmptyEnvironment(t *testing.T) {
+	for _, present := range []bool{false, true} {
+		query := url.Values{"expected_instance": {""}}
+		want := "/qswitch/login"
+		if present {
+			query.Set("env", "")
+			want += "?env="
+		}
+		if got := preserveNavigation("/qswitch/login", query); got != want {
+			t.Errorf("env present=%v: got %s, want %s", present, got, want)
+		}
+	}
+}
