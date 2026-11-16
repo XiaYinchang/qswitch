@@ -43,9 +43,9 @@ func newAdapterHarness(t *testing.T) *adapterHarness {
 			}
 			return raw, adapter.Identity{Tool: adapter.Antigravity, StableID: "subject:" + c.IDTokenEmail, Email: c.IDTokenEmail}, nil
 		},
-		write: func(home string, raw []byte) (func() error, error) {
+		write: func(home string, raw []byte, beforeWrite func() error) (func() error, error) {
 			var undo func() error
-			err := writeCredentialTransaction(home, raw, h.backend, livefile.AtomicWrite, &undo)
+			err := writeCredentialTransaction(home, raw, h.backend, livefile.AtomicWrite, &undo, beforeWrite)
 			return undo, err
 		},
 	}

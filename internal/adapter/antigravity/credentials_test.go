@@ -98,7 +98,7 @@ func TestWriteCredentialTransactionRestoresDistinctSlotsAfterClientFailure(t *te
 	putSyntheticCredential(t, paths[1], second)
 	bk := &memoryCredentialBackend{raw: append([]byte(nil), key...)}
 	var undo func() error
-	if err := writeCredentialTransaction(home, syntheticCredential("target"), bk, livefile.AtomicWrite, &undo); err != nil {
+	if err := writeCredentialTransaction(home, syntheticCredential("target"), bk, livefile.AtomicWrite, &undo, nil); err != nil {
 		t.Fatal(err)
 	}
 	parsed, err := ParseCredential(bk.raw)
@@ -168,7 +168,7 @@ func TestWriteCredentialTransactionRejectsUnsupportedNativeSlotsBeforeAnyWrite(t
 					return livefile.AtomicWrite(path, raw, mode)
 				}
 				var undo func() error
-				if err := writeCredentialTransaction(home, syntheticCredential("target"), bk, write, &undo); err == nil {
+				if err := writeCredentialTransaction(home, syntheticCredential("target"), bk, write, &undo, nil); err == nil {
 					t.Fatal("unsupported existing account was replaced")
 				}
 				if bk.writes != 0 || writes != 0 || undo != nil || !bytes.Equal(bk.raw, key) {
@@ -259,7 +259,7 @@ func TestHeadlessCredentialsUseExistingNativeFileWithoutCreatingLogin(t *testing
 	old := syntheticCredential("old")
 	putSyntheticCredential(t, path, old)
 	var undo func() error
-	if err := writeCredentialTransaction(home, syntheticCredential("target"), bk, livefile.AtomicWrite, &undo); err != nil {
+	if err := writeCredentialTransaction(home, syntheticCredential("target"), bk, livefile.AtomicWrite, &undo, nil); err != nil {
 		t.Fatal(err)
 	}
 	if bk.writes != 0 {
@@ -277,7 +277,7 @@ func TestHeadlessCredentialsUseExistingNativeFileWithoutCreatingLogin(t *testing
 func TestCredentialRollbackRefusesExternalChange(t *testing.T) {
 	bk := &memoryCredentialBackend{raw: syntheticCredential("old")}
 	var undo func() error
-	if err := writeCredentialTransaction(t.TempDir(), syntheticCredential("target"), bk, livefile.AtomicWrite, &undo); err != nil {
+	if err := writeCredentialTransaction(t.TempDir(), syntheticCredential("target"), bk, livefile.AtomicWrite, &undo, nil); err != nil {
 		t.Fatal(err)
 	}
 	external := syntheticCredential("external")
