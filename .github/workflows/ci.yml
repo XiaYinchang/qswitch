@@ -10,7 +10,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # Keep the macOS release explicit so the test platform cannot drift
+        # when GitHub moves its latest alias to a different image.
+        os: [ubuntu-latest, macos-26]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

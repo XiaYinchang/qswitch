@@ -198,3 +198,47 @@ func TestDashboardGatewayUnknownWriteOnlyRechecksState(t *testing.T) {
 })().catch(e=>{console.error(e);process.exitCode=1});
 `)
 }
+
+func TestDashboardBootstrap401PreservesRequestedEnvironment(t *testing.T) {
+	for _, stage := range []string{"catalog", "session"} {
+		t.Run(stage, func(t *testing.T) {
+			dashboardScript(t, environmentFixtures+`
+const expiredStage='`+stage+`';
+(async()=>{
+ for(const requested of [B,'','not-configured',null]){
+  state.gateway=null;state.envID='';state.apiBase='';state.trustedID='';state.instance=null;state.online=false;state.overview=null;state.expected=A;
+  const page=new URL('https://manage.example.test/qswitch/?expected_instance='+A+'#codex');
+  if(requested!==null)page.searchParams.set('env',requested);
+  location.href=page.href;location.redirect=undefined;
+  const calls=[];setFetch(async(path,opts)=>{
+   calls.push(path);
+   if(path==='api/environments')return expiredStage==='catalog'?response({},401):response({instance:info(A),environments:entries});
+   assert.equal(path,'api/session');assert.equal(opts.headers['X-Qswitch-Instance'],A);return response({},401);
+  });
+  await bootstrap();
+  assert(location.redirect,'authentication failure must redirect to login');
+  const login=new URL(location.redirect);
+  assert.equal(login.pathname,'/qswitch/login');assert.equal(login.hash,'#codex');
+  assert.equal(login.searchParams.has('env'),requested!==null,'preserve absent versus empty env');
+  assert.equal(login.searchParams.get('env'),requested,'bootstrap must not replace the requested environment with the gateway');
+  assert.equal(login.searchParams.get('expected_instance'),A,'login identity must remain the gateway');
+  assert.equal(state.envID,'');assert.equal(calls.length,expiredStage==='catalog'?1:2);
+ }
+})().catch(e=>{console.error(e);process.exitCode=1});
+`)
+		})
+	}
+}
+
+func TestDashboardSelectedEnvironmentTakesPriorityOn401(t *testing.T) {
+	dashboardScript(t, environmentFixtures+`
+(async()=>{
+ state.envID=B;state.gateway=info(A);state.expected='';
+ location.href='https://manage.example.test/qswitch/?env='+A+'#antigravity';
+ setFetch(async()=>response({},401));
+ await assert.rejects(api('api/session',{global:true}));
+ const login=new URL(location.redirect);
+ assert.equal(login.searchParams.get('env'),B);assert.equal(login.searchParams.get('expected_instance'),A);assert.equal(login.hash,'#antigravity');
+})().catch(e=>{console.error(e);process.exitCode=1});
+`)
+}
