@@ -96,7 +96,10 @@ CREATE INDEX IF NOT EXISTS quota_log_account_ts ON quota_log(tool,stable_id,ts);
 		return err
 	}
 	_, _ = d.sql.Exec(`ALTER TABLE accounts ADD COLUMN quota_detail TEXT`)
-	return d.migrateAccountIdentity()
+	if err := d.migrateAccountIdentity(); err != nil {
+		return err
+	}
+	return d.migrateQuotaPolicy()
 }
 
 func (d *DB) migrateAccountIdentity() error {
