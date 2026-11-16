@@ -94,8 +94,14 @@ mac=sys.platform=='darwin'; uid=os.getuid(); plist=home/'Library/LaunchAgents/co
 def run(args): return subprocess.run(args,check=True,capture_output=True,text=True).stdout.strip()
 def health(): return json.load(urllib.request.urlopen('http://127.0.0.1:7432/api/health',timeout=4))
 def safe():
- db=sqlite3.connect('file:'+str(data/'state.db')+'?mode=ro',uri=True)
- n=db.execute('select count(*) from pending_switch').fetchone()[0];db.close()
+ # Closing the daemon can remove WAL/SHM files. SQLite on macOS cannot
+ # always reopen that WAL database with mode=ro. Open only an existing
+ # database so SQLite can recreate its sidecars, then prohibit SQL writes.
+ db=sqlite3.connect('file:'+str(data/'state.db')+'?mode=rw',uri=True)
+ try:
+  db.execute('pragma query_only=ON')
+  n=db.execute('select count(*) from pending_switch').fetchone()[0]
+ finally: db.close()
  assert n==0 and not (data/'managed-claude/pending.json').exists(),'switch in progress; deployment refused'
 def stop():
  if mac:

@@ -1,5 +1,6 @@
 """Exercise the actual deploy.sh Python transaction without a host or credentials."""
 
+import ast
 import contextlib
 import hashlib
 import io
@@ -37,9 +38,13 @@ class DeploymentTransactionTest(unittest.TestCase):
             bindir.mkdir(parents=True)
             stage.mkdir(parents=True)
             db = sqlite3.connect(data / "state.db")
+            wal_database = failure == "readonly after stop"
+            if wal_database:
+                db.execute("pragma journal_mode=WAL")
             db.execute("create table pending_switch (tool text)")
             db.commit()
-            db.close()
+            if not wal_database:
+                db.close()
             digests = []
             originals = {}
             for name in ("qswitch", "qswitchd"):
@@ -55,6 +60,19 @@ class DeploymentTransactionTest(unittest.TestCase):
             calls = []
             replaced = []
             real_replace = os.replace
+            real_connect = sqlite3.connect
+            stopped_database_checks = []
+
+            def connect(database, *args, **kwargs):
+                if wal_database and service["version"] is None:
+                    self.assertFalse((data / "state.db-wal").exists())
+                    self.assertFalse((data / "state.db-shm").exists())
+                    stopped_database_checks.append(str(database))
+                    # Reproduce Book's SQLite boundary without relying on the
+                    # devbox SQLite build or filesystem behaving identically.
+                    if "mode=ro" in str(database):
+                        raise sqlite3.OperationalError("unable to open database file")
+                return real_connect(database, *args, **kwargs)
 
             def replace(source, destination):
                 source, destination = Path(source), Path(destination)
@@ -68,6 +86,8 @@ class DeploymentTransactionTest(unittest.TestCase):
                 calls.append(tuple(args))
                 if args[:3] == ["systemctl", "--user", "stop"]:
                     service["version"] = None
+                    if wal_database:
+                        db.close()  # Last daemon connection removes WAL/SHM.
                     return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
                 if args[:3] == ["systemctl", "--user", "start"]:
                     service["version"] = (bindir / "qswitchd").read_text().splitlines()[0]
@@ -98,13 +118,18 @@ class DeploymentTransactionTest(unittest.TestCase):
 
             output = io.StringIO()
             exited = None
-            with patch("pathlib.Path.home", return_value=home), patch("sys.argv", ["-", NEW, "all", *digests]), patch("sys.platform", "linux"), patch("subprocess.run", side_effect=run), patch("urllib.request.urlopen", side_effect=urlopen), patch("time.sleep"), patch("os.replace", side_effect=replace), contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            with patch("pathlib.Path.home", return_value=home), patch("sys.argv", ["-", NEW, "all", *digests]), patch("sys.platform", "linux"), patch("subprocess.run", side_effect=run), patch("urllib.request.urlopen", side_effect=urlopen), patch("time.sleep"), patch("os.replace", side_effect=replace), patch("sqlite3.connect", side_effect=connect), contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
                 try:
                     exec(transaction_source(), {"__name__": "__main__"})
                 except (SystemExit, AssertionError) as error:
                     exited = error
+                finally:
+                    if wal_database:
+                        db.close()
 
-            if failure in (None, "derived"):
+            if wal_database:
+                self.assertTrue(stopped_database_checks, "stopped database check was not exercised")
+            if failure in (None, "derived", "readonly after stop"):
                 self.assertIsNone(exited, output.getvalue())
                 self.assertEqual(service["version"], NEW)
                 receipt = json.loads((data / "deployment.json").read_text())
@@ -127,6 +152,9 @@ class DeploymentTransactionTest(unittest.TestCase):
     def test_success(self):
         self.exercise()
 
+    def test_stopped_database_without_wal_can_be_checked(self):
+        self.exercise("readonly after stop")
+
     def test_second_replace_failure_restores_both_binaries(self):
         self.exercise("second replace")
 
@@ -147,6 +175,57 @@ class DeploymentTransactionTest(unittest.TestCase):
 
     def test_preflight_failure_cleans_stage_without_stopping_service(self):
         self.exercise("checksum")
+
+
+class DeploymentDatabaseSafetyTest(unittest.TestCase):
+    def safe(self, data):
+        # Extract the actual transaction's function, without running service or
+        # binary operations. This keeps the SQLite contract tied to production.
+        script = Path(__file__).with_name("deploy.sh").read_text()
+        body = re.search(r'if ! on "python3 - \$release \$scope \$h1 \$h2" <<\'PY\'\n(.*?)\nPY', script, re.S)
+        self.assertIsNotNone(body)
+        tree = ast.parse(body.group(1))
+        function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "safe")
+        namespace = {"sqlite3": sqlite3, "data": data}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), "deploy.sh:safe", "exec"), namespace)
+        return namespace["safe"]
+
+    def test_missing_database_is_not_created(self):
+        with tempfile.TemporaryDirectory(prefix="qswitch-missing-db-test-") as temporary:
+            data = Path(temporary)
+            with self.assertRaises(sqlite3.OperationalError):
+                self.safe(data)()
+            self.assertFalse((data / "state.db").exists(), "safety inspection created a missing database")
+            self.assertEqual(list(data.iterdir()), [], "missing database inspection left SQLite files")
+
+    def test_query_only_blocks_writes_during_safety_inspection(self):
+        with tempfile.TemporaryDirectory(prefix="qswitch-query-only-test-") as temporary:
+            data = Path(temporary)
+            with sqlite3.connect(data / "state.db") as database:
+                database.execute("create table pending_switch (tool text)")
+            database.close()
+            checked = []
+            test = self
+            real_connect = sqlite3.connect
+
+            class InspectConnection(sqlite3.Connection):
+                def execute(self, sql, *args, **kwargs):
+                    if sql.lstrip().lower().startswith("select"):
+                        test.assertEqual(super().execute("pragma query_only").fetchone()[0], 1)
+                        with test.assertRaises(sqlite3.OperationalError):
+                            super().execute("insert into pending_switch values ('synthetic')")
+                        checked.append(True)
+                    return super().execute(sql, *args, **kwargs)
+
+            def connect(database, *args, **kwargs):
+                return real_connect(database, *args, factory=InspectConnection, **kwargs)
+
+            with patch("sqlite3.connect", side_effect=connect):
+                self.safe(data)()
+            self.assertTrue(checked, "safe() did not query the actual database")
+            with real_connect(data / "state.db") as database:
+                self.assertEqual(database.execute("select count(*) from pending_switch").fetchone()[0], 0)
+            database.close()
 
 
 if __name__ == "__main__":
