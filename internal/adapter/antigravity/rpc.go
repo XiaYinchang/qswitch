@@ -10,13 +10,9 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"reflect"
-	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"qswitch/internal/adapter"
@@ -40,6 +36,12 @@ func (e Endpoint) String() string {
 func (e Endpoint) GoString() string { return e.String() }
 
 func Discover(home string, list func() ([]adapter.Proc, error)) ([]Endpoint, error) {
+	return DiscoverManaged(home, "", list)
+}
+
+// DiscoverManaged also reads the private records created by RunCLI. Native
+// desktop discovery remains authoritative for independently launched clients.
+func DiscoverManaged(home, dataDir string, list func() ([]adapter.Proc, error)) ([]Endpoint, error) {
 	if list == nil {
 		list = (busy.PS{}).List
 	}
@@ -55,8 +57,11 @@ func Discover(home string, list func() ([]adapter.Proc, error)) ([]Endpoint, err
 	}
 	var endpoints []Endpoint
 	seen := make(map[string]bool)
-	for _, name := range []string{"antigravity", "antigravity-cli"} {
-		dir := filepath.Join(home, ".gemini", name, "daemon")
+	directories := []string{filepath.Join(home, ".gemini", "antigravity", "daemon"), filepath.Join(home, ".gemini", "antigravity-cli", "daemon")}
+	if dataDir != "" {
+		directories = append(directories, cliRecordDir(dataDir))
+	}
+	for _, dir := range directories {
 		entries, err := os.ReadDir(dir)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
@@ -96,7 +101,7 @@ func Discover(home string, list func() ([]adapter.Proc, error)) ([]Endpoint, err
 		}
 	}
 	if len(active) != 0 && len(endpoints) == 0 {
-		return nil, errors.New("antigravity discovery: active native backend has no verified daemon endpoint")
+		return nil, errors.New("antigravity discovery: active native backend has no verified daemon endpoint; start CLI sessions with qswitch run antigravity")
 	}
 	return endpoints, nil
 }
@@ -154,41 +159,6 @@ func readDaemonRecord(path string) ([]byte, error) {
 		return nil, errors.New("antigravity discovery: daemon file changed")
 	}
 	return raw, nil
-}
-
-func privateDaemonOwner(path string, info os.FileInfo) bool {
-	if runtime.GOOS == "windows" {
-		// FileMode does not represent Windows ACLs. Inspect SID ownership and
-		// effective allow entries with the system ACL API through PowerShell;
-		// the file path is an environment value, never executable script text.
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		const script = `$ErrorActionPreference='Stop'; $acl=Get-Acl -LiteralPath $env:QSWITCH_DAEMON_RECORD; $sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value; if($acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $sid){exit 1}; foreach($ace in $acl.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier])) { if($ace.AccessControlType -eq 'Allow' -and ($ace.PropagationFlags -band [System.Security.AccessControl.PropagationFlags]::InheritOnly) -eq 0 -and ($ace.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::ReadData) -ne 0 -and $ace.IdentityReference.Value -notin @($sid,'S-1-5-18','S-1-5-32-544')) {exit 1} }; [Console]::Write('private')`
-		cmd := exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script)
-		cmd.Env = append(os.Environ(), "QSWITCH_DAEMON_RECORD="+path)
-		cmd.SysProcAttr = new(syscall.SysProcAttr)
-		// Hide the short-lived ACL helper when qswitchd has no console. The
-		// field is Windows-only, while this protocol implementation is shared.
-		if hidden := reflect.ValueOf(cmd.SysProcAttr).Elem().FieldByName("HideWindow"); hidden.IsValid() {
-			hidden.SetBool(true)
-		}
-		output, err := cmd.Output()
-		return err == nil && string(output) == "private"
-	}
-	if info.Mode().Perm()&0077 != 0 {
-		return false
-	}
-	// Stat_t differs by OS. Inspect its UID without importing Unix-only types
-	// into the native Windows build; an unknown ownership representation fails.
-	value := reflect.ValueOf(info.Sys())
-	if value.Kind() == reflect.Pointer {
-		value = value.Elem()
-	}
-	if !value.IsValid() || value.Kind() != reflect.Struct {
-		return false
-	}
-	uid := value.FieldByName("Uid")
-	return uid.IsValid() && uid.CanUint() && uid.Uint() == uint64(os.Getuid())
 }
 
 func (e Endpoint) Call(ctx context.Context, method string, request, response any) error {

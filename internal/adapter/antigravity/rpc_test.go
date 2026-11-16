@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -47,22 +46,8 @@ func writeRPCTestRecord(t *testing.T, home, directory, name string, pid, port in
 	if err := os.WriteFile(path, raw, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if runtime.GOOS == "windows" {
-		// Go's mode bits do not create a private Windows DACL. These fixtures
-		// explicitly model native metadata owned and readable by this user.
-		rpcTestWindowsACL(t, path, false)
-	}
+	rpcTestMetadataACL(t, path, false)
 	return path
-}
-
-func rpcTestWindowsACL(t *testing.T, path string, public bool) {
-	t.Helper()
-	const script = `$ErrorActionPreference='Stop'; $sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User; $acl=[System.Security.AccessControl.FileSecurity]::new(); $acl.SetOwner($sid); $acl.SetAccessRuleProtection($true,$false); $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($sid,'FullControl','Allow')); if($env:QSWITCH_TEST_PUBLIC -eq 'true'){$acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new([System.Security.Principal.SecurityIdentifier]::new('S-1-1-0'),'Read','Allow'))}; Set-Acl -LiteralPath $env:QSWITCH_TEST_RECORD -AclObject $acl`
-	cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script)
-	cmd.Env = append(os.Environ(), "QSWITCH_TEST_RECORD="+path, "QSWITCH_TEST_PUBLIC="+strconv.FormatBool(public))
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("prepare synthetic Windows metadata ACL: %v", err)
-	}
 }
 
 func TestRPCDiscoverNativeDesktopAndCLIRecords(t *testing.T) {
@@ -109,11 +94,7 @@ func TestRPCDiscoveryRefusesUntrustedFiles(t *testing.T) {
 			path := writeRPCTestRecord(t, home, "antigravity", "hub_41001.json", 101, 41001)
 			switch mode {
 			case "public":
-				if runtime.GOOS == "windows" {
-					rpcTestWindowsACL(t, path, true)
-				} else if err := os.Chmod(path, 0644); err != nil {
-					t.Fatal(err)
-				}
+				rpcTestMetadataACL(t, path, true)
 			case "symlink":
 				target := path + ".target"
 				if err := os.Rename(path, target); err != nil {

@@ -181,9 +181,11 @@ func (h *adapterHarness) nativeClient(t *testing.T, pid int, email, activity str
 		t.Fatal(err)
 	}
 	record, _ := json.Marshal(map[string]any{"pid": pid, "httpsPort": port, "csrfToken": "synthetic-csrf"})
-	if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("native_%d.json", pid)), record, 0o600); err != nil {
+	path := filepath.Join(dir, fmt.Sprintf("native_%d.json", pid))
+	if err := os.WriteFile(path, record, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	rpcTestMetadataACL(t, path, false)
 	h.procs = append(h.procs, adapter.Proc{PID: pid, Command: "/synthetic/Antigravity/language_server"})
 	return c
 }
@@ -214,6 +216,32 @@ func TestAdapterCaptureValidatesDeduplicatesAndPrefersNativeIdentity(t *testing.
 	}
 	if h.backend.writes != 0 {
 		t.Fatal("capture changed native credentials")
+	}
+}
+
+func TestAdapterCaptureRejectsUnsupportedNativeSlotEvenWithSameEmailFallback(t *testing.T) {
+	for _, method := range []string{"gcp", ""} {
+		for _, slot := range []string{"keyring", "fallback"} {
+			t.Run(method+"/"+slot, func(t *testing.T) {
+				h := newAdapterHarness(t)
+				fallback := syntheticCredential("old")
+				if slot == "keyring" {
+					h.backend.raw = syntheticCredentialMethod("old", method)
+				} else {
+					fallback = syntheticCredentialMethod("old", method)
+				}
+				putSyntheticCredential(t, CredentialPaths(h.home)[0], fallback)
+				h.nativeClient(t, 101, "old@example.invalid", syntheticIdleActivity)
+				h.adapter.deps.validate = func(context.Context, []byte) ([]byte, adapter.Identity, error) {
+					t.Fatal("unsupported native authentication reached online identity validation")
+					return nil, adapter.Identity{}, nil
+				}
+				blobs, _, err := h.adapter.Capture(h.home)
+				if err == nil || len(blobs) != 0 || h.backend.writes != 0 {
+					t.Fatal("same-email fallback impersonated a consumer live login")
+				}
+			})
+		}
 	}
 }
 

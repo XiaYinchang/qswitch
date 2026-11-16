@@ -18,8 +18,9 @@ import (
 // Adapter manages the native shared consumer login. It never logs out and
 // never replaces a conversation or sends a prompt while changing accounts.
 type Adapter struct {
-	List func() ([]adapter.Proc, error)
-	deps *adapterDependencies
+	DataDir string
+	List    func() ([]adapter.Proc, error)
+	deps    *adapterDependencies
 }
 
 // Per-instance seams keep orchestration tests on synthetic credentials and
@@ -82,11 +83,19 @@ func (a *Adapter) Capture(home string) ([]adapter.Blob, []adapter.Warning, error
 		return nil, nil, err
 	}
 	if len(uncovered) != 0 {
-		return nil, nil, errors.New("antigravity: a running native client has no verifiable control endpoint; its active account is unknown")
+		return nil, nil, errors.New("antigravity: a running native client has no verifiable control endpoint; for CLI sessions use qswitch run antigravity")
 	}
 	candidates, err := d.read(home)
 	if err != nil {
 		return nil, nil, err
+	}
+	// An endpoint email alone cannot distinguish consumer and GCP logins
+	// for the same Google account. Never let a consumer fallback stand in
+	// for an unsupported native slot, including an authoritative keyring.
+	for _, candidate := range candidates {
+		if _, err := parseConsumerCredential(candidate.Raw); err != nil {
+			return nil, nil, errors.New("antigravity: native credentials include unsupported authentication; only personal Google account subscriptions can rotate")
+		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -266,7 +275,7 @@ func (a *Adapter) RestoreWithRollback(home string, blob adapter.Blob, opts adapt
 		return nil, err
 	}
 	if len(uncovered) != 0 {
-		return nil, &adapter.BusyError{Holders: adapter.Holders{Manual: uncovered, Why: []string{"Antigravity native client has no verifiable control endpoint"}}}
+		return nil, &adapter.BusyError{Holders: adapter.Holders{Manual: uncovered, Why: []string{"Antigravity native client has no verifiable control endpoint; for CLI sessions use qswitch run antigravity"}}}
 	}
 	previousEmail := ""
 	for _, endpoint := range endpoints {
@@ -330,7 +339,7 @@ func (a *Adapter) ManualBlockers(home string) (adapter.Holders, error) {
 	}
 	for _, p := range uncovered {
 		h.Manual = append(h.Manual, p)
-		h.Why = append(h.Why, "Antigravity native client has no verifiable control endpoint")
+		h.Why = append(h.Why, "Antigravity native client has no verifiable control endpoint; for CLI sessions use qswitch run antigravity")
 	}
 	return h, nil
 }
@@ -350,7 +359,7 @@ func (a *Adapter) nativeClients(home string) ([]Endpoint, []adapter.Proc, error)
 			native = append(native, adapter.Proc{PID: p.PID, Command: processName(p.Command)})
 		}
 	}
-	endpoints, err := Discover(home, func() ([]adapter.Proc, error) { return procs, nil })
+	endpoints, err := DiscoverManaged(home, a.DataDir, func() ([]adapter.Proc, error) { return procs, nil })
 	if err != nil {
 		// Discovery fails closed. Preserve the independently observed native
 		// PIDs so status surfaces do not describe an unknown client as idle.

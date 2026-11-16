@@ -20,6 +20,10 @@ func main() {
 	version := flag.Bool("version", false, "print version")
 	toolName := flag.String("tool", "", "manage only this tool (default: all configured tools)")
 	flag.Parse()
+	if flag.NArg() != 0 {
+		fmt.Fprintln(os.Stderr, "usage: qswitchd [--tool <tool>] [--version]")
+		os.Exit(2)
+	}
 	if *version {
 		fmt.Println(buildinfo.Version)
 		return

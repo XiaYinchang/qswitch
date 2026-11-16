@@ -15,7 +15,7 @@ const fs=require('fs'),vm=require('vm');
 const source=fs.readFileSync('static/index.html','utf8');
 const elements={root:{children:[],innerHTML:'',appendChild(x){this.children.push(x)}},msg:{textContent:'',className:''}};
 const requests=[];let prompt='';
-const ctx={document:{getElementById:id=>elements[id],createElement:()=>({children:[],appendChild(x){this.children.push(x)}})},confirm:s=>{prompt=s;return true},fetch:async(path,options)=>{requests.push({path,options});return {ok:true,json:async()=>({tools:[]})}}};
+const ctx={document:{getElementById:id=>elements[id],createElement:()=>({children:[],classList:{add(){}},appendChild(x){this.children.push(x)}})},confirm:s=>{prompt=s;return true},fetch:async(path,options)=>{requests.push({path,options});return {ok:true,json:async()=>({tools:[]})}}};
 vm.createContext(ctx);
 vm.runInContext(source.slice(source.indexOf('const $ ='),source.indexOf('$("loginCancel").onclick')),ctx);
 const ids=['gemini_5h','gemini_weekly','third_party_5h','third_party_weekly'];
@@ -45,6 +45,10 @@ v=render(base,{capture_error:'synthetic <img src=x onerror=alert(1)> credential 
 if(!v.section.children[0].innerHTML.includes('收录失败：synthetic &lt;img')||v.section.children[0].innerHTML.includes('<img'))throw Error('capture failure was hidden or not escaped');
 const note=ctx.switchNote({tool:'antigravity',busy:true,blocked_by_pid:[123],pending_to:'synthetic-target',accounts:[]});
 if(!note.includes('等待桌面 App 和 CLI 会话空闲')||!note.includes('再次核验两组额度')||note.includes('退出会话')||note.includes('重启'))throw Error('incorrect switch wait instructions');
+elements.root.children=[];
+ctx.render({tools:[{tool:'antigravity',switchable:true,accounts:[]},{tool:'kimi',switchable:true,accounts:[]}]});
+const emptyText=section=>section.children[1].children.find(x=>x.className==='empty').textContent;
+if(emptyText(elements.root.children[0])!=='先在 Antigravity App 或 qswitch run antigravity 中登录，再收录。'||emptyText(elements.root.children[1]).includes('qswitch run antigravity'))throw Error('first-use login entry is missing or leaked into another tool');
 (async()=>{
  await ctx.onClick({target:{closest:()=>({dataset:{act:'switch',tool:'antigravity',id:'synthetic-target'},disabled:false})}});
  if(!prompt.includes('本机 Antigravity 桌面 App 和 CLI')||!prompt.includes('等待会话空闲')||/重启|无缝/.test(prompt))throw Error('switch confirmation promises unsupported behavior');

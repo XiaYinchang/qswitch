@@ -46,7 +46,7 @@ func (a *App) keepAliveAntigravityLocked(ctx context.Context, blob adapter.Blob,
 	client := antigravity.CredentialsClient{Client: a.HTTP.Client}
 	next, err := client.Refresh(ctx, raw)
 	if err != nil {
-		_ = a.recordRefreshResult(tool, blob.Identity.StableID, false, err)
+		_ = a.recordRefreshResult(tool, blob.Identity.StableID, errors.Is(err, antigravity.ErrReauthenticationRequired), err)
 		return blob, "", err
 	}
 	id, err := client.Verify(ctx, next)
@@ -54,7 +54,7 @@ func (a *App) keepAliveAntigravityLocked(ctx context.Context, blob adapter.Blob,
 		if err == nil {
 			err = errors.New("antigravity: renewed credential belongs to another account")
 		}
-		_ = a.recordRefreshResult(tool, blob.Identity.StableID, false, err)
+		_ = a.recordRefreshResult(tool, blob.Identity.StableID, errors.Is(err, antigravity.ErrReauthenticationRequired), err)
 		return blob, "", err
 	}
 	id.PlanHint = blob.Identity.PlanHint

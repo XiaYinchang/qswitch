@@ -51,6 +51,18 @@ func syntheticCredential(label string) []byte {
 	return raw
 }
 
+func syntheticCredentialMethod(label, method string) []byte {
+	var fields map[string]any
+	_ = json.Unmarshal(syntheticCredential(label), &fields)
+	if method == "" {
+		delete(fields, "auth_method")
+	} else {
+		fields["auth_method"] = method
+	}
+	raw, _ := json.Marshal(fields)
+	return raw
+}
+
 func putSyntheticCredential(t *testing.T, path string, raw []byte) {
 	t.Helper()
 	if err := livefile.AtomicWrite(path, raw, 0o600); err != nil {
@@ -119,6 +131,75 @@ func TestWriteCredentialTransactionRestoresDistinctSlotsAfterClientFailure(t *te
 	}
 	if !bytes.Equal(bk.raw, key) {
 		t.Fatal("rollback lost empty native item")
+	}
+}
+
+func TestWriteCredentialTransactionRejectsUnsupportedNativeSlotsBeforeAnyWrite(t *testing.T) {
+	unsupported := map[string][]byte{
+		"gcp":        syntheticCredentialMethod("old", "gcp"),
+		"unknown":    syntheticCredentialMethod("old", ""),
+		"api_key":    syntheticCredentialMethod("old", "api_key"),
+		"malformed":  []byte(`{"token":`),
+		"wrong_type": []byte(`{"token":"invalid"}`),
+	}
+	for name, previous := range unsupported {
+		for _, slot := range []string{"keyring", "fallback", "headless fallback"} {
+			t.Run(name+"/"+slot, func(t *testing.T) {
+				home := t.TempDir()
+				paths := CredentialPaths(home)
+				key := syntheticCredential("old")
+				fallbacks := [][]byte{syntheticCredential("first"), syntheticCredential("second")}
+				bk := &memoryCredentialBackend{raw: key}
+				if slot == "keyring" {
+					bk.raw = previous
+				} else {
+					fallbacks[1] = previous
+				}
+				if slot == "headless fallback" {
+					bk.readErr = ErrKeyringUnavailable
+				}
+				key = append([]byte(nil), bk.raw...)
+				for i, raw := range fallbacks {
+					putSyntheticCredential(t, paths[i], raw)
+				}
+				writes := 0
+				write := func(path string, raw []byte, mode os.FileMode) error {
+					writes++
+					return livefile.AtomicWrite(path, raw, mode)
+				}
+				var undo func() error
+				if err := writeCredentialTransaction(home, syntheticCredential("target"), bk, write, &undo); err == nil {
+					t.Fatal("unsupported existing account was replaced")
+				}
+				if bk.writes != 0 || writes != 0 || undo != nil || !bytes.Equal(bk.raw, key) {
+					t.Fatal("rejected transaction changed native credentials")
+				}
+				for i, expected := range fallbacks {
+					got, err := os.ReadFile(paths[i])
+					if err != nil || !bytes.Equal(got, expected) {
+						t.Fatal("rejected transaction changed fallback credentials")
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestWriteCredentialTransactionRejectsUnsupportedTargetAndAllowsEmptySlots(t *testing.T) {
+	for _, method := range []string{"gcp", "", "api_key"} {
+		bk := &memoryCredentialBackend{raw: syntheticCredential("old")}
+		if err := writeCredential(t.TempDir(), syntheticCredentialMethod("target", method), bk, livefile.AtomicWrite); err == nil || bk.writes != 0 {
+			t.Fatal("unsupported target reached native storage")
+		}
+	}
+	for _, empty := range [][]byte{nil, []byte(" \n"), []byte("null"), []byte(`{"token":null}`), []byte(`{"token":{}}`)} {
+		home := t.TempDir()
+		path := CredentialPaths(home)[0]
+		putSyntheticCredential(t, path, empty)
+		bk := &memoryCredentialBackend{raw: empty}
+		if err := writeCredential(home, syntheticCredential("target"), bk, livefile.AtomicWrite); err != nil {
+			t.Fatalf("empty native slot rejected: %v", err)
+		}
 	}
 }
 
@@ -312,6 +393,82 @@ func TestOAuthErrorsDoNotExposeResponseOrTransportSecrets(t *testing.T) {
 	_, err = client.Verify(context.Background(), syntheticCredential("old"))
 	if err == nil || strings.Contains(err.Error(), secret) {
 		t.Fatal("transport details included in error")
+	}
+}
+
+func TestOAuthFailuresClassifyReauthenticationWithoutLeakingDetails(t *testing.T) {
+	const detail = "synthetic-error-detail-must-not-escape"
+	for _, tc := range []struct {
+		name     string
+		status   int
+		body     string
+		userinfo bool
+		wantAuth bool
+	}{
+		{"revoked refresh token", 400, `{"error":"invalid_grant","error_description":"` + detail + `"}`, false, true},
+		{"invalid OAuth token", 401, `{"error":"invalid_token","access_token":"` + detail + `"}`, false, true},
+		{"userinfo unauthorized without JSON", 401, detail, true, true},
+		{"userinfo explicit token error", 403, `{"error":"invalid_token","error_description":"` + detail + `"}`, true, true},
+		{"wrong application configuration", 400, `{"error":"invalid_client","error_description":"` + detail + `"}`, false, false},
+		{"refresh unauthorized without code", 401, detail, false, false},
+		{"userinfo permission failure", 403, `{"error":{"code":403,"message":"` + detail + `"}}`, true, false},
+		{"unknown OAuth code", 400, `{"error":"` + detail + `"}`, false, false},
+		{"malformed OAuth body", 400, `{"error":"invalid_grant"} trailing ` + detail, false, false},
+		{"throttled token refresh", 429, `{"error":"invalid_grant","error_description":"` + detail + `"}`, false, false},
+		{"failed token service", 503, `{"error":"invalid_token","error_description":"` + detail + `"}`, false, false},
+		{"throttled userinfo", 429, `{"error":"invalid_token","error_description":"` + detail + `"}`, true, false},
+		{"failed userinfo service", 500, `{"error":"invalid_grant","error_description":"` + detail + `"}`, true, false},
+		{"oversized OAuth body", 400, `{"error":"invalid_grant","error_description":"` + strings.Repeat("x", maxCredentialBytes) + `"}`, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := CredentialsClient{
+				OAuth: &OAuthConfig{ClientID: "synthetic-client", ClientSecret: "synthetic-app-secret"},
+				Client: &http.Client{Transport: credentialRoundTrip(func(*http.Request) (*http.Response, error) {
+					return credentialResponse(tc.status, tc.body), nil
+				})},
+			}
+			var err error
+			if tc.userinfo {
+				_, err = client.Verify(context.Background(), syntheticCredential("old"))
+			} else {
+				_, err = client.Refresh(context.Background(), syntheticCredential("old"))
+			}
+			if err == nil || errors.Is(err, ErrReauthenticationRequired) != tc.wantAuth {
+				t.Fatalf("reauthentication=%v; want %v (error=%v)", errors.Is(err, ErrReauthenticationRequired), tc.wantAuth, err)
+			}
+			if strings.Contains(err.Error(), detail) || strings.Contains(err.Error(), "old-refresh") || strings.Contains(err.Error(), "old-access") {
+				t.Fatal("OAuth error exposed response details or a credential")
+			}
+		})
+	}
+}
+
+func TestMissingRefreshTokenRequiresReauthenticationBeforeHTTP(t *testing.T) {
+	client := CredentialsClient{Client: &http.Client{Transport: credentialRoundTrip(func(*http.Request) (*http.Response, error) {
+		t.Fatal("missing refresh token must stop before any HTTP request")
+		return nil, nil
+	})}}
+	raw := []byte(`{"auth_method":"consumer","token":{"access_token":"synthetic-access-without-refresh"}}`)
+	_, err := client.Refresh(context.Background(), raw)
+	if !errors.Is(err, ErrReauthenticationRequired) {
+		t.Fatalf("missing refresh token did not request a new login: %v", err)
+	}
+}
+
+func TestOAuthTransportFailureRemainsRetryable(t *testing.T) {
+	const detail = "synthetic-transport-detail-must-not-escape"
+	client := CredentialsClient{
+		OAuth: &OAuthConfig{ClientID: "synthetic-client", ClientSecret: "synthetic-app-secret"},
+		Client: &http.Client{Transport: credentialRoundTrip(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New(detail)
+		})},
+	}
+	_, refreshErr := client.Refresh(context.Background(), syntheticCredential("old"))
+	_, verifyErr := client.Verify(context.Background(), syntheticCredential("old"))
+	for _, err := range []error{refreshErr, verifyErr} {
+		if err == nil || errors.Is(err, ErrReauthenticationRequired) || strings.Contains(err.Error(), detail) {
+			t.Fatal("transport failure must remain retryable and redact transport details")
+		}
 	}
 }
 

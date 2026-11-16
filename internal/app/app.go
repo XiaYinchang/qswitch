@@ -134,7 +134,7 @@ func Open(userHome, dataDir string, keys secutil.KeyProvider, bins []string, n n
 		adapter.Kimi:        kimi.Adapter{List: list},
 		adapter.ZCode:       zcode.Adapter{},
 		adapter.Claude:      claude.Adapter{List: list, DataDir: dataDir},
-		adapter.Antigravity: &antigravity.Adapter{List: list},
+		adapter.Antigravity: &antigravity.Adapter{List: list, DataDir: dataDir},
 	}
 	return a, nil
 }
@@ -301,7 +301,19 @@ func (a *App) saveBlob(b adapter.Blob) error {
 	if b.Tool == adapter.Claude {
 		return a.saveClaudeBlob(b)
 	}
-	return a.saveBlobUnchecked(b)
+	if err := a.saveBlobUnchecked(b); err != nil {
+		return err
+	}
+	if b.Tool == adapter.Antigravity {
+		// Native login/renewal supplies verified fresh credentials. Do not
+		// keep a previous authentication failure's long retry delay.
+		if raw, err := antigravity.CredentialsFromBlob(b); err == nil {
+			if c, err := antigravity.ParseCredential(raw); err == nil && c.Token.Expiry.After(a.now().Add(5*time.Minute)) {
+				return a.recordRefreshResult(b.Tool, b.Identity.StableID, false, nil)
+			}
+		}
+	}
+	return nil
 }
 
 func (a *App) saveBlobUnchecked(b adapter.Blob) error {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"math"
 	"net/http"
@@ -18,6 +19,44 @@ import (
 	"qswitch/internal/clock"
 	"qswitch/internal/quota"
 )
+
+func TestAntigravityPipelineRevokedAuthenticationRequiresLogin(t *testing.T) {
+	a, now := antigravityPipelineFixture(t)
+	blob, err := a.loadBlob(adapter.Antigravity, antigravityPipelineID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(antigravity.Credential{
+		AuthMethod: "consumer", IDTokenEmail: blob.Identity.Email,
+		Token: &antigravity.OAuthToken{AccessToken: "synthetic-expired-token", Expiry: now.Add(-time.Hour)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expired, err := antigravity.NewBlob(raw, blob.Identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.saveBlob(expired); err != nil {
+		t.Fatal(err)
+	}
+	a.HTTP.Client = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		t.Fatal("missing refresh authorization reached an HTTP endpoint")
+		return nil, errors.New("unexpected HTTP call")
+	})}
+	result := a.probeAccount(context.Background(), adapter.Antigravity, antigravityPipelineID, false)
+	account, err := a.State.GetAccount("antigravity", antigravityPipelineID)
+	if err != nil || result.Class != quota.Expired || account.LastQuotaClass != "expired" || account.RefreshBackoffUntil <= now.Add(time.Minute).Unix() {
+		t.Fatalf("revoked authorization did not require login: result=%s class=%s backoff=%d err=%v", result.Class, account.LastQuotaClass, account.RefreshBackoffUntil, err)
+	}
+	if err := a.saveBlob(blob); err != nil {
+		t.Fatal(err)
+	}
+	account, err = a.State.GetAccount("antigravity", antigravityPipelineID)
+	if err != nil || account.LastQuotaClass != "unknown" || account.RefreshBackoffUntil != 0 {
+		t.Fatalf("new login did not recover: class=%s backoff=%d err=%v", account.LastQuotaClass, account.RefreshBackoffUntil, err)
+	}
+}
 
 const antigravityPipelineID = "synthetic-pipeline-account"
 const antigravityPipelineAccess = "synthetic-pipeline-access-token"

@@ -31,6 +31,9 @@ const (
 var (
 	ErrCredentialNotFound = errors.New("antigravity: credential does not exist")
 	ErrKeyringUnavailable = errors.New("native credential backend is not installed")
+	// ErrReauthenticationRequired identifies explicitly rejected authorization
+	// or a missing refresh token. Transport and service failures stay retryable.
+	ErrReauthenticationRequired = errors.New("antigravity: sign in again in the official client")
 )
 
 // OAuthToken is the native oauth2.Token JSON representation. Raw credentials
@@ -187,7 +190,7 @@ func writeCredential(home string, raw []byte, backend credentialBackend, writeFi
 }
 
 func writeCredentialTransaction(home string, raw []byte, backend credentialBackend, writeFile func(string, []byte, os.FileMode) error, undo *func() error) error {
-	if _, err := ParseCredential(raw); err != nil {
+	if _, err := parseConsumerCredential(raw); err != nil {
 		return err
 	}
 	var fields map[string]json.RawMessage
@@ -209,6 +212,11 @@ func writeCredentialTransaction(home string, raw []byte, backend credentialBacke
 	if keyErr != nil && !errors.Is(keyErr, ErrCredentialNotFound) && !errors.Is(keyErr, ErrKeyringUnavailable) {
 		return fmt.Errorf("read native credential before switch: %w", keyErr)
 	}
+	if keyExisted {
+		if err := existingConsumerSlot(previous); err != nil {
+			return err
+		}
+	}
 	type snapshot struct {
 		path string
 		raw  []byte
@@ -220,6 +228,9 @@ func writeCredentialTransaction(home string, raw []byte, backend credentialBacke
 			continue
 		}
 		if err != nil {
+			return err
+		}
+		if err := existingConsumerSlot(old); err != nil {
 			return err
 		}
 		files = append(files, snapshot{path, old})
@@ -305,6 +316,25 @@ func writeCredentialTransaction(home string, raw []byte, backend credentialBacke
 	return nil
 }
 
+// Empty native slots are not accounts. Every occupied slot must belong to
+// the supported consumer flow before a transaction can replace any of them.
+func existingConsumerSlot(raw []byte) error {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return nil
+	}
+	c, err := ParseCredential(raw)
+	if errors.Is(err, ErrCredentialNotFound) {
+		return nil
+	}
+	if err != nil {
+		return errors.New("antigravity: existing native credentials are malformed; no credentials were changed")
+	}
+	if c.AuthMethod != "consumer" {
+		return errors.New("antigravity: existing native credentials use unsupported authentication; no credentials were changed")
+	}
+	return nil
+}
+
 type CredentialsClient struct {
 	Client *http.Client
 	// OAuth is injectable for synthetic tests. Production reads the installed
@@ -333,7 +363,7 @@ func (c CredentialsClient) Refresh(ctx context.Context, raw []byte) ([]byte, err
 		return nil, err
 	}
 	if credential.Token.RefreshToken == "" {
-		return nil, errors.New("antigravity: credential has no refresh token")
+		return nil, fmt.Errorf("%w: missing refresh token", ErrReauthenticationRequired)
 	}
 	config := c.OAuth
 	if config == nil {
@@ -358,7 +388,7 @@ func (c CredentialsClient) Refresh(ctx context.Context, raw []byte) ([]byte, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("antigravity: token refresh HTTP %d", resp.StatusCode)
+		return nil, credentialHTTPError("token refresh", resp, false)
 	}
 	var refreshed struct {
 		AccessToken  string `json:"access_token"`
@@ -406,7 +436,7 @@ func (c CredentialsClient) Verify(ctx context.Context, raw []byte) (adapter.Iden
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return adapter.Identity{}, fmt.Errorf("antigravity: identity verification HTTP %d", resp.StatusCode)
+		return adapter.Identity{}, credentialHTTPError("identity verification", resp, true)
 	}
 	var user struct {
 		ID       string `json:"id"`
@@ -421,4 +451,28 @@ func (c CredentialsClient) Verify(ctx context.Context, raw []byte) (adapter.Iden
 		return adapter.Identity{}, errors.New("antigravity: credential identity does not match its stored email")
 	}
 	return adapter.Identity{Tool: adapter.Antigravity, StableID: user.ID, Email: user.Email, DisplayName: user.Name}, nil
+}
+
+// Only protocol error codes may change retry policy. Provider descriptions,
+// response bodies and transport errors can contain credentials and are never
+// included in the returned error. A throttled or failing server is not proof
+// that the user's authorization has been revoked.
+func credentialHTTPError(operation string, resp *http.Response, userInfo bool) error {
+	reauthenticate := userInfo && resp.StatusCode == http.StatusUnauthorized
+	if resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != http.StatusTooManyRequests {
+		var failure struct {
+			Code string `json:"error"`
+		}
+		raw, err := io.ReadAll(io.LimitReader(resp.Body, maxCredentialBytes+1))
+		if err == nil && len(raw) <= maxCredentialBytes && json.Unmarshal(raw, &failure) == nil {
+			switch failure.Code {
+			case "invalid_grant", "invalid_token":
+				reauthenticate = true
+			}
+		}
+	}
+	if reauthenticate {
+		return fmt.Errorf("%w: %s HTTP %d", ErrReauthenticationRequired, operation, resp.StatusCode)
+	}
+	return fmt.Errorf("antigravity: %s HTTP %d", operation, resp.StatusCode)
 }

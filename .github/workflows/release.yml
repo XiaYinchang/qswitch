@@ -15,6 +15,14 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: Check tagged source
+        env:
+          HOME: ${{ runner.temp }}/home
+          XDG_CONFIG_HOME: ${{ runner.temp }}/home/.config
+        run: |
+          mkdir -p "$HOME"
+          go vet ./...
+          go test ./...
       - name: Build portable commands
         env:
           CGO_ENABLED: '0'

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"qswitch/internal/adapter"
+	"qswitch/internal/adapter/antigravity"
 	"qswitch/internal/app"
 	"qswitch/internal/buildinfo"
 	"qswitch/internal/managed"
@@ -47,8 +48,22 @@ func run(args []string) int {
 	rest := args[1:]
 	switch cmd {
 	case "run":
+		if len(rest) > 0 && (rest[0] == "antigravity" || rest[0] == "agy") {
+			bin, err := exec.LookPath("agy")
+			if err != nil {
+				return fail(fmt.Errorf("antigravity: official agy CLI not found: %w", err))
+			}
+			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGHUP)
+			defer stop()
+			err = antigravity.RunCLI(ctx, a.DataDir, bin, rest[1:])
+			var exited *exec.ExitError
+			if errors.As(err, &exited) && exited.ExitCode() >= 0 {
+				return exited.ExitCode()
+			}
+			return fail(err)
+		}
 		if len(rest) == 0 || rest[0] != "claude" {
-			fmt.Fprintln(os.Stderr, "usage: qswitch run claude [--resume-continuation=idle|continue] [Claude arguments...]")
+			fmt.Fprintln(os.Stderr, "usage: qswitch run antigravity [agy arguments...] | qswitch run claude [--resume-continuation=idle|continue] [Claude arguments...]")
 			return 2
 		}
 		bin, err := exec.LookPath("claude")
@@ -424,6 +439,7 @@ func usage() {
   qswitch login grok           # Device Code 加号，不登出当前 Grok 会话
   qswitch login claude         # 当前终端授权并自动收录，不改变当前登录
   qswitch run claude [args...] # 受管会话：安全切号后恢复原会话
+  qswitch run antigravity [args...] # 启动原生 agy，会话空闲时与桌面共用账号切换
   qswitch sessions [--json] [--forget <runner>]  # 查看受管会话及切换阻塞原因；删掉已结束会话留下的记录
   qswitch list [--tool ...]
   qswitch status

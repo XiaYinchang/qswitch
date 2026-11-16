@@ -502,7 +502,9 @@ function render(ov) {
     if (!(tool.accounts || []).length) {
       const p = document.createElement("p");
       p.className = "empty";
-      p.textContent = "还没有收录账号。先在官方客户端登录，再点「收录」。";
+      p.textContent = tool.tool === "antigravity"
+        ? "先在 Antigravity App 或 qswitch run antigravity 中登录，再收录。"
+        : "还没有收录账号。先在官方客户端登录，再点「收录」。";
       body.appendChild(p);
       if (!pendingNote) sec.classList.add("collapsed");
     }
