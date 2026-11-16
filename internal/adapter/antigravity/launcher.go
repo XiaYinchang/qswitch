@@ -43,9 +43,9 @@ func validateCLIArgs(args []string) error {
 		}
 		name := strings.SplitN(strings.TrimLeft(arg, "-"), "=", 2)[0]
 		switch name {
-		case "csrf_token", "log-file", "app_data_dir", "gemini_dir", "hub", "hub-port", "remote-agent", "remote-control", "remote-control-name", "host_bridge_url", "read_host_bridge_token_from_stdin", "use_host_auth", "bg-updater":
+		case "csrf_token", "log-file", "app_data_dir", "gemini_dir", "hub", "hub-port", "remote-agent", "remote-control", "remote-control-name", "host_bridge_url", "read_host_bridge_token_from_stdin", "use_host_auth", "bg-updater", "settings":
 			return fmt.Errorf("qswitch run antigravity does not support --%s; it manages the local shared consumer account", name)
-		case "print", "p", "prompt", "print-timeout", "output-format", "input-format", "json-schema", "model", "effort", "agent", "conversation", "prompt-interactive", "i", "mode", "add-dir", "settings", "project", "release_base_url":
+		case "print", "p", "prompt", "print-timeout", "output-format", "input-format", "json-schema", "model", "effort", "agent", "conversation", "prompt-interactive", "i", "mode", "add-dir", "project", "release_base_url":
 			// These exact native flags take a value, which can itself start
 			// with '--' (notably a print prompt). Do not interpret that value.
 			if !strings.Contains(arg, "=") {

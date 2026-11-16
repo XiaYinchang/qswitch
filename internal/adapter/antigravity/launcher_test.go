@@ -74,6 +74,7 @@ func TestLauncherRejectsManagedAndAlternateIdentityArguments(t *testing.T) {
 	for _, args := range [][]string{
 		{"--csrf_token=do-not-echo"}, {"--model", "synthetic-model", "-csrf_token", "do-not-echo"},
 		{"--log-file=/private/test"}, {"--app_data_dir=other"}, {"--gemini_dir=other"},
+		{"--settings", `{"customModels":[]}`}, {"--model", "synthetic-model", "--settings={}"},
 		{"--hub"}, {"--hub-port=41001"}, {"--remote-control"}, {"--remote-agent"},
 		{"--use_host_auth"}, {"--host_bridge_url=http://localhost"}, {"--read_host_bridge_token_from_stdin"},
 		{"acp"}, {"remote-control", "start"}, {"--model", "synthetic-model", "acp"},
