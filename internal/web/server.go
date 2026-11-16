@@ -75,6 +75,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /login", s.getLoginPage)
 	mux.HandleFunc("POST /login", s.postLogin)
 	mux.HandleFunc("POST /logout", s.postLogout)
+	for path := range iconTypes {
+		mux.HandleFunc("GET "+path, s.icon)
+	}
 	mux.HandleFunc("GET /", s.static)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
@@ -97,8 +100,8 @@ func (s *Server) Handler() http.Handler {
 //   - a request that carries an Origin must be same-origin as the browser
 //     sees it (writes from other sites);
 //   - with a password set, a proxied request or one on a public listener
-//     needs the session cookie (everything but GET /api/health and the login
-//     page), or the Bearer token for scripts;
+//     needs the session cookie (except GET /api/health, the login page and
+//     public read-only branding), or the Bearer token for scripts;
 //   - without one, those requests need the Bearer token;
 //   - the loopback listener itself stays open either way: whoever reaches it
 //     (the local page, the SSH tunnel) has already authenticated to the host.
@@ -112,6 +115,9 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request) bool {
 	if o := r.Header.Get("Origin"); o != "" && !validOrigin(r, o) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return false
+	}
+	if publicIconRequest(r) {
+		return true
 	}
 	if !public && !x.proxied {
 		return true
@@ -560,11 +566,12 @@ func (s *Server) static(w http.ResponseWriter, r *http.Request) {
 	}
 	nonce := newNonce()
 	page := strings.Replace(string(b), "<script>", `<script nonce="`+nonce+`">`, 1)
+	page = strings.Replace(page, iconPlaceholder, iconLinks(externalOf(r)), 1)
 	h := w.Header()
 	h.Set("Content-Type", "text/html; charset=utf-8")
 	h.Set("Cache-Control", "no-store")
 	h.Set("X-Qswitch", "1")
-	h.Set("Content-Security-Policy", "default-src 'none'; script-src 'nonce-"+nonce+"'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
+	h.Set("Content-Security-Policy", "default-src 'none'; script-src 'nonce-"+nonce+"'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self'; manifest-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
 	_, _ = io.WriteString(w, page)
 }
 
