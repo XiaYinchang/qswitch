@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -9,15 +10,28 @@ import (
 	"path/filepath"
 	"syscall"
 
+	"qswitch/internal/adapter"
 	"qswitch/internal/app"
 	"qswitch/internal/buildinfo"
 	"qswitch/internal/web"
 )
 
 func main() {
-	if len(os.Args) == 2 && os.Args[1] == "--version" {
+	version := flag.Bool("version", false, "print version")
+	toolName := flag.String("tool", "", "manage only this tool (default: all configured tools)")
+	flag.Parse()
+	if *version {
 		fmt.Println(buildinfo.Version)
 		return
+	}
+	selected := adapter.AllTools()
+	if *toolName != "" {
+		tool, err := adapter.ParseTool(*toolName)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		selected = []adapter.Tool{tool}
 	}
 	home, _ := os.UserHomeDir()
 	self, _ := os.Executable()
@@ -47,7 +61,7 @@ func main() {
 			}
 		}()
 	}
-	if err := a.RunDaemon(ctx); err != nil {
+	if err := a.RunDaemonTools(ctx, selected); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

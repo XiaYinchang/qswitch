@@ -12,10 +12,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"qswitch/internal/adapter"
+	"qswitch/internal/adapter/antigravity"
 	"qswitch/internal/adapter/claude"
 	"qswitch/internal/adapter/codex"
 	"qswitch/internal/adapter/cursoradp"
@@ -51,15 +51,16 @@ type App struct {
 	ListProcs func() ([]adapter.Proc, error)
 	Host      hostapp.Controller
 
-	cfgMu           sync.RWMutex
-	fpMu            sync.Mutex
-	deskMu          sync.Mutex
-	lastFP          map[adapter.Tool][32]byte
-	deskFP          [32]byte
-	deskFPOk        bool
-	lastDeskAt      time.Time
-	captureRetryAt  map[adapter.Tool]time.Time
-	claudeWriteLive func(string, []byte, os.FileMode) error
+	cfgMu                   sync.RWMutex
+	fpMu                    sync.Mutex
+	deskMu                  sync.Mutex
+	lastFP                  map[adapter.Tool][32]byte
+	deskFP                  [32]byte
+	deskFPOk                bool
+	lastDeskAt              time.Time
+	captureRetryAt          map[adapter.Tool]time.Time
+	antigravityCaptureError string
+	claudeWriteLive         func(string, []byte, os.FileMode) error
 
 	// Log, when set, gets a line each time a switch's progress changes.
 	Log       func(format string, args ...any)
@@ -126,13 +127,14 @@ func Open(userHome, dataDir string, keys secutil.KeyProvider, bins []string, n n
 		captureRetryAt: map[adapter.Tool]time.Time{},
 	}
 	a.Adapters = map[adapter.Tool]adapter.Adapter{
-		adapter.Codex:  codex.Adapter{List: list},
-		adapter.Grok:   grok.Adapter{List: list},
-		adapter.Cursor: cursoradp.Adapter{List: list},
-		adapter.Devin:  devin.Adapter{List: list},
-		adapter.Kimi:   kimi.Adapter{List: list},
-		adapter.ZCode:  zcode.Adapter{},
-		adapter.Claude: claude.Adapter{List: list, DataDir: dataDir},
+		adapter.Codex:       codex.Adapter{List: list},
+		adapter.Grok:        grok.Adapter{List: list},
+		adapter.Cursor:      cursoradp.Adapter{List: list},
+		adapter.Devin:       devin.Adapter{List: list},
+		adapter.Kimi:        kimi.Adapter{List: list},
+		adapter.ZCode:       zcode.Adapter{},
+		adapter.Claude:      claude.Adapter{List: list, DataDir: dataDir},
+		adapter.Antigravity: &antigravity.Adapter{List: list},
 	}
 	return a, nil
 }
@@ -218,6 +220,9 @@ func (a *App) captureBlobs(tool adapter.Tool) ([]adapter.Blob, []adapter.Warning
 		}
 	}
 	blobs, warn, err := a.Adapters[tool].Capture(a.UserHome)
+	if tool == adapter.Antigravity {
+		a.setAntigravityCaptureError(err)
+	}
 	if err != nil {
 		return blobs, warn, err
 	}
@@ -572,7 +577,7 @@ func (a *App) switchLocked(tool adapter.Tool, ref string, opts adapter.RestoreOp
 	blobs, _, captureErr := a.captureBlobs(tool)
 	// Claude Code and Kimi rotate refresh tokens; losing the current account's
 	// latest credentials would strand it.
-	if (tool == adapter.Kimi || tool == adapter.Claude) && captureErr != nil && !errors.Is(captureErr, os.ErrNotExist) {
+	if (tool == adapter.Kimi || tool == adapter.Claude || tool == adapter.Antigravity) && captureErr != nil && !errors.Is(captureErr, os.ErrNotExist) {
 		return fmt.Errorf("save current %s account before switch: %w", tool, captureErr)
 	}
 	if captureErr == nil {
@@ -583,7 +588,7 @@ func (a *App) switchLocked(tool adapter.Tool, ref string, opts adapter.RestoreOp
 			// Claude Code and the official Kimi CLI rotate refresh tokens.
 			// Switching to the current account must use the credentials just
 			// captured, not the older target snapshot loaded before that capture.
-			if (tool == adapter.Kimi || tool == adapter.Claude) && b.Identity.StableID == blob.Identity.StableID {
+			if (tool == adapter.Kimi || tool == adapter.Claude || tool == adapter.Antigravity) && b.Identity.StableID == blob.Identity.StableID {
 				blob = b
 			}
 		}
@@ -599,7 +604,15 @@ func (a *App) switchLocked(tool adapter.Tool, ref string, opts adapter.RestoreOp
 			blob = grok.MergeLiveTokens(blob, live)
 		}
 	}
-	if err := ad.Restore(a.UserHome, blob, opts); err != nil {
+	var undo func() error
+	if transactional, ok := ad.(interface {
+		RestoreWithRollback(string, adapter.Blob, adapter.RestoreOpts) (func() error, error)
+	}); ok {
+		undo, err = transactional.RestoreWithRollback(a.UserHome, blob, opts)
+	} else {
+		err = ad.Restore(a.UserHome, blob, opts)
+	}
+	if err != nil {
 		return err
 	}
 	desync := blob.Incomplete && !opts.CLIOnly
@@ -622,6 +635,10 @@ func (a *App) switchLocked(tool adapter.Tool, ref string, opts adapter.RestoreOp
 		Desync:           desync,
 	}
 	if err := a.State.SetPointer(p); err != nil {
+		if undo != nil {
+			err = errors.Join(err, undo())
+			a.rememberFP(tool)
+		}
 		return err
 	}
 	_ = a.State.ClearPending(string(tool))
@@ -636,7 +653,9 @@ func (a *App) switchLocked(tool adapter.Tool, ref string, opts adapter.RestoreOp
 		a.Notify.Send("qswitch", fmt.Sprintf("switched %s -> %s (%s). 已重启 %s。", tool, IdentityLabel(blob.Identity), blob.Identity.StableID, appLabel(name)))
 		return nil
 	}
-	a.Notify.Send("qswitch", fmt.Sprintf("switched %s -> %s (%s). 新进程才会用新号。", tool, IdentityLabel(blob.Identity), blob.Identity.StableID))
+	if tool != adapter.Antigravity {
+		a.Notify.Send("qswitch", fmt.Sprintf("switched %s -> %s (%s). 新进程才会用新号。", tool, IdentityLabel(blob.Identity), blob.Identity.StableID))
+	}
 	return nil
 }
 
@@ -696,7 +715,7 @@ func (a *App) quitDesktop(tool adapter.Tool) (string, error) {
 		if !secutil.InTest() {
 			cur, _ := a.ListProcs()
 			for _, p := range pick(cur) {
-				_ = syscall.Kill(p.PID, syscall.SIGTERM)
+				_ = busy.Terminate(p.PID)
 			}
 		}
 		if err := a.Host.WaitUntil(gone); err != nil {
@@ -770,6 +789,9 @@ func (a *App) Status() string {
 		}
 		fmt.Fprintf(&b, "%s  active=%s plan=%s id=%s class=%s used=%.1f%% auto=%v desync=%v busy=%v blocked_by_pid=%v queued_since=%s chatgpt_app=%v\n",
 			t, label, plan, p.StableID, class, acc.LastUsedPct, cfg.General.AutoSwitch && cfg.ToolEnabled(string(t)) && t != adapter.ZCode, p.Desync, man.ManualBusy(), man.ManualPIDs(), queued(pend), aut.ChatGPTApp)
+		if t == adapter.Antigravity {
+			fmt.Fprintf(&b, "  %s\n", AntigravityQuotaSummary(acc))
+		}
 	}
 	return b.String()
 }
@@ -803,6 +825,9 @@ func (a *App) List(tool string) string {
 			plan = "-"
 		}
 		fmt.Fprintf(&b, "%s %s  %s  plan=%s  %s  class=%s used=%.1f%% reset=%s cool=%s incomplete=%v stale_cli=%v\n", mark, ac.Tool, accountLabel(ac), plan, ac.StableID, ac.LastQuotaClass, ac.LastUsedPct, reset, cool, ac.Incomplete, ac.StaleCLI)
+		if ac.Tool == string(adapter.Antigravity) {
+			fmt.Fprintf(&b, "  %s\n", AntigravityQuotaSummary(ac))
+		}
 	}
 	return b.String()
 }
@@ -846,7 +871,7 @@ func (a *App) rememberFP(tool adapter.Tool) {
 }
 
 func (a *App) Ingest(tool adapter.Tool) error {
-	if tool == adapter.Kimi || tool == adapter.Devin || tool == adapter.Claude {
+	if tool == adapter.Kimi || tool == adapter.Devin || tool == adapter.Claude || tool == adapter.Antigravity {
 		a.fpMu.Lock()
 		deferAt := a.captureRetryAt[tool]
 		a.fpMu.Unlock()
@@ -858,6 +883,13 @@ func (a *App) Ingest(tool adapter.Tool) error {
 	ad := a.Adapters[tool]
 	fp, err := a.liveFingerprint(tool)
 	if err != nil {
+		if tool == adapter.Antigravity {
+			captureErr := err
+			if errors.Is(err, antigravity.ErrCredentialNotFound) {
+				captureErr = nil
+			}
+			a.setAntigravityCaptureError(captureErr)
+		}
 		return nil
 	}
 	if a.sameLastFP(tool, fp) {
@@ -877,7 +909,7 @@ func (a *App) Ingest(tool adapter.Tool) error {
 	}
 	defer lock.Close()
 	blobs, _, err := a.captureBlobs(tool)
-	if tool == adapter.Kimi || tool == adapter.Devin || tool == adapter.Claude {
+	if tool == adapter.Kimi || tool == adapter.Devin || tool == adapter.Claude || tool == adapter.Antigravity {
 		a.fpMu.Lock()
 		if a.captureRetryAt == nil {
 			a.captureRetryAt = make(map[adapter.Tool]time.Time)
@@ -932,7 +964,7 @@ func (a *App) Ingest(tool adapter.Tool) error {
 		if tool == adapter.Claude {
 			a.clearRenewedClaudeExpiry(blobs, id)
 		}
-	case p.LastApplyAt > 0 && now-p.LastApplyAt < int64(cfg.Writeback().Seconds()) && p.WritebackRetries == 0:
+	case tool != adapter.Antigravity && p.LastApplyAt > 0 && now-p.LastApplyAt < int64(cfg.Writeback().Seconds()) && p.WritebackRetries == 0:
 		target, err := a.loadBlob(tool, p.LastApplyTo)
 		if err != nil {
 			_ = a.disableTool(tool)
@@ -949,13 +981,13 @@ func (a *App) Ingest(tool adapter.Tool) error {
 		a.rememberFP(tool)
 		a.Notify.Send("qswitch", "reverted writeback once")
 		return nil
-	case p.LastApplyAt > 0 && now-p.LastApplyAt < int64(cfg.Writeback().Seconds()) && p.WritebackRetries >= 1:
+	case tool != adapter.Antigravity && p.LastApplyAt > 0 && now-p.LastApplyAt < int64(cfg.Writeback().Seconds()) && p.WritebackRetries >= 1:
 		_ = a.disableTool(tool)
 		a.Notify.Send("qswitch", "旧进程仍在回写; auto disabled")
 	default:
 		p.StableID = id
 		p.WritebackRetries = 0
-		p.Desync = len(blobs) > 1
+		p.Desync = tool != adapter.Antigravity && len(blobs) > 1
 		_ = a.State.SetPointer(p)
 		_ = a.State.ClearPending(string(tool))
 		if added == 0 {
@@ -1359,6 +1391,8 @@ func (a *App) KeepAlive(ctx context.Context, tool adapter.Tool) {
 		a.keepAliveKimiAccounts(ctx)
 	case adapter.Claude:
 		a.keepAliveClaudeAccounts(ctx)
+	case adapter.Antigravity:
+		a.keepAliveAntigravityAccounts(ctx)
 	}
 }
 
@@ -1720,6 +1754,8 @@ func (a *App) probeAccountLocked(ctx context.Context, tool adapter.Tool, id stri
 	}
 	var res quota.Result
 	switch tool {
+	case adapter.Antigravity:
+		res = a.probeAntigravityLocked(ctx, blob)
 	case adapter.Codex:
 		forced := acc.LastQuotaClass == string(quota.Expired)
 		nb, tok, acct, kerr := a.keepAliveCodexLocked(ctx, blob, forced, !gateInterval)
@@ -1827,6 +1863,12 @@ func (a *App) probeAccountLocked(ctx context.Context, tool adapter.Tool, id stri
 		class := acc.LastQuotaClass
 		pct := acc.LastUsedPct
 		resets := acc.LastResetsAt
+		if tool == adapter.Antigravity {
+			// Both groups must be known in the latest response. A missing
+			// window or failed request revokes automatic-switch evidence.
+			class, pct, resets = string(quota.Unknown), 0, 0
+			_ = a.State.SetQuotaDetail(string(tool), id, quota.EncodeBuckets(res.Buckets))
+		}
 		// Missing quota fields do not invalidate a successful authentication.
 		if class == string(quota.Expired) && res.Authenticated {
 			class = string(quota.Unknown)
@@ -1835,7 +1877,7 @@ func (a *App) probeAccountLocked(ctx context.Context, tool adapter.Tool, id stri
 			class = string(quota.Unknown)
 		}
 		_ = a.State.UpdateQuota(string(tool), id, class, pct, resets, now.Unix(), now.Unix(), backoff)
-		if len(res.Buckets) > 0 {
+		if tool != adapter.Antigravity && len(res.Buckets) > 0 {
 			merged := quota.MergeBuckets(quota.DecodeBuckets(acc.QuotaDetail), res.Buckets)
 			_ = a.State.SetQuotaDetail(string(tool), id, quota.EncodeBuckets(merged))
 		}
@@ -1851,7 +1893,7 @@ func (a *App) probeAccountLocked(ctx context.Context, tool adapter.Tool, id stri
 		_ = a.State.SetRefreshBackoff(string(tool), id, backoff)
 	}
 	_ = a.State.UpdateQuota(string(tool), id, string(res.Class), res.UsedPct, res.ResetsAt, now.Unix(), now.Unix(), backoff)
-	if (tool == adapter.Grok || tool == adapter.Devin || tool == adapter.Kimi || tool == adapter.ZCode || tool == adapter.Claude) && (res.Class == quota.OK || res.Class == quota.Soft || res.Class == quota.Exhausted) {
+	if (tool == adapter.Grok || tool == adapter.Devin || tool == adapter.Kimi || tool == adapter.ZCode || tool == adapter.Claude || tool == adapter.Antigravity) && (res.Class == quota.OK || res.Class == quota.Soft || res.Class == quota.Exhausted) {
 		// These providers return complete snapshots; remove obsolete windows after plan changes.
 		_ = a.State.SetQuotaDetail(string(tool), id, quota.EncodeBuckets(res.Buckets))
 	} else if len(res.Buckets) > 0 {
@@ -2352,6 +2394,12 @@ func (a *App) daemonRunning() bool {
 }
 
 func (a *App) RunDaemon(ctx context.Context) error {
+	return a.RunDaemonTools(ctx, adapter.AllTools())
+}
+
+// RunDaemonTools scopes a dedicated installation without capturing credentials
+// for other products on the same machine. The default daemon still manages all.
+func (a *App) RunDaemonTools(ctx context.Context, tools []adapter.Tool) error {
 	// Reload separately so slow provider requests cannot delay an auto-off change.
 	var lastConfigError string
 	reload := func() {
@@ -2401,7 +2449,7 @@ func (a *App) RunDaemon(ctx context.Context) error {
 	// Steps for one tool stay serialized, and each step still takes the tool's
 	// credential lock, so manual web/CLI operations remain mutually exclusive.
 	var workers sync.WaitGroup
-	for _, t := range adapter.AllTools() {
+	for _, t := range tools {
 		workers.Go(func() { a.runToolWorker(ctx, t) })
 	}
 	workers.Wait()

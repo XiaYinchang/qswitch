@@ -309,7 +309,7 @@ func (a Adapter) KillCLI(home string) error {
 		return err
 	}
 	for _, p := range h.Manual {
-		if err := syscall.Kill(p.PID, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
+		if err := busy.Terminate(p.PID); err != nil && !errors.Is(err, syscall.ESRCH) {
 			return err
 		}
 	}

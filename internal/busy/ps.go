@@ -3,7 +3,6 @@ package busy
 import (
 	"bufio"
 	"bytes"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -21,7 +20,7 @@ func (p PS) List() ([]adapter.Proc, error) {
 	if p.Run != nil {
 		out, err = p.Run()
 	} else {
-		out, err = exec.Command("ps", "-axo", "pid=,command=").Output()
+		return platformProcesses()
 	}
 	if err != nil {
 		return nil, err
@@ -157,6 +156,5 @@ func Alive(pid int) bool {
 	if pid <= 0 {
 		return false
 	}
-	err := exec.Command("kill", "-0", strconv.Itoa(pid)).Run()
-	return err == nil
+	return processAlive(pid)
 }

@@ -2,13 +2,12 @@ package hostapp
 
 import (
 	"fmt"
-	"os/exec"
 	"time"
 
 	"qswitch/internal/secutil"
 )
 
-// Controller quits and launches macOS GUI apps. Tests override QuitFn/LaunchFn.
+// Controller quits and launches native GUI apps. Tests override QuitFn/LaunchFn.
 type Controller struct {
 	QuitFn   func(app string) error
 	LaunchFn func(app string) error
@@ -27,7 +26,7 @@ func (c Controller) Quit(app string) error {
 	if secutil.InTest() {
 		return nil
 	}
-	return exec.Command("osascript", "-e", fmt.Sprintf("tell application %q to quit", app)).Run()
+	return quitNative(app)
 }
 
 func (c Controller) Launch(app string) error {
@@ -37,7 +36,7 @@ func (c Controller) Launch(app string) error {
 	if secutil.InTest() {
 		return nil
 	}
-	return exec.Command("open", "-a", app).Run()
+	return launchNative(app)
 }
 
 func (c Controller) WaitUntil(pred func() bool) error {

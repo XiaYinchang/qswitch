@@ -17,20 +17,21 @@ type Overview struct {
 }
 
 type ToolView struct {
-	Tool        string        `json:"tool"`
-	LiveID      string        `json:"live_id"`
-	Enabled     bool          `json:"enabled"`
-	Auto        bool          `json:"auto"`
-	Switchable  bool          `json:"switchable"`
-	Desync      bool          `json:"desync"`
-	Busy        bool          `json:"busy"`
-	ChatGPTApp  bool          `json:"chatgpt_app"`
-	CursorApp   bool          `json:"cursor_app"`
-	GrokBotApp  bool          `json:"grok_bot_app"`
-	DevinApp    bool          `json:"devin_app"`
-	BlockedPIDs []int         `json:"blocked_by_pid"`
-	PendingTo   string        `json:"pending_to,omitempty"`
-	Managed     []ManagedView `json:"managed,omitempty"`
+	CaptureError string        `json:"capture_error,omitempty"`
+	Tool         string        `json:"tool"`
+	LiveID       string        `json:"live_id"`
+	Enabled      bool          `json:"enabled"`
+	Auto         bool          `json:"auto"`
+	Switchable   bool          `json:"switchable"`
+	Desync       bool          `json:"desync"`
+	Busy         bool          `json:"busy"`
+	ChatGPTApp   bool          `json:"chatgpt_app"`
+	CursorApp    bool          `json:"cursor_app"`
+	GrokBotApp   bool          `json:"grok_bot_app"`
+	DevinApp     bool          `json:"devin_app"`
+	BlockedPIDs  []int         `json:"blocked_by_pid"`
+	PendingTo    string        `json:"pending_to,omitempty"`
+	Managed      []ManagedView `json:"managed,omitempty"`
 	// ManagedUnavailable means runner state could not be read this time;
 	// blocking PIDs may still be managed sessions.
 	ManagedUnavailable bool          `json:"managed_unavailable,omitempty"`
@@ -117,6 +118,9 @@ func (a *App) Overview() Overview {
 			DevinApp:    aut.DevinApp,
 			BlockedPIDs: man.ManualPIDs(),
 			PendingTo:   pend.ToID,
+		}
+		if t == adapter.Antigravity {
+			tv.CaptureError = a.antigravityCaptureStatus()
 		}
 		if t == adapter.Claude {
 			sessions, err := managed.Status(a.DataDir)

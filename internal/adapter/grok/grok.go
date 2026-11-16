@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"qswitch/internal/adapter"
@@ -349,7 +348,7 @@ func (a Adapter) KillCLI(home string) error {
 	}
 	var first error
 	for _, p := range h.Manual {
-		if err := syscall.Kill(p.PID, syscall.SIGTERM); err != nil && first == nil {
+		if err := busy.Terminate(p.PID); err != nil && first == nil {
 			first = err
 		}
 	}

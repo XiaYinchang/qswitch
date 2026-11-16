@@ -6,24 +6,17 @@ import (
 	"io"
 	"os"
 	"strings"
-
-	"golang.org/x/sys/unix"
 )
 
 // readSecret prompts on stderr and reads one line from stdin with echo off.
 // Bytes are read one at a time so a second prompt gets the second line.
 func readSecret(prompt string) (string, error) {
 	fmt.Fprint(os.Stderr, prompt)
-	fd := int(os.Stdin.Fd())
-	if st, err := unix.IoctlGetTermios(fd, termiosGet); err == nil {
-		quiet := *st
-		quiet.Lflag &^= unix.ECHO
-		if err := unix.IoctlSetTermios(fd, termiosSet, &quiet); err == nil {
-			defer func() {
-				_ = unix.IoctlSetTermios(fd, termiosSet, st)
-				fmt.Fprintln(os.Stderr)
-			}()
-		}
+	if restore, err := disableEcho(os.Stdin); err == nil {
+		defer func() {
+			restore()
+			fmt.Fprintln(os.Stderr)
+		}()
 	}
 	return readLine(os.Stdin)
 }

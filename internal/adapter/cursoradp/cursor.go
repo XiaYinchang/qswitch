@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"qswitch/internal/adapter"
@@ -515,7 +514,7 @@ func (a Adapter) KillCLI(home string) error {
 	}
 	var first error
 	for _, p := range busy.CursorAgent(list) {
-		if err := syscall.Kill(p.PID, syscall.SIGTERM); err != nil && first == nil {
+		if err := busy.Terminate(p.PID); err != nil && first == nil {
 			first = err
 		}
 	}

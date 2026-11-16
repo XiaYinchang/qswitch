@@ -419,7 +419,7 @@ func usage() {
 	fmt.Fprintf(os.Stderr, `qswitch — 多账号配额轮换器
 
   qswitch init
-  qswitch capture [--tool codex|grok|cursor]
+  qswitch capture [--tool codex|grok|cursor|devin|zcode|kimi|claude|antigravity]
   qswitch login codex          # Device Code 加号，不登出当前 ChatGPT 会话
   qswitch login grok           # Device Code 加号，不登出当前 Grok 会话
   qswitch login claude         # 当前终端授权并自动收录，不改变当前登录
@@ -427,7 +427,7 @@ func usage() {
   qswitch sessions [--json] [--forget <runner>]  # 查看受管会话及切换阻塞原因；删掉已结束会话留下的记录
   qswitch list [--tool ...]
   qswitch status
-  qswitch probe [--tool codex|grok|cursor|devin|zcode|kimi|claude]
+  qswitch probe [--tool codex|grok|cursor|devin|zcode|kimi|claude|antigravity]
   qswitch switch <tool> <id|account> [--force-align] [--allow-stale-cli] [--kill-cli]
   qswitch apply [--tool ...] [--kill-cli]
   qswitch enable-auto [--tool ...]
@@ -436,5 +436,8 @@ func usage() {
   qswitch doctor
   qswitch serve [--addr 127.0.0.1:7432]
   qswitch web set-password <用户名> [--stdin]   # 页面登录密码；改密码后所有浏览器重新登录
+
+Antigravity：统一管理本机桌面 App 和 CLI 账号，等待会话空闲后切换。
+只有 Gemini 与第三方模型两组额度都耗尽时才自动切号；单组耗尽时保留当前账号。
 `)
 }

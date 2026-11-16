@@ -2,11 +2,8 @@ package livefile
 
 import (
 	"crypto/sha256"
-	"fmt"
 	"os"
 	"path/filepath"
-
-	"golang.org/x/sys/unix"
 )
 
 func AtomicWrite(path string, data []byte, mode os.FileMode) error {
@@ -70,9 +67,9 @@ func Acquire(path string) (*Lock, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX); err != nil {
+	if err := lockFile(f); err != nil {
 		f.Close()
-		return nil, fmt.Errorf("flock: %w", err)
+		return nil, err
 	}
 	return &Lock{f: f}, nil
 }
@@ -81,7 +78,7 @@ func (l *Lock) Close() error {
 	if l == nil || l.f == nil {
 		return nil
 	}
-	_ = unix.Flock(int(l.f.Fd()), unix.LOCK_UN)
+	_ = unlockFile(l.f)
 	err := l.f.Close()
 	l.f = nil
 	return err

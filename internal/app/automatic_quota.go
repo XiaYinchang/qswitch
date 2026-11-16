@@ -41,6 +41,9 @@ func (a *App) observedQuota(tool adapter.Tool, ac state.Account, last state.Quot
 	if last.Ts <= 0 || last.Ts > now || last.Class != ac.LastQuotaClass || last.UsedPct != ac.LastUsedPct {
 		return unknown, false
 	}
+	if tool == adapter.Antigravity && ac.LastResetsAt > 0 && ac.LastResetsAt <= now {
+		return unknown, false
+	}
 	class := quota.Class(last.Class)
 	var interval time.Duration
 	switch class {
@@ -75,6 +78,12 @@ func (a *App) observedQuota(tool adapter.Tool, ac state.Account, last state.Quot
 // withdraw it. Only the account a switch leaves may rely on this; the account
 // it moves to must still be confirmed usable.
 func (a *App) knownExhausted(tool adapter.Tool, ac state.Account) (bool, error) {
+	if tool == adapter.Antigravity {
+		// Its two-group contract requires the latest observation to be
+		// complete. Failed auth or quota requests revoke older evidence.
+		res, fresh, err := a.cachedAutomaticQuota(tool, ac)
+		return fresh && res.Class == quota.Exhausted, err
+	}
 	if ac.Incomplete || ac.StaleCLI || quota.Class(ac.LastQuotaClass) != quota.Exhausted {
 		return false, nil
 	}
