@@ -30,7 +30,7 @@ def transaction_source():
 
 
 class DeploymentTransactionTest(unittest.TestCase):
-    def exercise(self, failure=None):
+    def exercise(self, failure=None, mac_start=None):
         with tempfile.TemporaryDirectory(prefix="qswitch-deploy-test-") as temporary:
             home = Path(temporary)
             data, bindir = home / ".qswitch", home / ".local/bin"
@@ -84,6 +84,29 @@ class DeploymentTransactionTest(unittest.TestCase):
 
             def run(args, **kwargs):
                 calls.append(tuple(args))
+                def completed(code):
+                    if code and kwargs.get("check"):
+                        raise subprocess.CalledProcessError(code, args, output="", stderr="synthetic service startup failure")
+                    return subprocess.CompletedProcess(args, code, stdout="", stderr="")
+
+                if args[:2] == ["launchctl", "bootout"]:
+                    self.assertEqual(args[2:], ["gui/501/com.qswitch"])
+                    service["version"] = None
+                    return completed(0)
+                if args[:2] == ["launchctl", "bootstrap"]:
+                    self.assertEqual(args[2:], ["gui/501", str(home / "Library/LaunchAgents/com.qswitch.plist")])
+                    if mac_start == "already loaded":
+                        service["version"] = (bindir / "qswitchd").read_text().splitlines()[0]
+                    return completed(5)
+                if args[:2] == ["launchctl", "print"]:
+                    self.assertEqual(args[2:], ["gui/501/com.qswitch"])
+                    return completed(0 if service["version"] is not None else 113)
+                if args[:1] == ["sudo"]:
+                    self.assertEqual(args, ["sudo", "-n", "launchctl", "asuser", "501", "launchctl", "bootstrap", "gui/501", str(home / "Library/LaunchAgents/com.qswitch.plist")])
+                    if mac_start == "both fail":
+                        return completed(5)
+                    service["version"] = (bindir / "qswitchd").read_text().splitlines()[0]
+                    return completed(0)
                 if args[:3] == ["systemctl", "--user", "stop"]:
                     service["version"] = None
                     if wal_database:
@@ -118,7 +141,7 @@ class DeploymentTransactionTest(unittest.TestCase):
 
             output = io.StringIO()
             exited = None
-            with patch("pathlib.Path.home", return_value=home), patch("sys.argv", ["-", NEW, "all", *digests]), patch("sys.platform", "linux"), patch("subprocess.run", side_effect=run), patch("urllib.request.urlopen", side_effect=urlopen), patch("time.sleep"), patch("os.replace", side_effect=replace), patch("sqlite3.connect", side_effect=connect), contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            with patch("pathlib.Path.home", return_value=home), patch("sys.argv", ["-", NEW, "all", *digests]), patch("sys.platform", "darwin" if mac_start else "linux"), patch("os.getuid", return_value=501), patch("subprocess.run", side_effect=run), patch("urllib.request.urlopen", side_effect=urlopen), patch("time.sleep"), patch("os.replace", side_effect=replace), patch("sqlite3.connect", side_effect=connect), contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
                 try:
                     exec(transaction_source(), {"__name__": "__main__"})
                 except (SystemExit, AssertionError) as error:
@@ -129,7 +152,7 @@ class DeploymentTransactionTest(unittest.TestCase):
 
             if wal_database:
                 self.assertTrue(stopped_database_checks, "stopped database check was not exercised")
-            if failure in (None, "derived", "readonly after stop"):
+            if failure in (None, "derived", "readonly after stop") and mac_start != "both fail":
                 self.assertIsNone(exited, output.getvalue())
                 self.assertEqual(service["version"], NEW)
                 receipt = json.loads((data / "deployment.json").read_text())
@@ -138,12 +161,25 @@ class DeploymentTransactionTest(unittest.TestCase):
                 self.assertIsNotNone(exited, "fault was accepted as successful deployment")
                 for name, previous in originals.items():
                     self.assertEqual((bindir / name).read_bytes(), previous, "partial upgrade was not rolled back")
-                self.assertEqual(service["version"], OLD, "previous daemon was not restarted")
+                self.assertEqual(service["version"], None if mac_start == "both fail" else OLD, "unexpected recovery service state")
                 self.assertFalse((data / "deployment.json").exists(), "failed deployment wrote a success receipt")
-            self.assertFalse(stage.exists(), "completed rollback left temporary release files")
+            if mac_start == "both fail":
+                self.assertTrue(stage.exists(), "failed recovery removed its staging directory")
+                self.assertIn("rollback needs attention", output.getvalue())
+                self.assertIn("current and GUI sessions", str(exited))
+                self.assertNotIn('"result": "deployed"', output.getvalue())
+            else:
+                self.assertFalse(stage.exists(), "completed rollback left temporary release files")
             if failure == "checksum":
                 self.assertIn("checksum", str(exited))
                 self.assertFalse(calls, "invalid staged bytes reached native execution or service control")
+            elif mac_start:
+                self.assertIn(("launchctl", "bootout", "gui/501/com.qswitch"), calls)
+                gui_calls = [args for args in calls if args[0] == "sudo"]
+                if mac_start == "already loaded":
+                    self.assertFalse(gui_calls, "an already-loaded job was bootstrapped twice")
+                else:
+                    self.assertEqual(len(gui_calls), 2 if failure or mac_start == "both fail" else 1, "GUI fallback was not shared by apply and rollback")
             else:
                 self.assertIn(("systemctl", "--user", "stop", "qswitchd.service"), calls)
             if failure == "second replace":
@@ -151,6 +187,18 @@ class DeploymentTransactionTest(unittest.TestCase):
 
     def test_success(self):
         self.exercise()
+
+    def test_mac_bootstrap_uses_noninteractive_gui_session_fallback(self):
+        self.exercise(mac_start="gui fallback")
+
+    def test_mac_failed_bootstraps_do_not_report_success(self):
+        self.exercise(mac_start="both fail")
+
+    def test_mac_rollback_uses_gui_session_fallback(self):
+        self.exercise("health", mac_start="gui fallback")
+
+    def test_mac_already_loaded_job_is_not_bootstrapped_again(self):
+        self.exercise(mac_start="already loaded")
 
     def test_stopped_database_without_wal_can_be_checked(self):
         self.exercise("readonly after stop")

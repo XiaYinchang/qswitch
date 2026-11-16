@@ -111,8 +111,16 @@ def stop():
    if present.returncode==0: raise RuntimeError('unable to stop launchd service')
  else: run(['systemctl','--user','stop','qswitchd.service'])
 def start():
- if mac: run(['launchctl','bootstrap',f'gui/{uid}',str(plist)])
- else: run(['systemctl','--user','start','qswitchd.service'])
+ if not mac: return run(['systemctl','--user','start','qswitchd.service'])
+ result=subprocess.run(['launchctl','bootstrap',f'gui/{uid}',str(plist)],capture_output=True,text=True)
+ if result.returncode==0: return
+ # An SSH login may lack the owner's GUI session. Do not bootstrap twice
+ # if launchd registered the job despite reporting an error to this session.
+ present=subprocess.run(['launchctl','print',f'gui/{uid}/com.qswitch'],capture_output=True,text=True)
+ if present.returncode==0: return
+ try: run(['sudo','-n','launchctl','asuser',str(uid),'launchctl','bootstrap',f'gui/{uid}',str(plist)])
+ except subprocess.CalledProcessError as err:
+  raise RuntimeError(f'launchd bootstrap failed in current and GUI sessions (exit {result.returncode}, {err.returncode})') from err
 def wait(version):
  for _ in range(60):
   try:
