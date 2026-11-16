@@ -276,7 +276,7 @@ func ParseKimiSubscriptionStats(status int, body []byte) (Result, bool) {
 	r.UsedPct, r.ResetsAt = monthly.UsedPct, monthly.ResetsAt
 	r.Class = OK
 	switch {
-	case monthly.UsedPct >= 99.5:
+	case monthly.UsedPct >= 100:
 		// Unlike /usages, the wallet here exposes its real state, so an
 		// active wallet with spendable balance is a genuine soft state.
 		if kimiWebBoosterAvailable(root["boosterWallets"]) {

@@ -24,9 +24,15 @@ func main() {
 		fmt.Fprintln(os.Stderr, "usage: qswitchd [--tool <tool>] [--version]")
 		os.Exit(2)
 	}
-	if *version {
-		fmt.Println(buildinfo.Version)
-		return
+	toolSpecified := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "tool" {
+			toolSpecified = true
+		}
+	})
+	if toolSpecified && *toolName == "" {
+		fmt.Fprintln(os.Stderr, "--tool requires a value")
+		os.Exit(2)
 	}
 	selected := adapter.AllTools()
 	if *toolName != "" {
@@ -36,6 +42,10 @@ func main() {
 			os.Exit(2)
 		}
 		selected = []adapter.Tool{tool}
+	}
+	if *version {
+		fmt.Println(buildinfo.Version)
+		return
 	}
 	home, _ := os.UserHomeDir()
 	self, _ := os.Executable()
@@ -48,6 +58,10 @@ func main() {
 		os.Exit(1)
 	}
 	defer a.Close()
+	if err := a.SetManagedTools(selected); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
 	// journald stamps each line; one line per change in a switch's progress.
 	a.Log = log.New(os.Stderr, "", 0).Printf
 	if err := a.Init(); err != nil {

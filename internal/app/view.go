@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -13,25 +14,31 @@ import (
 )
 
 type Overview struct {
-	Tools []ToolView `json:"tools"`
+	Instance          InstanceInfo  `json:"instance"`
+	Environments      []Environment `json:"environments"`
+	EnvironmentsError string        `json:"environments_error,omitempty"`
+	Tools             []ToolView    `json:"tools"`
 }
 
 type ToolView struct {
-	CaptureError string        `json:"capture_error,omitempty"`
-	Tool         string        `json:"tool"`
-	LiveID       string        `json:"live_id"`
-	Enabled      bool          `json:"enabled"`
-	Auto         bool          `json:"auto"`
-	Switchable   bool          `json:"switchable"`
-	Desync       bool          `json:"desync"`
-	Busy         bool          `json:"busy"`
-	ChatGPTApp   bool          `json:"chatgpt_app"`
-	CursorApp    bool          `json:"cursor_app"`
-	GrokBotApp   bool          `json:"grok_bot_app"`
-	DevinApp     bool          `json:"devin_app"`
-	BlockedPIDs  []int         `json:"blocked_by_pid"`
-	PendingTo    string        `json:"pending_to,omitempty"`
-	Managed      []ManagedView `json:"managed,omitempty"`
+	DerivedFrom  string                `json:"derived_from,omitempty"`
+	AutoReason   string                `json:"auto_reason,omitempty"`
+	Capabilities map[string]Capability `json:"capabilities"`
+	CaptureError string                `json:"capture_error,omitempty"`
+	Tool         string                `json:"tool"`
+	LiveID       string                `json:"live_id"`
+	Enabled      bool                  `json:"enabled"`
+	Auto         bool                  `json:"auto"`
+	Switchable   bool                  `json:"switchable"`
+	Desync       bool                  `json:"desync"`
+	Busy         bool                  `json:"busy"`
+	ChatGPTApp   bool                  `json:"chatgpt_app"`
+	CursorApp    bool                  `json:"cursor_app"`
+	GrokBotApp   bool                  `json:"grok_bot_app"`
+	DevinApp     bool                  `json:"devin_app"`
+	BlockedPIDs  []int                 `json:"blocked_by_pid"`
+	PendingTo    string                `json:"pending_to,omitempty"`
+	Managed      []ManagedView         `json:"managed,omitempty"`
 	// ManagedUnavailable means runner state could not be read this time;
 	// blocking PIDs may still be managed sessions.
 	ManagedUnavailable bool          `json:"managed_unavailable,omitempty"`
@@ -92,10 +99,15 @@ func remainingPct(class string, used float64) *float64 {
 }
 
 func (a *App) Overview() Overview {
-	var out Overview
+	out := Overview{Instance: a.Instance()}
+	var envErr error
+	out.Environments, envErr = a.Environments()
+	if envErr != nil {
+		out.EnvironmentsError = envErr.Error()
+	}
 	cfg := a.cfgSnapshot()
 	now := a.now().Unix()
-	for _, t := range adapter.AllTools() {
+	for _, t := range a.ManagedTools() {
 		p, _ := a.State.GetPointer(string(t))
 		ad := a.Adapters[t]
 		man, _ := ad.ManualBlockers(a.UserHome)
@@ -104,20 +116,33 @@ func (a *App) Overview() Overview {
 			man = aut
 		}
 		pend, _ := a.State.GetPending(string(t))
+		caps := a.Capabilities(t)
 		tv := ToolView{
-			Tool:        string(t),
-			LiveID:      p.StableID,
-			Enabled:     cfg.ToolEnabled(string(t)),
-			Auto:        cfg.General.AutoSwitch && cfg.ToolEnabled(string(t)) && t != adapter.ZCode,
-			Switchable:  t != adapter.ZCode,
-			Desync:      p.Desync,
-			Busy:        man.ManualBusy(),
-			ChatGPTApp:  aut.ChatGPTApp,
-			CursorApp:   aut.CursorApp || man.CursorApp,
-			GrokBotApp:  aut.GrokBotApp,
-			DevinApp:    aut.DevinApp,
-			BlockedPIDs: man.ManualPIDs(),
-			PendingTo:   pend.ToID,
+			Capabilities: caps,
+			CaptureError: a.captureStatus(t),
+			Tool:         string(t),
+			LiveID:       p.StableID,
+			Enabled:      cfg.ToolEnabled(string(t)),
+			Auto:         cfg.General.AutoSwitch && cfg.ToolEnabled(string(t)) && caps["auto_switch"].Available,
+			Switchable:   caps["switch"].Available,
+			Desync:       p.Desync && (t != adapter.Cursor || a.cursorDesktopSync()),
+			Busy:         man.ManualBusy(),
+			ChatGPTApp:   aut.ChatGPTApp,
+			CursorApp:    aut.CursorApp || man.CursorApp,
+			GrokBotApp:   aut.GrokBotApp,
+			DevinApp:     aut.DevinApp,
+			BlockedPIDs:  man.ManualPIDs(),
+			PendingTo:    pend.ToID,
+		}
+		if !tv.Auto {
+			switch {
+			case !caps["auto_switch"].Available:
+				tv.AutoReason = caps["auto_switch"].Reason
+			case !cfg.General.AutoSwitch:
+				tv.AutoReason = "全局自动切换已关闭；仅开启此工具不会开启全局开关"
+			case !cfg.ToolEnabled(string(t)):
+				tv.AutoReason = "此工具的自动切换已关闭，额度查询继续运行"
+			}
 		}
 		if t == adapter.Antigravity {
 			tv.CaptureError = a.antigravityCaptureStatus()
@@ -165,7 +190,7 @@ func (a *App) Overview() Overview {
 			tv.Accounts = append(tv.Accounts, view)
 		}
 		if t == adapter.Cursor {
-			cursor, bot := splitCursorBot(tv)
+			cursor, bot := splitCursorBotAt(tv, now, int64(max(cfg.IntervalMax(), config.IdleQuotaInterval).Seconds())+120)
 			out.Tools = append(out.Tools, cursor)
 			if len(bot.Accounts) > 0 {
 				out.Tools = append(out.Tools, bot)
@@ -182,12 +207,22 @@ func hideOverviewAccount(_ adapter.Tool, ac state.Account) bool {
 }
 
 func splitCursorBot(tv ToolView) (ToolView, ToolView) {
+	return splitCursorBotAt(tv, time.Now().Unix(), int64(config.IdleQuotaInterval.Seconds())+120)
+}
+
+func splitCursorBotAt(tv ToolView, now, maxAge int64) (ToolView, ToolView) {
 	bot := ToolView{
-		Tool:      "grokbot",
-		LiveID:    tv.LiveID,
-		Busy:      tv.Busy,
-		CursorApp: tv.CursorApp,
+		DerivedFrom:  "cursor",
+		Capabilities: map[string]Capability{},
+		Tool:         "grokbot",
+		LiveID:       tv.LiveID,
+		Busy:         tv.Busy,
+		CursorApp:    tv.CursorApp,
 	}
+	for _, action := range []string{"capture", "probe", "switch", "auto_switch", "login", "run", "desktop_sync", "live_refresh", "parked_refresh", "continuation"} {
+		bot.Capabilities[action] = Capability{Reason: "由 Cursor 账号派生的只读用量"}
+	}
+	bot.Capabilities["probe"] = Capability{Available: true}
 	cursor := tv
 	cursor.Accounts = nil
 	for _, ac := range tv.Accounts {
@@ -207,20 +242,19 @@ func splitCursorBot(tv ToolView) (ToolView, ToolView) {
 			continue
 		}
 		used := botB.UsedPct
-		class := "ok"
-		switch {
-		case used >= 99.5:
-			class = "exhausted"
-		case used >= 90:
-			class = "soft"
-		}
-		if ac.Class == string(quota.Expired) || ac.Class == string(quota.Unknown) {
-			class = ac.Class
+		class := string(botB.Class)
+		if class == "" || botB.ObservedAt <= 0 {
+			class = string(quota.Unknown)
 		}
 		bc := ac
 		bc.Tool = "cursor"
 		bc.Plan = botCardPlan(botB.Plan)
 		bc.Class = class
+		bc.LastProbedAt = botB.ObservedAt
+		bc.LastProbeAt = botB.ObservedAt
+		bc.LastProbeClass = class
+		bc.LastQuotaAt = botB.ObservedAt
+		bc.QuotaStale = class == string(quota.Unknown) || class == string(quota.Expired) || botB.ObservedAt <= 0 || botB.ObservedAt > now || now-botB.ObservedAt >= maxAge || (botB.ResetsAt > botB.ObservedAt && botB.ResetsAt <= now)
 		bc.UsedPct = used
 		bc.RemainingPct = remainingPct(class, used)
 		bc.ResetsAt = botB.ResetsAt
@@ -291,4 +325,19 @@ func accountView(ac state.Account, liveID string, now int64) AccountView {
 
 func (a *App) ProbeAccount(ctx context.Context, tool adapter.Tool, id string) quota.Result {
 	return a.probeAccount(ctx, tool, id, false)
+}
+
+// ProbeAccountRef resolves an explicit account before making a provider request.
+func (a *App) ProbeAccountRef(ctx context.Context, tool adapter.Tool, ref string) (quota.Result, error) {
+	if err := a.CheckAction(tool, "probe"); err != nil {
+		return quota.Result{}, err
+	}
+	id, err := a.resolveAccount(string(tool), ref)
+	if err != nil {
+		return quota.Result{}, err
+	}
+	if _, err := a.State.GetAccount(string(tool), id); err != nil {
+		return quota.Result{}, fmt.Errorf("%s account not found", tool)
+	}
+	return a.ProbeAccount(ctx, tool, id), nil
 }

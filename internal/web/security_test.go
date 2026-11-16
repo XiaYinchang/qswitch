@@ -15,12 +15,12 @@ import (
 	"qswitch/internal/buildinfo"
 )
 
-func TestHealthReportsVersionWithoutApp(t *testing.T) {
+func TestHealthReportsVersionAndInstance(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/api/health", nil)
 	r.Host = "127.0.0.1:7432"
 	w := httptest.NewRecorder()
-	New(nil, r.Host).Handler().ServeHTTP(w, r)
-	var got map[string]string
+	New(setupApp(t), r.Host).Handler().ServeHTTP(w, r)
+	var got map[string]any
 	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +62,7 @@ func TestLocalRequestOrigin(t *testing.T) {
 }
 
 func TestLoginCancellationIsTerminal(t *testing.T) {
-	s := New(nil, "127.0.0.1:7432")
+	s := New(setupApp(t), "127.0.0.1:7432")
 	cancelled := false
 	s.logins["pending"] = &loginSess{ID: "pending", Status: "pending", cancel: func() { cancelled = true }}
 	s.logins["completed"] = &loginSess{ID: "completed", Status: "ok", cancel: func() { t.Error("completed login cancelled") }}
@@ -81,7 +81,7 @@ func TestLoginCancellationIsTerminal(t *testing.T) {
 }
 
 func TestGetLoginConcurrentCompletion(t *testing.T) {
-	s := New(nil, "127.0.0.1:7432")
+	s := New(setupApp(t), "127.0.0.1:7432")
 	s.logins["session"] = &loginSess{ID: "session", Status: "pending"}
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -139,7 +139,9 @@ func TestCancelRequestBodyValidation(t *testing.T) {
 				r.ContentLength = -1
 			}
 			w := httptest.NewRecorder()
-			New(nil, r.Host).Handler().ServeHTTP(w, r)
+			a := setupApp(t)
+			r.Header.Set(instanceHeader, a.Instance().ID)
+			New(a, r.Host).Handler().ServeHTTP(w, r)
 			if w.Code != tc.want {
 				t.Fatalf("status = %d, want %d", w.Code, tc.want)
 			}

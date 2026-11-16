@@ -53,7 +53,7 @@ func TestPIDFileNotFlockAndBusy(t *testing.T) {
 	}
 }
 
-func TestCaptureAttachesGrokBotDesktop(t *testing.T) {
+func TestCaptureDoesNotBindSandDesktop(t *testing.T) {
 	t.Setenv("QSWITCH_IN_TEST", "1")
 	home := t.TempDir()
 	os.MkdirAll(filepath.Join(home, ".grok"), 0o700)
@@ -71,15 +71,15 @@ func TestCaptureAttachesGrokBotDesktop(t *testing.T) {
 	var env struct {
 		DesktopZip []byte `json:"desktop_zip"`
 	}
-	if json.Unmarshal(blobs[0].Payload, &env) != nil || len(env.DesktopZip) == 0 {
-		t.Fatal("expected desktop_zip on grok cli blob")
+	if json.Unmarshal(blobs[0].Payload, &env) != nil || len(env.DesktopZip) != 0 {
+		t.Fatal("unverified Sand desktop attached to Grok CLI")
 	}
 	os.WriteFile(filepath.Join(root, "Cookies"), []byte("other"), 0o600)
 	if err := ad.Restore(home, blobs[0], adapter.RestoreOpts{}); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := os.ReadFile(filepath.Join(root, "Cookies"))
-	if string(got) != "ck-1" {
+	if string(got) != "other" {
 		t.Fatalf("cookies %q", got)
 	}
 }

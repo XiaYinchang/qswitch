@@ -179,11 +179,15 @@ func (h HTTP) Cursor(ctx context.Context, accessToken string) (Result, error) {
 	// Bot usage and plan are display-only; skip them when the main usage
 	// request failed or was throttled.
 	if err != nil || res.Class == Unknown || res.Class == Expired {
+		res.Buckets = append(res.Buckets, Bucket{ID: "bot", Class: Unknown, ObservedAt: time.Now().Unix()})
 		return res, err
 	}
-	if bot, ok := h.cursorBot(ctx, accessToken); ok {
-		res.Buckets = append(res.Buckets, bot)
+	bot, ok := h.cursorBot(ctx, accessToken)
+	if !ok {
+		bot = Bucket{ID: "bot", Class: Unknown}
 	}
+	bot.ObservedAt = time.Now().Unix()
+	res.Buckets = append(res.Buckets, bot)
 	if plan := h.cursorPlan(ctx, accessToken); plan != "" {
 		res.Plan = plan
 	}

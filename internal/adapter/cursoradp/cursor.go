@@ -8,13 +8,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
 	"qswitch/internal/adapter"
 	"qswitch/internal/busy"
-	"qswitch/internal/livefile"
 	"qswitch/internal/secutil"
+	"qswitch/internal/snapshot"
 
 	_ "modernc.org/sqlite"
 )
@@ -31,10 +32,19 @@ var cursorAuthKeys = []string{
 }
 
 type Adapter struct {
-	List func() ([]adapter.Proc, error)
+	List     func() ([]adapter.Proc, error)
+	Platform string // Test override; empty uses the host operating system.
 }
 
 func (a Adapter) Name() adapter.Tool { return adapter.Cursor }
+
+func (a Adapter) SupportsDesktopSync() bool {
+	platform := a.Platform
+	if platform == "" {
+		platform = runtime.GOOS
+	}
+	return platform == "darwin"
+}
 
 func cliAuth(home string) string { return filepath.Join(home, ".cursor", "auth.json") }
 func cliCfg(home string) string  { return filepath.Join(home, ".cursor", "cli-config.json") }
@@ -43,7 +53,11 @@ func vscdb(home string) string {
 }
 
 func (a Adapter) LivePaths(home string) []string {
-	return []string{cliAuth(home), cliCfg(home), vscdb(home)}
+	paths := []string{cliAuth(home), cliCfg(home)}
+	if a.SupportsDesktopSync() {
+		paths = append(paths, vscdb(home))
+	}
+	return paths
 }
 
 func HashCLI(home string) ([32]byte, error) {
@@ -89,6 +103,9 @@ func HashDesktop(home string) ([32]byte, error) {
 
 func (a Adapter) Fingerprint(home string) ([32]byte, error) {
 	cli, cliErr := HashCLI(home)
+	if !a.SupportsDesktopSync() {
+		return cli, cliErr
+	}
 	desk, deskErr := HashDesktop(home)
 	return CombineFP(cli, cliErr, desk, deskErr)
 }
@@ -121,7 +138,10 @@ func (a Adapter) ManualBlockers(home string) (adapter.Holders, error) {
 	if err != nil {
 		return adapter.Holders{}, err
 	}
-	app := busy.CursorApp(list)
+	var app []adapter.Proc
+	if a.SupportsDesktopSync() {
+		app = busy.CursorApp(list)
+	}
 	ag := busy.CursorAgent(list)
 	h := adapter.Holders{Manual: append(app, ag...), CursorApp: len(app) > 0}
 	if len(app) > 0 {
@@ -147,9 +167,13 @@ type payload struct {
 }
 
 func (a Adapter) Capture(home string) ([]adapter.Blob, []adapter.Warning, error) {
-	desk, err := readDesktop(home)
-	if err != nil && !os.IsNotExist(err) {
-		return nil, nil, err
+	var desk map[string]string
+	if a.SupportsDesktopSync() {
+		var err error
+		desk, err = readDesktop(home)
+		if err != nil && !os.IsNotExist(err) {
+			return nil, nil, err
+		}
 	}
 	cliTok, _ := readJSONMap(cliAuth(home))
 	cfg, _ := readObject(cliCfg(home))
@@ -186,7 +210,7 @@ func (a Adapter) Capture(home string) ([]adapter.Blob, []adapter.Warning, error)
 	if id.StableID == "" {
 		return nil, warn, errors.New("cursor: no identity")
 	}
-	inc := str(desk["cursorAuth/accessToken"]) == "" || str(cliTok["accessToken"]) == ""
+	inc := str(cliTok["accessToken"]) == "" || (a.SupportsDesktopSync() && str(desk["cursorAuth/accessToken"]) == "")
 	if inc {
 		warn = append(warn, adapter.WarnIncompleteBlob)
 	}
@@ -223,52 +247,118 @@ func (a Adapter) IdentityOf(blob adapter.Blob) (adapter.Identity, error) {
 }
 
 func (a Adapter) Restore(home string, blob adapter.Blob, opts adapter.RestoreOpts) error {
+	_, err := a.RestoreWithRollback(home, blob, opts)
+	return err
+}
+
+// ValidateCLI checks the saved native CLI identity without borrowing credentials
+// from the desktop plane or reading or writing the current client's files.
+func ValidateCLI(blob adapter.Blob) error {
+	_, err := CLIAccessToken(blob)
+	return err
+}
+
+// CLIAccessToken returns only a validated native CLI credential. In particular,
+// a desktop token in a legacy dual-plane snapshot is never used as a fallback.
+func CLIAccessToken(blob adapter.Blob) (string, error) {
 	var p payload
 	if err := json.Unmarshal(blob.Payload, &p); err != nil {
-		return err
+		return "", err
 	}
-	p = align(p)
-	if incomplete(p) {
-		return errors.New("cursor: snapshot has no usable access token")
+	if err := validateCLI(p, blob.Identity.StableID); err != nil {
+		return "", err
 	}
-	if opts.CLIOnly {
-		list, err := a.procs()
-		if err != nil {
-			return err
-		}
-		if ag := busy.CursorAgent(list); len(ag) > 0 {
-			return &adapter.BusyError{Holders: adapter.Holders{Manual: ag, Why: []string{"cursor-agent running"}}}
-		}
-		return writeCLI(home, p)
-	}
-	h, err := a.ManualBlockers(home)
-	if err != nil {
-		return err
-	}
-	if h.ManualBusy() {
-		return &adapter.BusyError{Holders: h}
-	}
-	if err := guardLiveDB(vscdb(home)); err != nil {
-		return err
-	}
-	preDesk, _ := readDesktop(home)
-	preCLI, _ := os.ReadFile(cliAuth(home))
-	preCfg, _ := os.ReadFile(cliCfg(home))
+	return str(p.CLIAuth["accessToken"]), nil
+}
 
-	if err := writeDesktop(home, p.Desktop); err != nil {
-		return err
+func validateCLI(p payload, id string) error {
+	if id == "" || (p.Identity.StableID != "" && p.Identity.StableID != id) {
+		return errors.New("cursor: snapshot identity mismatch")
 	}
-	if err := writeCLI(home, p); err != nil {
-		_ = writeDesktop(home, preDesk)
-		if len(preCLI) > 0 {
-			_ = livefile.AtomicWrite(cliAuth(home), preCLI, 0o600)
-		}
-		if len(preCfg) > 0 {
-			_ = livefile.AtomicWrite(cliCfg(home), preCfg, 0o600)
-		}
-		return err
+	cliID := first(str(p.CLIInfo["authId"]), str(p.CLIInfo["email"]))
+	if cliID == "" || cliID != id {
+		return errors.New("cursor: CLI credential identity mismatch")
+	}
+	if strings.TrimSpace(str(p.CLIAuth["accessToken"])) == "" {
+		return errors.New("cursor: snapshot has no usable CLI access token")
 	}
 	return nil
+}
+
+func (a Adapter) RestoreWithRollback(home string, blob adapter.Blob, opts adapter.RestoreOpts) (func() error, error) {
+	var p payload
+	if err := json.Unmarshal(blob.Payload, &p); err != nil {
+		return nil, err
+	}
+	if a.SupportsDesktopSync() {
+		p = align(p)
+	} else {
+		// A foreign desktop snapshot is not evidence of a usable native CLI
+		// credential. Never synthesize CLI tokens from it on these platforms.
+		opts.CLIOnly = true
+		p.Desktop = nil
+		if err := validateCLI(p, blob.Identity.StableID); err != nil {
+			return nil, err
+		}
+	}
+	if str(p.CLIAuth["accessToken"]) == "" || (a.SupportsDesktopSync() && incomplete(p)) {
+		return nil, errors.New("cursor: snapshot has no usable access token")
+	}
+	if blob.Identity.StableID == "" || (p.Identity.StableID != "" && p.Identity.StableID != blob.Identity.StableID) {
+		return nil, errors.New("cursor: snapshot identity mismatch")
+	}
+	for _, id := range []string{str(p.Desktop["cursorAuth/stripeMembershipAuthId"]), str(p.CLIInfo["authId"])} {
+		if id != "" && id != blob.Identity.StableID {
+			return nil, errors.New("cursor: credential planes have different identities")
+		}
+	}
+	list, err := a.procs()
+	if err != nil {
+		return nil, err
+	}
+	holders := busy.CursorAgent(list)
+	if !opts.CLIOnly {
+		holders = append(holders, busy.CursorApp(list)...)
+	}
+	if len(holders) > 0 {
+		return nil, &adapter.BusyError{Holders: adapter.Holders{Manual: holders, Why: []string{"quit the affected Cursor clients before switching"}}}
+	}
+	files, err := cliWrites(home, p)
+	if err != nil {
+		return nil, err
+	}
+	if opts.CLIOnly {
+		return snapshot.WriteFiles(files...)
+	}
+	if err := guardLiveDB(vscdb(home)); err != nil {
+		return nil, err
+	}
+	old, err := readDesktop(home)
+	var undoDesktop func() error
+	if os.IsNotExist(err) {
+		undoDesktop, err = snapshot.CheckpointFiles(vscdb(home), vscdb(home)+"-wal", vscdb(home)+"-shm")
+	} else if err == nil {
+		undoDesktop = func() error { return replaceDesktop(home, old, true) }
+	}
+	if err != nil {
+		return nil, err
+	}
+	// Read every rollback target before mutating the database.
+	paths := make([]string, len(files))
+	for i, f := range files {
+		paths[i] = f.Path
+	}
+	if _, err := snapshot.CheckpointFiles(paths...); err != nil {
+		return nil, err
+	}
+	if err := writeDesktop(home, p.Desktop); err != nil {
+		return nil, errors.Join(err, undoDesktop())
+	}
+	undoCLI, err := snapshot.WriteFiles(files...)
+	if err != nil {
+		return nil, errors.Join(err, undoDesktop())
+	}
+	return func() error { return errors.Join(undoCLI(), undoDesktop()) }, nil
 }
 
 func incomplete(p payload) bool {
@@ -369,6 +459,13 @@ func readDesktop(home string) (map[string]string, error) {
 }
 
 func writeDesktop(home string, kv map[string]string) error {
+	return replaceDesktop(home, kv, false)
+}
+
+func replaceDesktop(home string, kv map[string]string, rollback bool) error {
+	if !rollback && str(kv["cursorAuth/accessToken"]) == "" {
+		return errors.New("cursor: refusing empty token write")
+	}
 	path := vscdb(home)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
@@ -390,9 +487,13 @@ func writeDesktop(home string, kv map[string]string) error {
 	for _, k := range cursorAuthKeys {
 		val, ok := kv[k]
 		if !ok {
+			if _, err := tx.Exec(`DELETE FROM ItemTable WHERE key=?`, k); err != nil {
+				_ = tx.Rollback()
+				return err
+			}
 			continue
 		}
-		if (k == "cursorAuth/accessToken" || k == "cursorAuth/refreshToken") && val == "" {
+		if !rollback && (k == "cursorAuth/accessToken" || k == "cursorAuth/refreshToken") && val == "" {
 			_ = tx.Rollback()
 			return errors.New("cursor: refusing empty token write")
 		}
@@ -415,23 +516,32 @@ func initMiniDB(path string) error {
 }
 
 func writeCLI(home string, p payload) error {
+	files, err := cliWrites(home, p)
+	if err != nil {
+		return err
+	}
+	_, err = snapshot.WriteFiles(files...)
+	return err
+}
+
+func cliWrites(home string, p payload) ([]snapshot.FileWrite, error) {
 	tok := map[string]string{}
 	if t := str(p.CLIAuth["accessToken"]); t != "" {
 		tok["accessToken"] = t
 	} else {
-		return errors.New("cursor: empty CLI accessToken")
+		return nil, errors.New("cursor: empty CLI accessToken")
 	}
 	if t := str(p.CLIAuth["refreshToken"]); t != "" {
 		tok["refreshToken"] = t
 	}
 	b, err := json.MarshalIndent(tok, "", "  ")
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if err := livefile.AtomicWrite(cliAuth(home), b, 0o600); err != nil {
-		return err
+	cfg, err := readObject(cliCfg(home))
+	if err != nil && !os.IsNotExist(err) {
+		return nil, err
 	}
-	cfg, _ := readObject(cliCfg(home))
 	if cfg == nil {
 		cfg = map[string]any{}
 	}
@@ -440,9 +550,9 @@ func writeCLI(home string, p payload) error {
 	}
 	cb, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return livefile.AtomicWrite(cliCfg(home), cb, 0o644)
+	return []snapshot.FileWrite{{Path: cliAuth(home), Data: b, Mode: 0600}, {Path: cliCfg(home), Data: cb, Mode: 0600}}, nil
 }
 
 func readObject(path string) (map[string]any, error) {
@@ -499,6 +609,9 @@ func first(a, b string) string {
 func (a Adapter) Idle(home string, grace time.Duration) bool {
 	list, err := a.procs()
 	if err != nil {
+		return false
+	}
+	if a.SupportsDesktopSync() && len(busy.CursorApp(list)) > 0 {
 		return false
 	}
 	if len(busy.CursorAgent(list)) == 0 {

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"qswitch/internal/adapter"
+	"qswitch/internal/adapter/cursoradp"
 	"qswitch/internal/clock"
 	"qswitch/internal/notify"
 	"qswitch/internal/secutil"
@@ -96,7 +97,7 @@ func TestCaptureSwitch(t *testing.T) {
 	}
 }
 
-func TestSwitchRestartsChatGPT(t *testing.T) {
+func TestSwitchWaitsForChatGPTExit(t *testing.T) {
 	t.Setenv("QSWITCH_IN_TEST", "1")
 	home := t.TempDir()
 	data := filepath.Join(home, ".qswitch")
@@ -138,19 +139,15 @@ func TestSwitchRestartsChatGPT(t *testing.T) {
 	}
 	a.Host.Sleep = func(time.Duration) {}
 	a.Host.Timeout = time.Second
-	if err := a.Switch(adapter.Codex, "acc-a", adapter.RestoreOpts{}, false); err != nil {
-		t.Fatal(err)
+	if err := a.Switch(adapter.Codex, "acc-a", adapter.RestoreOpts{}, true); err == nil || !strings.Contains(err.Error(), "close it before switching") {
+		t.Fatalf("want desktop safety block, got %v", err)
 	}
-	if launched != "ChatGPT" {
-		t.Fatalf("launch %q", launched)
+	if launched != "" {
+		t.Fatalf("unexpected desktop launch %q", launched)
 	}
 	raw, _ := os.ReadFile(filepath.Join(home, ".codex", "auth.json"))
-	if !jsonContains(raw, "acc-a") {
-		t.Fatalf("live not acc-a: %s", raw)
-	}
-	joined := strings.Join(n.Msgs, "\n")
-	if !strings.Contains(joined, "已重启 ChatGPT.app") {
-		t.Fatalf("notify %v", n.Msgs)
+	if !jsonContains(raw, "acc-b") {
+		t.Fatal("blocked switch changed live account")
 	}
 }
 
@@ -193,7 +190,7 @@ func writeCursor(t *testing.T, home, id, email, tok string) {
 	}
 }
 
-func TestSwitchRestartsCursor(t *testing.T) {
+func TestSwitchWaitsForCursorExit(t *testing.T) {
 	t.Setenv("QSWITCH_IN_TEST", "1")
 	home := t.TempDir()
 	data := filepath.Join(home, ".qswitch")
@@ -211,6 +208,7 @@ func TestSwitchRestartsCursor(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { a.Close() })
+	a.Adapters[adapter.Cursor] = cursoradp.Adapter{List: list, Platform: "darwin"}
 	writeCursor(t, home, "auth0|b", "b@x.com", "tok-b")
 	if _, _, err := a.Capture(adapter.Cursor); err != nil {
 		t.Fatal(err)
@@ -234,22 +232,19 @@ func TestSwitchRestartsCursor(t *testing.T) {
 	}
 	a.Host.Sleep = func(time.Duration) {}
 	a.Host.Timeout = time.Second
-	if err := a.Switch(adapter.Cursor, "auth0|a", adapter.RestoreOpts{}, true); err != nil {
-		t.Fatal(err)
+	if err := a.Switch(adapter.Cursor, "auth0|a", adapter.RestoreOpts{}, true); err == nil || !strings.Contains(err.Error(), "close it before switching") {
+		t.Fatalf("want desktop safety block, got %v", err)
 	}
-	if launched != "Cursor" {
-		t.Fatalf("launch %q", launched)
+	if launched != "" {
+		t.Fatalf("unexpected desktop launch %q", launched)
 	}
 	raw, _ := os.ReadFile(filepath.Join(home, ".cursor", "auth.json"))
-	if !jsonContains(raw, "tok-a") {
-		t.Fatalf("cli not tok-a: %s", raw)
-	}
-	if !strings.Contains(strings.Join(n.Msgs, "\n"), "已重启 Cursor.app") {
-		t.Fatalf("notify %v", n.Msgs)
+	if !jsonContains(raw, "tok-b") {
+		t.Fatal("blocked switch changed live account")
 	}
 }
 
-func TestSwitchRestartsGrokBot(t *testing.T) {
+func TestGrokSwitchLeavesIndependentBotUntouched(t *testing.T) {
 	t.Setenv("QSWITCH_IN_TEST", "1")
 	home := t.TempDir()
 	data := filepath.Join(home, ".qswitch")
@@ -300,7 +295,7 @@ func TestSwitchRestartsGrokBot(t *testing.T) {
 	if err := a.Switch(adapter.Grok, "pid-a", adapter.RestoreOpts{}, true); err != nil {
 		t.Fatal(err)
 	}
-	if launched != "Grok Bot" {
+	if launched != "" {
 		t.Fatalf("launch %q", launched)
 	}
 	raw, _ := os.ReadFile(filepath.Join(home, ".grok", "auth.json"))
@@ -308,15 +303,15 @@ func TestSwitchRestartsGrokBot(t *testing.T) {
 		t.Fatalf("live not pid-a: %s", raw)
 	}
 	ck, _ := os.ReadFile(filepath.Join(root, "Cookies"))
-	if string(ck) != "ck-a" {
+	if string(ck) != "ck-b" {
 		t.Fatalf("cookies %q", ck)
 	}
-	if !strings.Contains(strings.Join(n.Msgs, "\n"), "已重启 Grok Bot.app") {
+	if strings.Contains(strings.Join(n.Msgs, "\n"), "已重启 Grok Bot.app") {
 		t.Fatalf("notify %v", n.Msgs)
 	}
 }
 
-func TestTryApplySwitchesWhileChatGPTRunning(t *testing.T) {
+func TestTryApplyWaitsWhileChatGPTRunning(t *testing.T) {
 	t.Setenv("QSWITCH_IN_TEST", "1")
 	home := t.TempDir()
 	data := filepath.Join(home, ".qswitch")
@@ -349,12 +344,12 @@ func TestTryApplySwitchesWhileChatGPTRunning(t *testing.T) {
 	if err := a.State.SetPending(state.Pending{Tool: "codex", FromID: "acc-b", ToID: "acc-a", QueuedAt: time.Now().Unix()}); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.TryApply(adapter.Codex, false); err != nil {
+	if err := a.TryApply(adapter.Codex, false); err == nil {
 		t.Fatal(err)
 	}
 	raw, _ := os.ReadFile(filepath.Join(home, ".codex", "auth.json"))
-	if !jsonContains(raw, "acc-a") {
-		t.Fatalf("live not acc-a: %s", raw)
+	if !jsonContains(raw, "acc-b") {
+		t.Fatalf("live changed from acc-b: %s", raw)
 	}
 }
 
@@ -547,7 +542,7 @@ func TestPickNextProbesUnprobedAccount(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.HTTP.Client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		body := `{"rate_limit":{"primary_window":{"used_percent":12}}}`
+		body := `{"rate_limit":{"primary_window":{"used_percent":12},"secondary_window":{"used_percent":0}}}`
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header), Request: req}, nil
 	})}
 	if err := a.State.UpdateQuotaSnapshot("codex", "acc-b", "exhausted", 100, 0, time.Now().Unix()); err != nil {
@@ -630,7 +625,7 @@ func TestProbeRecoveredAfterCooling(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.HTTP.Client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		body := `{"rate_limit":{"primary_window":{"used_percent":8}}}`
+		body := `{"rate_limit":{"primary_window":{"used_percent":8},"secondary_window":{"used_percent":0}}}`
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header), Request: req}, nil
 	})}
 	a.ProbeRecovered(context.Background(), adapter.Codex, false)
@@ -682,7 +677,7 @@ func TestOverviewSplitsGrokBot(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.State.SetQuotaDetail("cursor", "u1", `[{"id":"auto","used_pct":50},{"id":"api","used_pct":97.9},{"id":"bot","used_pct":12,"resets_at":1789309692,"plan":"Grok Bot Plan"}]`); err != nil {
+	if err := a.State.SetQuotaDetail("cursor", "u1", `[{"id":"auto","used_pct":50},{"id":"api","used_pct":97.9},{"id":"bot","class":"ok","observed_at":1789306092,"used_pct":12,"resets_at":1789309692,"plan":"Grok Bot Plan"}]`); err != nil {
 		t.Fatal(err)
 	}
 	ov := a.Overview()
@@ -741,7 +736,7 @@ func TestProbeOKClearsCooling(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.HTTP.Client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		body := `{"rate_limit":{"primary_window":{"used_percent":50}}}`
+		body := `{"rate_limit":{"primary_window":{"used_percent":50},"secondary_window":{"used_percent":0}}}`
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header), Request: req}, nil
 	})}
 	res := a.ProbeAccount(context.Background(), adapter.Codex, "acc-a")
@@ -828,7 +823,7 @@ func TestProbeRecoveredCodexBeforeAdvertisedReset(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.HTTP.Client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		body := `{"rate_limit":{"primary_window":{"used_percent":4}}}`
+		body := `{"rate_limit":{"primary_window":{"used_percent":4},"secondary_window":{"used_percent":0}}}`
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header), Request: req}, nil
 	})}
 	a.ProbeRecovered(context.Background(), adapter.Codex, false)
@@ -867,7 +862,7 @@ func TestProbeRecoveredCodexNotTooSoon(t *testing.T) {
 	hit := false
 	a.HTTP.Client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		hit = true
-		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"rate_limit":{"primary_window":{"used_percent":1}}}`)), Header: make(http.Header), Request: req}, nil
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"rate_limit":{"primary_window":{"used_percent":1},"secondary_window":{"used_percent":0}}}`)), Header: make(http.Header), Request: req}, nil
 	})}
 	a.ProbeRecovered(context.Background(), adapter.Codex, false)
 	if hit {
@@ -1001,7 +996,7 @@ func TestProbeForceSkipsBackoff(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.HTTP.Client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		body := `{"rate_limit":{"primary_window":{"used_percent":18}}}`
+		body := `{"rate_limit":{"primary_window":{"used_percent":18},"secondary_window":{"used_percent":0}}}`
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header), Request: req}, nil
 	})}
 	res := a.ProbeAccount(context.Background(), adapter.Codex, "acc-a")

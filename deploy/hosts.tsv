@@ -1,0 +1,4 @@
+# name ssh os arch account public_url managed_tools
+novix novix linux amd64 - https://deck.xiayinchang.top/qswitch/ all
+macmini local darwin arm64 - https://deck.xiayinchang.top/qswitch-mini/ all
+macbook macbook darwin arm64 admin https://deck.xiayinchang.top/qswitch-book/ antigravity

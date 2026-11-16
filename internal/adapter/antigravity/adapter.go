@@ -28,7 +28,7 @@ type Adapter struct {
 type adapterDependencies struct {
 	read     func(string) ([]Candidate, error)
 	validate func(context.Context, []byte) ([]byte, adapter.Identity, error)
-	write    func(string, []byte) (func() error, error)
+	write    func(string, []byte, func() error) (func() error, error)
 	sync     func(context.Context, []Endpoint, string) error
 }
 
@@ -286,13 +286,16 @@ func (a *Adapter) RestoreWithRollback(home string, blob adapter.Blob, opts adapt
 		if previousEmail != "" && !strings.EqualFold(previousEmail, email) {
 			return nil, errors.New("antigravity: running clients use different accounts; no credentials were changed")
 		}
+		if opts.ExpectedCurrentEmail != "" && !strings.EqualFold(opts.ExpectedCurrentEmail, email) {
+			return nil, fmt.Errorf("%w: antigravity native account changed", adapter.ErrRestorePrecondition)
+		}
 		previousEmail = email
 		idle, err := endpoint.Idle(ctx, 30*time.Second)
 		if err != nil || !idle {
 			return nil, errors.New("antigravity: a native session is busy or its state is unknown")
 		}
 	}
-	rollback, err := d.write(home, raw)
+	rollback, err := d.write(home, raw, opts.BeforeWrite)
 	if err != nil {
 		return nil, err
 	}

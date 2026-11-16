@@ -61,6 +61,7 @@ func TestOverviewAndForgetHTTP(t *testing.T) {
 	}
 	req2 := httptest.NewRequest(http.MethodPost, "/api/forget", strings.NewReader(`{"tool":"codex","id":"acc-a"}`))
 	req2.Host = "127.0.0.1:7432"
+	req2.Header.Set(instanceHeader, a.Instance().ID)
 	req2.Header.Set("Content-Type", "application/json")
 	w2 := httptest.NewRecorder()
 	h.ServeHTTP(w2, req2)
@@ -74,6 +75,7 @@ func TestProbeAllHTTP(t *testing.T) {
 	h := New(a, "127.0.0.1:7432").Handler()
 	req := httptest.NewRequest(http.MethodPost, "/api/probe", strings.NewReader(`{}`))
 	req.Host = "127.0.0.1:7432"
+	req.Header.Set(instanceHeader, a.Instance().ID)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)

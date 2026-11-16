@@ -179,17 +179,19 @@ func WriteCredential(home string, raw []byte) error {
 // WriteCredentialWithRollback retains the exact previous value of every slot
 // in memory until the caller finishes live-client synchronization. Call the
 // returned function if that synchronization or identity readback fails.
-func WriteCredentialWithRollback(home string, raw []byte) (func() error, error) {
+// beforeWrite, when set, runs after all credential preparation reads and must
+// recheck automatic-switch admission before the first native mutation.
+func WriteCredentialWithRollback(home string, raw []byte, beforeWrite func() error) (func() error, error) {
 	var undo func() error
-	err := writeCredentialTransaction(home, raw, nativeCredentialBackend(), livefile.AtomicWrite, &undo)
+	err := writeCredentialTransaction(home, raw, nativeCredentialBackend(), livefile.AtomicWrite, &undo, beforeWrite)
 	return undo, err
 }
 
 func writeCredential(home string, raw []byte, backend credentialBackend, writeFile func(string, []byte, os.FileMode) error) error {
-	return writeCredentialTransaction(home, raw, backend, writeFile, nil)
+	return writeCredentialTransaction(home, raw, backend, writeFile, nil, nil)
 }
 
-func writeCredentialTransaction(home string, raw []byte, backend credentialBackend, writeFile func(string, []byte, os.FileMode) error, undo *func() error) error {
+func writeCredentialTransaction(home string, raw []byte, backend credentialBackend, writeFile func(string, []byte, os.FileMode) error, undo *func() error, beforeWrite func() error) error {
 	if _, err := parseConsumerCredential(raw); err != nil {
 		return err
 	}
@@ -279,6 +281,14 @@ func writeCredentialTransaction(home string, raw []byte, backend credentialBacke
 			}
 		}
 		return errors.Join(cause, rollbackErr)
+	}
+	// Keyring reads can block for seconds. Admission checked by the adapter
+	// before entering this transaction would already be stale here. No further
+	// preparation reads may run after this guard and before the first write.
+	if beforeWrite != nil {
+		if err := beforeWrite(); err != nil {
+			return errors.Join(adapter.ErrRestorePrecondition, err)
+		}
 	}
 	if keyAvailable {
 		if err := backend.Write(next); err != nil {

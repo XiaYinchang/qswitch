@@ -17,7 +17,7 @@ import (
 func platformProcesses() ([]adapter.Proc, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	const script = "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); ConvertTo-Json -Compress -InputObject @(Get-CimInstance Win32_Process | Select-Object ProcessId,CommandLine,ExecutablePath,Name)"
+	const script = "$ErrorActionPreference = 'Stop'; [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); ConvertTo-Json -Compress -InputObject @(Get-CimInstance Win32_Process -ErrorAction Stop | Select-Object ProcessId,CommandLine,ExecutablePath,Name)"
 	cmd := exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	raw, err := cmd.Output()
@@ -44,15 +44,21 @@ func parseWindowsProcesses(raw []byte) ([]adapter.Proc, error) {
 		}
 		command := strings.TrimSpace(row.CommandLine)
 		if command == "" {
-			command = row.ExecutablePath
+			command = strings.TrimSpace(row.ExecutablePath)
 			if strings.Contains(command, " ") {
 				command = `"` + command + `"`
 			}
 		}
 		if command == "" {
-			command = row.Name
+			command = strings.TrimSpace(row.Name)
+		}
+		if command == "" {
+			continue
 		}
 		result = append(result, adapter.Proc{PID: row.PID, Command: command})
+	}
+	if len(result) == 0 {
+		return nil, fmt.Errorf("list Windows processes: snapshot has no valid processes")
 	}
 	return result, nil
 }

@@ -103,11 +103,11 @@ func TestParseCursorPlan(t *testing.T) {
 }
 
 func TestClassifyCodexPlanType(t *testing.T) {
-	got := Classify(KindCodex, 200, []byte(`{"plan_type":"plus","rate_limit":{"primary_window":{"used_percent":10}}}`))
+	got := Classify(KindCodex, 200, []byte(`{"plan_type":"plus","rate_limit":{"primary_window":{"used_percent":10},"secondary_window":{"used_percent":5}}}`))
 	if got.Class != OK || got.Plan != "plus" {
 		t.Fatalf("%+v", got)
 	}
-	got = Classify(KindCodex, 200, []byte(`{"plan_type":"pro_20x","rate_limit":{"primary_window":{"used_percent":10}}}`))
+	got = Classify(KindCodex, 200, []byte(`{"plan_type":"pro_20x","rate_limit":{"primary_window":{"used_percent":10},"secondary_window":{"used_percent":5}}}`))
 	if got.Plan != "pro 20x" {
 		t.Fatalf("plan %q", got.Plan)
 	}

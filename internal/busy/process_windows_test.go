@@ -19,6 +19,37 @@ func TestWindowsProcessSnapshot(t *testing.T) {
 	}
 }
 
+func TestWindowsProcessSnapshotRejectsEmptyOrInvalidResults(t *testing.T) {
+	for name, raw := range map[string]string{
+		"empty":              `[]`,
+		"null":               `null`,
+		"null row":           `[null]`,
+		"missing fields":     `[{}]`,
+		"invalid pids":       `[{"ProcessId":0,"Name":"idle.exe"},{"ProcessId":-1,"CommandLine":"agent.exe"}]`,
+		"missing command":    `[{"ProcessId":42}]`,
+		"blank command":      `[{"ProcessId":42,"CommandLine":" ","ExecutablePath":" ","Name":" "}]`,
+		"non-array response": `{}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			rows, err := parseWindowsProcesses([]byte(raw))
+			if err == nil || len(rows) != 0 {
+				t.Fatalf("invalid snapshot accepted as idle: rows=%v err=%v", rows, err)
+			}
+		})
+	}
+}
+
+func TestWindowsProcessSnapshotRetainsValidFallbacks(t *testing.T) {
+	raw := []byte(`[{"ProcessId":0},{"ProcessId":41},{"ProcessId":42,"ExecutablePath":" C:\\Program Files\\Agent\\agent.exe "},{"ProcessId":43,"Name":" idle.exe "}]`)
+	rows, err := parseWindowsProcesses(raw)
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("valid fallback processes lost: rows=%v err=%v", rows, err)
+	}
+	if rows[0].PID != 42 || rows[0].Command != `"C:\Program Files\Agent\agent.exe"` || rows[1].PID != 43 || rows[1].Command != "idle.exe" {
+		t.Fatalf("fallback identity changed: %v", rows)
+	}
+}
+
 func TestWindowsProcessListIncludesCaller(t *testing.T) {
 	processes, err := (PS{}).List()
 	if err != nil {

@@ -88,6 +88,7 @@ func TestAccountLifecycleHTTP(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		req.Header.Set(instanceHeader, a.Instance().ID)
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Origin", ts.URL)
 		res, err := ts.Client().Do(req)
@@ -107,7 +108,7 @@ func TestAccountLifecycleHTTP(t *testing.T) {
 		}
 		return out
 	}
-	if raw := request("GET", "/", nil, 200); !bytes.Contains(raw, []byte("data-act=\"reload-all\"")) {
+	if raw := request("GET", "/", nil, 200); !bytes.Contains(raw, []byte("data-act=\"refresh-state\"")) {
 		t.Fatal("embedded UI missing")
 	}
 	request("POST", "/api/probe", map[string]string{"tool": "codex", "id": "demo-b"}, 200)

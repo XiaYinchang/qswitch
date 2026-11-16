@@ -72,6 +72,7 @@ func TestKimiSubscriptionLifecycleHTTP(t *testing.T) {
 		raw, _ := json.Marshal(body)
 		req, _ := http.NewRequest(http.MethodPost, ts.URL+path, bytes.NewReader(raw))
 		req.Header.Set("Origin", ts.URL)
+		req.Header.Set(instanceHeader, a.Instance().ID)
 		req.Header.Set("Content-Type", "application/json")
 		res, err := ts.Client().Do(req)
 		if err != nil {
@@ -104,7 +105,7 @@ func TestKimiSubscriptionLifecycleHTTP(t *testing.T) {
 	call("/api/capture", map[string]string{"tool": "kimi"}, 200)
 	call("/api/forget", map[string]string{"tool": "kimi", "id": "kimi-b"}, 400)
 	call("/api/forget", map[string]string{"tool": "kimi", "id": "kimi-a"}, 200)
-	call("/api/switch", map[string]any{"tool": "zcode", "id": "any"}, 400)
+	call("/api/switch", map[string]any{"tool": "zcode", "id": "any"}, 409)
 	for _, tool := range a.Overview().Tools {
 		if tool.Tool == "kimi" && (len(tool.Accounts) != 1 || len(tool.Accounts[0].Buckets) != 4 || tool.Accounts[0].UsedPct != 40 || tool.Accounts[0].Phone != "+86 176****0000" || tool.Accounts[0].Email != "" || !tool.Switchable) {
 			t.Fatalf("Kimi overview: %+v", tool)
