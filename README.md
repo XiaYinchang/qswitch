@@ -259,7 +259,7 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.qswitch.plist
 
 launchd 样例见 `contrib/launchd/`（占位符，须用 `qswitch init` 生成带本机路径的 plist）。默认 `KeepAlive=false`，先确认 Keychain 无弹窗。
 
-日常升级使用显式发布标签和 `deploy/hosts.tsv` 清单。先执行 `scripts/deploy.sh --release <tag> --dry-run`，再执行同样命令去掉 `--dry-run`。脚本从 GitHub Release 下载平台制品并校验 SHA-256，停止 daemon 后再次确认没有待切任务，原子替换两个程序并重启；校验实例 ID、版本、管理范围和总览，稳态通过后删除回滚文件，写入本机 `deployment.json`。失败会恢复原程序；回滚也失败时保留恢复文件并明确报错。安装不改账号或自动切换设置，也不需要先登录供应商账号。已有受管 Claude runner 沿用空闲自升级机制，不强制结束正在工作的会话。
+日常升级使用显式发布标签和 `deploy/hosts.tsv` 清单。先执行 `scripts/deploy.sh --release <tag> --dry-run`，再执行同样命令去掉 `--dry-run`。脚本从 GitHub Release 下载平台制品并校验 SHA-256，停止 daemon 后再次确认没有待切任务，原子替换两个程序并重启；校验实例 ID、版本、管理范围和总览，稳态通过后删除回滚文件，写入本机 `deployment.json`。失败会恢复原程序；回滚也失败时保留恢复文件并明确报错。macOS 当前会话无法加载服务时，脚本先确认服务是否已加载，再尝试用 `sudo -n launchctl asuser` 进入所属用户的图形会话启动；此恢复路径需要非交互 sudo 权限，失败时不会等待输入密码或报告成功。安装不改账号或自动切换设置，也不需要先登录供应商账号。已有受管 Claude runner 沿用空闲自升级机制，不强制结束正在工作的会话。
 
 构建和测试在 devbox 或 CI 执行；Mac 只安装已校验制品。发布包覆盖 macOS Intel/Apple Silicon、Linux x64/ARM64、Windows x64；各工具可用能力仍以当前平台后端返回的 capability 为准。
 
