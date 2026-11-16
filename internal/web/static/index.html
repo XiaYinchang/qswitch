@@ -242,6 +242,10 @@
         display: grid;
         gap: 4px;
       }
+      .nav-add {
+        margin-top: 10px;
+        width: 100%;
+      }
       .nav-item {
         display: flex;
         align-items: center;
@@ -744,6 +748,19 @@
         justify-content: flex-end;
         margin-top: 20px;
       }
+      #addAccountGuidance {
+        margin-top: 16px;
+      }
+      #addTool {
+        width: 100%;
+        min-height: 42px;
+        padding: 9px 11px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--raised);
+        color: var(--text);
+        font: inherit;
+      }
       .device-code-row {
         display: flex;
         gap: 10px;
@@ -910,6 +927,10 @@
           padding: 8px 10px;
           font-size: 12px;
         }
+        .nav-add {
+          width: auto;
+          margin-top: 8px;
+        }
         .sidebar-bottom {
           margin-top: 8px;
         }
@@ -1059,6 +1080,15 @@
         <div>
           <p class="nav-caption">账号管理</p>
           <nav class="tool-nav" id="toolNav" aria-label="工具"></nav>
+          <button
+            class="ghost nav-add"
+            id="addAccount"
+            data-act="add-account"
+            data-focus="add-account"
+            disabled
+          >
+            ＋ 添加账号
+          </button>
         </div>
         <div class="sidebar-bottom">
           <a
@@ -1084,20 +1114,30 @@
     >
       <h2 id="loginTitle">添加账号</h2>
       <p id="loginHint"></p>
-      <div class="device-code-row">
-        <output id="loginCode" class="device-code" aria-label="一次性授权代码"
-          >…</output
-        ><button id="copyLoginCode" data-act="copy-code" disabled>复制</button>
+      <div id="loginPicker" hidden>
+        <label class="field" for="addTool"
+          >工具<select id="addTool" data-focus="add-tool"></select
+        ></label>
+        <div id="addAccountGuidance"></div>
       </div>
-      <a
-        id="loginUrl"
-        class="button-link"
-        target="_blank"
-        rel="noopener noreferrer"
-        hidden
-        >打开官方授权页 ↗</a
-      >
-      <p id="loginExpiry"></p>
+      <div id="loginAuthorization">
+        <div class="device-code-row">
+          <output id="loginCode" class="device-code" aria-label="一次性授权代码"
+            >…</output
+          ><button id="copyLoginCode" data-act="copy-code" disabled>
+            复制
+          </button>
+        </div>
+        <a
+          id="loginUrl"
+          class="button-link"
+          target="_blank"
+          rel="noopener noreferrer"
+          hidden
+          >打开官方授权页 ↗</a
+        >
+        <p id="loginExpiry"></p>
+      </div>
       <p
         id="loginMsg"
         class="dialog-status"
@@ -1160,6 +1200,7 @@
         overviewTimer: null,
         confirm: null,
         login: {
+          mode: "device",
           generation: 0,
           id: "",
           tool: "",
@@ -1214,6 +1255,42 @@
           available: false,
           reason: "当前服务未提供此能力",
         };
+      const visibleTools = () =>
+        (state.overview?.tools || []).filter(
+          (tool) => (tool.accounts || []).length > 0,
+        );
+      const addableTools = () => {
+        const managed = new Set(state.instance?.managed_tools || []);
+        return (state.overview?.tools || []).filter(
+          (tool) =>
+            managed.has(tool.tool) &&
+            !tool.derived_from &&
+            tool.tool !== "grokbot",
+        );
+      };
+      function normalizedView(requested) {
+        if (requested === "environments") return requested;
+        const tools = visibleTools();
+        return tools.some((tool) => tool.tool === requested)
+          ? requested
+          : tools[0]?.tool || "";
+      }
+      function hashView() {
+        try {
+          return decodeURIComponent(location.hash.slice(1));
+        } catch {
+          return "";
+        }
+      }
+      function replaceViewHash() {
+        const hash = state.view ? "#" + encodeURIComponent(state.view) : "";
+        if (location.hash !== hash && typeof history !== "undefined")
+          history.replaceState(
+            null,
+            "",
+            location.pathname + location.search + hash,
+          );
+      }
       const accountLabel = (ac) =>
         (ac.tool === "kimi"
           ? ac.phone || ac.display_name || ac.email
@@ -1484,6 +1561,10 @@
           const value = state.messages.get(actionTool(state.view));
           setNotice(el, value?.text, value?.error);
         }
+        if ($("loginDlg").open && ui.login.mode === "picker") {
+          const value = state.messages.get(actionTool(ui.login.tool));
+          loginMessage(value?.text || "", value?.error);
+        }
       }
       function renderConnection() {
         const el = $("connection");
@@ -1546,7 +1627,7 @@
       }
       function renderNavigation() {
         const nav = $("toolNav"),
-          tools = state.overview?.tools || [],
+          tools = visibleTools(),
           keep = new Set();
         for (const [index, t] of tools.entries()) {
           keep.add(t.tool);
@@ -1583,9 +1664,14 @@
           );
       }
       function render() {
+        state.view = normalizedView(state.view);
+        replaceViewHash();
         renderConnection();
         renderEnvironmentNav();
         renderNavigation();
+        $("addAccount").disabled = !canWrite() || !addableTools().length;
+        if ($("loginDlg").open && ui.login.mode === "picker")
+          renderAccountPicker();
         if (state.view === "environments") {
           renderEnvironments();
           return;
@@ -1595,9 +1681,10 @@
         if (!tool) {
           patchHTML(
             root,
-            '<div class="empty"><strong>暂无管理工具</strong><p>当前实例尚未提供可管理的工具。</p></div>',
+            `<div class="empty"><strong>尚未添加账号</strong>${addableTools().length ? `<p>添加此环境的账号后，工具会显示在这里。</p><button class="primary" data-act="add-account" data-focus="empty-add-account" ${!canWrite() ? "disabled" : ""}>添加账号</button>` : "<p>当前实例没有可添加账号的工具。</p>"}</div>`,
           );
           ui.tool = "";
+          ui.accountNodes.clear();
           return;
         }
         if (ui.tool !== tool.tool || !$("accountList")) {
@@ -1768,13 +1855,8 @@
         state.overview = ov;
         state.environments = ov.environments || state.environments;
         state.environmentsError = ov.environments_error || "";
-        const hash = decodeURIComponent(location.hash.slice(1));
-        if (!state.view)
-          state.view =
-            hash === "environments" || ov.tools.some((t) => t.tool === hash)
-              ? hash
-              : (ov.tools.find((t) => (t.accounts || []).length) || ov.tools[0])
-                  ?.tool || "";
+        state.view = normalizedView(state.view || hashView());
+        replaceViewHash();
         state.online = true;
         state.connectionError = "";
         state.lastRead = Date.now() / 1000;
@@ -1999,7 +2081,7 @@
           ? opener
           : Array.from(document.querySelectorAll("[data-focus]")).find(
               (el) => el.dataset.focus === key,
-            );
+            ) || $("addAccount");
         if (target && !target.disabled) target.focus({ preventScroll: true });
       }
       function closeConfirm() {
@@ -2010,8 +2092,8 @@
         return current;
       }
       function selectView(view) {
-        state.view = view;
-        location.hash = encodeURIComponent(view);
+        state.view = normalizedView(view);
+        location.hash = encodeURIComponent(state.view);
         render();
       }
       async function copyText(text) {
@@ -2106,9 +2188,58 @@
             $("saveEnvironments").disabled = !canWrite();
         }
       }
+      function renderAccountPicker() {
+        const tools = addableTools();
+        if (!tools.some((tool) => tool.tool === ui.login.tool))
+          ui.login.tool = tools[0]?.tool || "";
+        patchHTML(
+          $("addTool"),
+          tools
+            .map(
+              (tool) =>
+                `<option value="${attr(tool.tool)}">${attr(toolTitle(tool.tool))}</option>`,
+            )
+            .join(""),
+        );
+        $("addTool").value = ui.login.tool;
+        $("addTool").disabled = !canWrite() || busy(ui.login.tool);
+        const tool = tools.find((entry) => entry.tool === ui.login.tool);
+        patchHTML(
+          $("addAccountGuidance"),
+          tool
+            ? `${loginGuidance(tool)}${!["codex", "grok"].includes(tool.tool) ? `<div class="actions">${actionButton(tool, "capture", "收录当前账号", "capture")}</div>${!capability(tool, "capture").available ? `<p class="capability-note">${attr(capability(tool, "capture").reason || "当前环境暂时无法收录此工具")}</p>` : ""}` : ""}`
+            : "<p>当前实例没有可添加账号的工具。</p>",
+        );
+        renderMessage();
+      }
+      function openAddAccount(opener) {
+        if (!canWrite() || !addableTools().length || $("loginDlg").open) return;
+        ui.login.mode = "picker";
+        ui.login.opener = opener;
+        ui.login.focusKey = opener?.dataset?.focus || "add-account";
+        ui.login.tool =
+          addableTools().find((tool) => tool.tool === state.view)?.tool ||
+          addableTools()[0].tool;
+        ui.login.id = "";
+        $("loginTitle").textContent = "添加账号";
+        $("loginHint").textContent =
+          "当前环境：" + (state.instance?.name || "");
+        $("loginPicker").hidden = false;
+        $("loginAuthorization").hidden = true;
+        $("loginRetry").hidden = true;
+        $("loginCancel").textContent = "关闭";
+        loginMessage("");
+        renderAccountPicker();
+        $("loginDlg").showModal();
+        $("addTool").focus();
+      }
       async function startLogin(tool, opener) {
         if (!canWrite() || busy(tool)) return;
         const login = ui.login;
+        if ($("loginDlg").open && login.mode === "picker") opener = login.opener;
+        login.mode = "device";
+        $("loginPicker").hidden = true;
+        $("loginAuthorization").hidden = false;
         login.generation++;
         const generation = login.generation;
         clearTimeout(login.timer);
@@ -2211,6 +2342,8 @@
             releaseLoginTool();
             state.revision++;
             await loadSnapshot();
+            if (visibleTools().some((tool) => tool.tool === login.tool))
+              selectView(login.tool);
             message(login.tool, "账号已添加，当前登录保持不变。");
           } else if (r.status === "error") {
             again = false;
@@ -2236,7 +2369,8 @@
         clearTimeout(login.timer);
         login.id = "";
         $("loginDlg").close();
-        releaseLoginTool();
+        if (login.mode === "device") releaseLoginTool();
+        else render();
         restoreFocus(login.opener, login.focusKey);
         if (id)
           try {
@@ -2260,6 +2394,10 @@
         if (!b || b.disabled) return;
         const { act, tool, id } = b.dataset;
         try {
+          if (act === "add-account") {
+            openAddAccount(b);
+            return;
+          }
           if (act === "refresh-state") {
             b.disabled = true;
             await connect();
@@ -2366,7 +2504,8 @@
             ac = t?.accounts?.find((a) => a.stable_id === id);
           if (!t) return;
           if (act === "capture") {
-            await mutate(
+            const adding = $("loginDlg").open && ui.login.mode === "picker";
+            const captured = await mutate(
               tool,
               "收录账号",
               "api/capture",
@@ -2381,6 +2520,14 @@
                 );
               },
             );
+            if (
+              adding &&
+              captured &&
+              visibleTools().some((entry) => entry.tool === tool)
+            ) {
+              await cancelLogin();
+              selectView(tool);
+            }
           } else if (act === "probe" || act === "probe-tool") {
             await mutate(
               tool,
@@ -2458,6 +2605,12 @@
           collectEnvironmentDraft();
         }
       });
+      document.addEventListener("change", (e) => {
+        if (e.target.id === "addTool") {
+          ui.login.tool = e.target.value;
+          renderAccountPicker();
+        }
+      });
       document.addEventListener("submit", (e) => {
         if (e.target.id === "environmentForm") saveEnvironments(e);
       });
@@ -2473,11 +2626,8 @@
         if (!document.hidden) pollOverview();
       });
       window.addEventListener("hashchange", () => {
-        const view = decodeURIComponent(location.hash.slice(1));
-        if (view && view !== state.view) {
-          state.view = view;
-          render();
-        }
+        state.view = normalizedView(hashView());
+        render();
       });
       (async () => {
         await connect();

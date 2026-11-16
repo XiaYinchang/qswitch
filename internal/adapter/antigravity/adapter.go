@@ -286,10 +286,18 @@ func (a *Adapter) RestoreWithRollback(home string, blob adapter.Blob, opts adapt
 		if previousEmail != "" && !strings.EqualFold(previousEmail, email) {
 			return nil, errors.New("antigravity: running clients use different accounts; no credentials were changed")
 		}
+		if opts.ExpectedCurrentEmail != "" && !strings.EqualFold(opts.ExpectedCurrentEmail, email) {
+			return nil, fmt.Errorf("%w: antigravity native account changed", adapter.ErrRestorePrecondition)
+		}
 		previousEmail = email
 		idle, err := endpoint.Idle(ctx, 30*time.Second)
 		if err != nil || !idle {
 			return nil, errors.New("antigravity: a native session is busy or its state is unknown")
+		}
+	}
+	if opts.BeforeWrite != nil {
+		if err := opts.BeforeWrite(); err != nil {
+			return nil, errors.Join(adapter.ErrRestorePrecondition, err)
 		}
 	}
 	rollback, err := d.write(home, raw)

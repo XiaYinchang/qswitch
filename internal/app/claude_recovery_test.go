@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"qswitch/internal/adapter/claude"
 	"qswitch/internal/clock"
 	"qswitch/internal/livefile"
+	"qswitch/internal/quota"
 )
 
 func setupClaudeRecovery(t *testing.T, metadata string, expired bool) *App {
@@ -328,5 +330,78 @@ func TestClaudeUnreadableRecoveryFailsClosed(t *testing.T) {
 	})}
 	if _, _, err := a.Capture(adapter.Claude); err == nil {
 		t.Fatal("capture ignored a malformed recovery record")
+	}
+}
+
+func TestClaudeRecoveryCompletionKeepsJournalUntilAccountDirectoryDurable(t *testing.T) {
+	for _, failSync := range []bool{false, true} {
+		t.Run(map[bool]string{false: "open fails", true: "sync fails"}[failSync], func(t *testing.T) {
+			if failSync && runtime.GOOS != "linux" {
+				t.Skip("procfs supplies a directory that rejects fsync on Linux")
+			}
+			a := setupClaudeRecovery(t, "saved-account", false)
+			blobs, _, err := a.Adapters[adapter.Claude].Capture(a.UserHome)
+			if err != nil || len(blobs) != 1 {
+				t.Fatalf("capture fixture: %v", err)
+			}
+			r, err := a.beginClaudeRecovery(blobs[0], "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			updated, err := claude.ApplyRefresh(blobs[0], quota.ClaudeTokens{AccessToken: "renewed-access", RefreshToken: "renewed-refresh", ExpiresIn: 3600}, a.now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.Updated = &updated
+			if err := a.putClaudeRecovery(r); err != nil {
+				t.Fatal(err)
+			}
+			before, err := a.Vault.Get(claudeRecoveryVault, r.key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			accountDir := filepath.Join(a.Vault.Dir, "vault", string(adapter.Claude))
+			if _, err := os.Lstat(accountDir); !os.IsNotExist(err) {
+				t.Fatalf("fixture unexpectedly has an account directory: %v", err)
+			}
+			if failSync {
+				// Opening this real directory succeeds, but its filesystem does
+				// not support fsync. No process-wide hooks or racing file handles.
+				if err := os.Symlink("/proc/self", accountDir); err != nil {
+					t.Fatal(err)
+				}
+				dir, err := os.Open(accountDir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				syncErr := dir.Sync()
+				dir.Close()
+				if syncErr == nil {
+					t.Fatal("fixture directory unexpectedly supports fsync")
+				}
+			}
+			if err := a.deleteClaudeRecovery(r); err == nil {
+				t.Fatal("deleted recovery before account directory was durable")
+			}
+			after, err := a.Vault.Get(claudeRecoveryVault, r.key)
+			if err != nil || !bytes.Equal(before, after) {
+				t.Fatalf("directory failure lost or changed the encrypted recovery: %v", err)
+			}
+			if failSync {
+				if err := os.Remove(accountDir); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// The retained result remains recoverable after a restart. A later
+			// successful account save and directory sync may remove the journal.
+			a = restartClaudeRecovery(t, a)
+			if err := a.recoverClaudeLocked(&updated); err != nil {
+				t.Fatal(err)
+			}
+			assertClaudeRecoveryTokens(t, a, "saved-account", "renewed-access", "renewed-refresh")
+			if _, err := a.Vault.Get(claudeRecoveryVault, r.key); !os.IsNotExist(err) {
+				t.Fatalf("completed recovery journal remains: %v", err)
+			}
+		})
 	}
 }

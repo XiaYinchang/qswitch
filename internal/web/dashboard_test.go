@@ -22,9 +22,9 @@ func dashboardScript(t *testing.T, checks string) {
 const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
 const source=fs.readFileSync('static/index.html','utf8');
 const elements=new Map();
-function element(){return {textContent:'',className:'',hidden:false,disabled:false,open:false,dataset:{},children:[],innerHTML:'',contains(){return false},querySelectorAll(){return []},setAttribute(){},removeAttribute(){},appendChild(n){this.children.push(n)},focus(){this.focused=true},showModal(){this.open=true},close(){this.open=false}}}
+function element(){return {textContent:'',className:'',hidden:false,disabled:false,open:false,dataset:{},children:[],innerHTML:'',contains(){return false},querySelectorAll(){return []},setAttribute(){},removeAttribute(){},appendChild(n){this.children.push(n);n.parent=this},insertBefore(n,b){if(n.parent)n.remove();const at=b?this.children.indexOf(b):this.children.length;this.children.splice(at<0?this.children.length:at,0,n);n.parent=this},remove(){if(this.parent){this.parent.children.splice(this.parent.children.indexOf(this),1);this.parent=null}},focus(){this.focused=true},showModal(){this.open=true},close(){this.open=false}}}
 let fetchImpl=async()=>({ok:true,status:200,json:async()=>({instance:{id:'fixture-a',name:'Fixture A'},tools:[]})});
-const ctx={assert,URL,Intl,AbortController,DOMException,TypeError,console,setTimeout,clearTimeout,Date,Map,Set,Promise,location:{href:'http://localhost:7432/',hash:'',assign(){}},navigator:{clipboard:{writeText:async()=>{}}},document:{hidden:false,getElementById(id){if(!elements.has(id))elements.set(id,element());return elements.get(id)},querySelector(){return element()},createElement:element,activeElement:null},fetch:(...args)=>fetchImpl(...args),setFetch(fn){fetchImpl=fn},elements};
+const ctx={assert,URL,Intl,AbortController,DOMException,TypeError,console,setTimeout,clearTimeout,Date,Map,Set,Promise,location:{href:'http://localhost:7432/',hash:'',assign(){}},navigator:{clipboard:{writeText:async()=>{}}},document:{hidden:false,getElementById(id){if(!elements.has(id))elements.set(id,element());return elements.get(id)},querySelector(){return element()},querySelectorAll(){return []},createElement:element,activeElement:null},fetch:(...args)=>fetchImpl(...args),setFetch(fn){fetchImpl=fn},elements};
 vm.createContext(ctx);
 vm.runInContext(source.slice(source.indexOf('// qswitch-ui-start'),source.indexOf('// qswitch-ui-bootstrap'))+` + string(checkJSON) + `,ctx);
 `
@@ -184,5 +184,32 @@ func TestDashboardBotProbeFeedbackUsesIndependentResult(t *testing.T) {
  mutate=async(t,label,path,body,done)=>{sent=body;feedback=done({tools:[{tool:'cursor',accounts:[{class:'ok'}]},{tool:'grokbot',accounts:[{class:'unknown'}]}]})};
  button.dataset.act='probe-tool';await onClick({target:{closest:s=>s==='[data-act]'?button:null}});assert.equal(sent.id,'');assert(feedback.includes('1 个尚未确认'));
 })().catch(e=>{console.error(e);process.exitCode=1});
+`)
+}
+
+func TestDashboardOnlyShowsToolsWithAccounts(t *testing.T) {
+	dashboardScript(t, `
+render=()=>{};
+state.trustedID='fixture-a';
+const instance={id:'fixture-a',name:'Fixture',managed_tools:['codex','grok','cursor','claude','antigravity']};
+const tools=[{tool:'codex',accounts:[]},{tool:'grok',accounts:[{stable_id:'g'}]},{tool:'cursor',accounts:[]},{tool:'grokbot',derived_from:'cursor',accounts:[]},{tool:'claude',accounts:[{stable_id:'c'}]},{tool:'antigravity',accounts:[]}];
+location.hash='#codex';acceptOverview({instance,tools});assert.equal(state.view,'grok');renderNavigation();
+assert.deepEqual([...ui.navNodes.keys()],['grok','claude']);assert.equal($('toolNav').children.length,2);
+assert.equal(normalizedView('cursor'),'grok');assert.equal(normalizedView('not-in-scope'),'grok');
+tools[3].accounts=[{stable_id:'bot'}];acceptOverview({instance,tools});renderNavigation();assert(ui.navNodes.has('grokbot'));
+tools[1].accounts=[];tools[3].accounts=[];acceptOverview({instance,tools});renderNavigation();assert.equal(state.view,'claude');assert.deepEqual([...ui.navNodes.keys()],['claude']);
+tools[4].accounts=[];acceptOverview({instance,tools});renderNavigation();assert.equal(state.view,'');assert.equal($('toolNav').children.length,0);assert.equal(normalizedView('antigravity'),'');
+state.view='environments';acceptOverview({instance,tools});assert.equal(state.view,'environments');
+`)
+}
+
+func TestDashboardUnifiedAddPickerStaysWithinScope(t *testing.T) {
+	dashboardScript(t, `
+state.instance={id:'fixture-a',name:'Fixture',managed_tools:['antigravity','codex']};state.trustedID='fixture-a';state.online=true;
+state.overview={tools:[{tool:'antigravity',accounts:[],capabilities:{capture:{available:true},login:{available:false,command:'qswitch run antigravity',reason:'请在官方客户端登录'}}},{tool:'codex',accounts:[],capabilities:{login:{available:true}}},{tool:'claude',accounts:[]},{tool:'grokbot',derived_from:'cursor',accounts:[{stable_id:'bot'}]}]};
+assert.deepEqual(addableTools().map(t=>t.tool),['antigravity','codex']);
+openAddAccount({dataset:{focus:'add-account'}});assert($('loginDlg').open);assert.equal(ui.login.mode,'picker');assert.equal($('loginPicker').hidden,false);assert.equal($('loginAuthorization').hidden,true);assert(!$('addTool').innerHTML.includes('claude'));assert(!$('addTool').innerHTML.includes('grokbot'));assert($('addAccountGuidance').innerHTML.includes('data-act="capture"'));assert($('addAccountGuidance').innerHTML.includes('qswitch run antigravity'));
+ui.login.tool='codex';renderAccountPicker();assert($('addAccountGuidance').innerHTML.includes('data-act="login"'));
+render=()=>{};state.operations.set('codex',{label:'查询'});cancelLogin();assert(state.operations.has('codex'),'closing the picker released another mutation');
 `)
 }

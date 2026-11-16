@@ -2,6 +2,7 @@ package adapter
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -135,11 +136,19 @@ type Adapter interface {
 	KillCLI(home string) error
 }
 
+// ErrRestorePrecondition means a guarded automatic switch lost its admission
+// before any native credential write. Callers must cancel, not commit, it.
+var ErrRestorePrecondition = errors.New("account switch precondition changed")
+
 type RestoreOpts struct {
 	ForceAlign    bool
 	AllowStaleCLI bool
 	AllowChatGPT  bool // unused; ChatGPT is not a manual blocker
 	CLIOnly       bool // Cursor: write ~/.cursor only, leave state.vscdb / Cursor.app alone
+	// Antigravity automatic switches revalidate their admission after native
+	// identity/activity RPCs and immediately before the credential transaction.
+	BeforeWrite          func() error `json:"-"`
+	ExpectedCurrentEmail string       `json:"-"`
 }
 
 type Lister interface {

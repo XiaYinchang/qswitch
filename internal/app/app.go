@@ -476,7 +476,7 @@ func (a *App) Switch(tool adapter.Tool, ref string, opts adapter.RestoreOpts, ki
 	}
 	defer lock.Close()
 	if tool != adapter.Claude {
-		return a.switchLocked(tool, ref, opts, killCLI)
+		return a.switchLocked(tool, ref, opts, killCLI, nil)
 	}
 	if !killCLI {
 		h, err := a.switchBlockers(tool)
@@ -527,7 +527,7 @@ func (a *App) Switch(tool adapter.Tool, ref string, opts adapter.RestoreOpts, ki
 		}
 		return errors.New("managed Claude sessions are not ready")
 	}
-	retErr = a.switchLocked(tool, ref, opts, false)
+	retErr = a.switchLocked(tool, ref, opts, false, nil)
 	committed = retErr == nil
 	return retErr
 }
@@ -540,7 +540,7 @@ func (a *App) switchBlockers(tool adapter.Tool) (adapter.Holders, error) {
 }
 
 // The caller holds the tool lock through validation and credential restore.
-func (a *App) switchLocked(tool adapter.Tool, ref string, opts adapter.RestoreOpts, killCLI bool) (retErr error) {
+func (a *App) switchLocked(tool adapter.Tool, ref string, opts adapter.RestoreOpts, killCLI bool, automatic *state.Pending) (retErr error) {
 	if tool == adapter.ZCode {
 		return errors.New("zcode: subscription monitoring only; switch accounts in ZCode")
 	}
@@ -638,6 +638,16 @@ func (a *App) switchLocked(tool adapter.Tool, ref string, opts adapter.RestoreOp
 		}
 	}
 
+	var sourceFP [32]byte
+	if automatic != nil {
+		if tool != adapter.Antigravity {
+			return errors.New("automatic native write guard is only supported for Antigravity")
+		}
+		sourceFP, err = ad.Fingerprint(a.UserHome)
+		if err != nil {
+			return fmt.Errorf("%w: cannot read current native credentials", adapter.ErrRestorePrecondition)
+		}
+	}
 	blobs, _, captureErr := a.captureBlobs(tool)
 	// Claude Code and Kimi rotate refresh tokens; losing the current account's
 	// latest credentials would strand it.
@@ -656,6 +666,13 @@ func (a *App) switchLocked(tool adapter.Tool, ref string, opts adapter.RestoreOp
 				blob = b
 			}
 		}
+	}
+	if automatic != nil {
+		if captureErr != nil || liveCLIIdentity(blobs) != automatic.FromID || len(blobs) == 0 || blobs[0].Identity.Email == "" {
+			return fmt.Errorf("%w: the verified native account changed", adapter.ErrRestorePrecondition)
+		}
+		opts.ExpectedCurrentEmail = blobs[0].Identity.Email
+		opts.BeforeWrite = a.antigravityWriteGuard(*automatic, sourceFP)
 	}
 
 	if tool == adapter.Codex {
@@ -2316,7 +2333,14 @@ func (a *App) TryApply(tool adapter.Tool, killCLI bool) (retErr error) {
 		}
 		killCLI = false // Managed sessions exit through Claude's own command.
 	}
-	retErr = a.switchLocked(tool, pend.ToID, adapter.RestoreOpts{}, killCLI)
+	var automatic *state.Pending
+	if tool == adapter.Antigravity {
+		automatic = &pend
+	}
+	retErr = a.switchLocked(tool, pend.ToID, adapter.RestoreOpts{}, killCLI, automatic)
+	if errors.Is(retErr, adapter.ErrRestorePrecondition) {
+		return a.cancelSwitch(tool, pend, retErr.Error())
+	}
 	committed = retErr == nil
 	if committed {
 		a.logSwitch(tool, pendingKey(pend)+" done", "switched from %s to %s, %s after the switch was queued", a.accountName(tool, pend.FromID), a.accountName(tool, pend.ToID), a.since(pend.QueuedAt))

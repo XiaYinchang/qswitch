@@ -6,6 +6,7 @@
 
 - 正在生成不杀。Antigravity 等待原生 App 和 CLI 会话空闲后统一更新认证，不结束客户端进程。其他工具只在有可靠空闲证据时结束对应 CLI 并写入官方登录文件。无法验证 Codex/ChatGPT 或 Cursor 桌面生成状态时，要求先自行退出桌面 App；Grok CLI 切号不改 Grok Bot。Cursor 只改认证字段，不替换整个状态库和聊天。普通 CLI 不自动重启；通过 `qswitch run claude` 启动的受管会话保存工作目录和会话 ID，在受控切号后恢复原对话。
 - 关闭桌面前先确认 CLI 可以切换，`--cli-only --kill-cli` 同样必须等待空闲。关闭桌面后若切换失败，会尝试重新打开原应用，并保留切换和重启错误。已排队的耗尽切换若遇到账号恢复、当前账号变化或自动切换关闭，会取消。
+- Antigravity 自动切号在实际写入前再次核对原生凭据、客户端身份、内存与已保存的自动开关和额度有效期。准备期间用户已换号、凭据轮换或额度依据过期时，取消旧任务并保留当前登录。
 - 保活、探测、切号和删除按工具互斥；等待锁后重新读取凭据，避免重复使用轮换的 refresh token。daemon 每个工具独立调度，一个工具的慢请求不延误其他工具的收录、探测与待切换执行。保活临时失败保留已有配额并等待 2 分钟再试；永久失效标记需要重新登录，并使用较长的认证退避。保活与配额查询使用独立退避，查询接口故障不阻断安全续期。daemon 每 2 秒重载配置，关闭自动切换不必重启服务。
 - 本地日志采用配额事件的时间，旧事件不会覆盖更新的探测结果或刚切换的账号。没有事件时间的旧格式日志只在尚未探测或切号时作为初始线索。
 - 配额接口认证成功但无法按工具协议识别额度时，将历史登录失效改为用量未知；已有明确配额仍保留。网络失败保留已知状态并退避。Antigravity 例外：未知或失败会将当前配额标为未知，旧记录不再授权自动切换。
@@ -18,6 +19,7 @@
 - 查配额按工具适配，不把裸 429 当作用尽。Codex 看会话 JSONL 的 `rate_limits` / `usage_limit_reached`；Grok 看本地 `billing: fetched credits config` 和 HTTP 402 `usage balance exhausted`；Cursor 看 `GetCurrentPeriodUsage` 的 Auto（自家模型）与高级模型；Grok Bot 周额度走 `GetSandUsageStatus`，显示在关联 Cursor 的只读用量页中，使用自己的成功/失败状态和观测时间。忽略 `resource_exhausted`（那是容量）。当前账号按消耗速度在默认 5–15 分钟内查询，独立于本地日志更新；闲置账号约每 30 分钟更新，每个工具每轮最多查一个，优先最久未查询的账号，`probe_idle_accounts=false` 可关闭。ChatGPT 用尽号不按显示的重置时间死等（窗口可能提前恢复），大约每 30 分钟点探一次；其他工具耗尽后仍等到显示的重置时间再查。普通查询连续失败按 2、4、8、15 分钟退避，成功后清零；429/503 的有效 `Retry-After` 会作为最短等待时间。`http_backoff` 保留为认证失效的较长退避。
 - Cursor 在 macOS 上同步更新 IDE 和 CLI 的登录字段，须先退出桌面端；Linux / Windows 仅管理 CLI，核验保存的 CLI 身份与凭据，不读取或创建桌面数据库。
 - 官方客户端登录第二个号时，`qswitchd` 会自己收进仓库，不必再跑 `qswitch capture`。
+- Web 导航只显示当前机器已有账号的工具，新增类型通过统一“添加账号”入口登录或收录后出现；隐藏空类型不改变后台管理范围。
 - ChatGPT 闲置号会保活。加号请用 `qswitch login codex`：优先拉起本机官方 `codex login --device-auth`（隔离 `CODEX_HOME`，强制 file 存储，不改当前 `auth.json` / 不 logout）。流量、轮询间隔和换票格式与官方 CLI 相同。在 ChatGPT.app 里切换账号等于官方 logout，会作废上一份 refresh。
 - Grok 加号同样走 Device Code：`qswitch login grok` 优先拉起本机官方 `grok login --device-auth`（隔离 `GROK_HOME`，不改当前 `auth.json` / 不 logout）。页面加号走同一套 `auth.x.ai` device code。不要在当前 grok 里换号或 `grok logout`。
 - 同一登录下的多个 workspace 共用当前 live 的 access token 去查用量；不同邮箱的 refresh_token 按官方 OAuth 刷新写回仓库。换号时若仍是同一 Gmail，会把 live token 合并进目标 workspace。
