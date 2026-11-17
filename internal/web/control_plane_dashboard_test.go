@@ -177,3 +177,25 @@ func TestDashboardPortalRefreshRequiresTheAcknowledgedObservation(t *testing.T) 
 })().catch(e=>{console.error(e);process.exitCode=1});
 `)
 }
+
+func TestDashboardPortalZCodeCaptureErrorClearsOnRecoveredReport(t *testing.T) {
+	dashboardScript(t, controlPlaneFixtures+`
+(async()=>{
+ const account={tool:'zcode',stable_id:'bigmodel:recovery-fixture',email:'recovery@example.test',plan:'Max',live:true,class:'ok',used_pct:37,buckets:[{id:'5h',used_pct:37,resets_at:500}]};
+ const failure='无法读取 ZCode 当前桌面账号信息';
+ const zcode={tool:'zcode',live_id:account.stable_id,capture_error:failure,capabilities:{capture:{available:true},probe:{available:true},switch:{available:false},auto_switch:{available:false}},accounts:[account]};
+ const first=controlCatalog(100);first.environments[0].snapshot.overview={instance:{...info(A),managed_tools:['zcode']},tools:[zcode]};
+ location.hash='#zcode';await startPortal(first);assert.equal(state.view,'zcode');
+ assert.equal($('toolProblem').hidden,false);assert($('toolProblem').textContent.includes(failure));assert($('accountDetail').innerHTML.includes('recovery@example.test'));assert($('accountDetail').innerHTML.includes('37%'));
+ const selected=state.selected.get('zcode');
+ const recovered=controlCatalog(200),current=JSON.parse(JSON.stringify(zcode));delete current.capture_error;
+ recovered.environments[0].snapshot.overview={instance:{...info(A),managed_tools:['zcode']},tools:[current]};
+ let reads=0;setFetch(async(path,opts)=>{reads++;assert.equal(path,'api/environments');assert.equal(opts.method,'GET');return response(recovered)});
+ assert.equal(await loadCatalog(),true);assert.equal(reads,1);
+ assert.equal($('toolProblem').hidden,true);assert.equal($('toolProblem').textContent,'');
+ assert.equal(state.selected.get('zcode'),selected);assert.equal(state.overview.tools[0].live_id,account.stable_id);assert.equal(state.overview.tools[0].accounts.length,1);assert.equal(state.overview.tools[0].accounts[0].live,true);
+ assert($('accountDetail').innerHTML.includes('recovery@example.test'));assert($('accountDetail').innerHTML.includes('37%'));assert.equal(state.lastRead,201);
+ clearTimeout(ui.overviewTimer);clearTimeout(ui.snapshotExpiryTimer);
+})().catch(e=>{console.error(e);process.exitCode=1});
+`)
+}

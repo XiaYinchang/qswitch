@@ -61,7 +61,7 @@ jobs:
           go-version-file: go.mod
       - name: build native Windows commands
         run: go build ./cmd/qswitch ./cmd/qswitchd
-      - name: test Windows platform, Antigravity credentials, and quota behavior
+      - name: test Windows platform, desktop credentials, and quota behavior
         env:
           USERPROFILE: ${{ runner.temp }}/qswitch-test-home
           HOME: ${{ runner.temp }}/qswitch-test-home
@@ -72,7 +72,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force $env:USERPROFILE, $env:APPDATA, $env:LOCALAPPDATA, $env:XDG_CONFIG_HOME, $env:QSWITCH_DIR | Out-Null
           try {
-            go test ./internal/livefile ./internal/busy ./internal/hostapp ./internal/secutil ./internal/quota ./internal/adapter/antigravity ./internal/adapter/cursoradp
+            go test ./internal/livefile ./internal/busy ./internal/hostapp ./internal/secutil ./internal/quota ./internal/adapter/antigravity ./internal/adapter/cursoradp ./internal/adapter/zcode
             if ($LASTEXITCODE -ne 0) { throw 'Windows native tests failed' }
           } finally {
             Remove-Item -Recurse -Force $env:USERPROFILE, $env:QSWITCH_DIR

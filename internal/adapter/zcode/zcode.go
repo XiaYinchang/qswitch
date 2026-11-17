@@ -3,16 +3,11 @@
 package zcode
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"os"
-	"os/user"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
@@ -21,13 +16,17 @@ import (
 
 var (
 	ErrReadOnly         = errors.New("zcode: desktop subscription monitoring only; account switching and CLI termination are unsupported")
-	ErrCredentialSecret = errors.New("zcode: cannot decrypt desktop credentials; ZCODE_CREDENTIAL_SECRET must match the desktop when a custom secret is used")
-	ErrCredentialFormat = errors.New("zcode: invalid encrypted credential format")
+	ErrCredentialSecret = errors.New("zcode: 无法解密桌面凭据，请确认使用与 ZCode 桌面相同的加密密钥")
+	ErrCredentialFormat = errors.New("zcode: 桌面凭据的加密格式无效")
 )
 
 const payloadKind = "zcode.desktop-subscription.v1"
 
-type Adapter struct{}
+type Adapter struct {
+	// A getter is scoped to this adapter; each capture reads the key at most
+	// once and retries on the next capture after keyring access recovers.
+	keyringGet func(service, account string) (string, error)
+}
 
 type Creds struct {
 	Provider string `json:"provider"`
@@ -56,7 +55,7 @@ func (Adapter) Fingerprint(home string) ([32]byte, error) {
 	return sha256.Sum256(raw), nil
 }
 
-func (Adapter) Capture(home string) ([]adapter.Blob, []adapter.Warning, error) {
+func (a Adapter) Capture(home string) ([]adapter.Blob, []adapter.Warning, error) {
 	raw, err := os.ReadFile(credentialsPath(home))
 	if err != nil {
 		return nil, nil, err
@@ -65,14 +64,15 @@ func (Adapter) Capture(home string) ([]adapter.Blob, []adapter.Warning, error) {
 	if json.Unmarshal(raw, &store) != nil || store == nil {
 		return nil, nil, errors.New("zcode: invalid desktop credential store")
 	}
-	provider, err := decryptCredential(home, store["oauth:active_provider"])
+	reader := credentialReader{home: home, store: store, keyringGet: a.keyringGet}
+	provider, err := reader.decrypt(store["oauth:active_provider"])
 	if err != nil {
 		return nil, nil, err
 	}
 	if provider != "bigmodel" && provider != "zai" {
 		return nil, nil, errors.New("zcode: no supported desktop account is active")
 	}
-	profileRaw, err := decryptCredential(home, store["oauth:"+provider+":user_info"])
+	profileRaw, err := reader.decrypt(store["oauth:"+provider+":user_info"])
 	if err != nil {
 		return nil, nil, err
 	}
@@ -96,7 +96,7 @@ func (Adapter) Capture(home string) ([]adapter.Blob, []adapter.Warning, error) {
 	if strings.TrimSpace(profile.ID) == "" || profile.ID == "unknown" {
 		return nil, nil, errors.New("zcode: desktop account profile has no stable ID")
 	}
-	apiKey, err := decryptCredential(home, store[planKey(provider, profile.ID)])
+	apiKey, err := reader.decrypt(store[planKey(provider, profile.ID)])
 	if err != nil {
 		return nil, nil, err
 	}
@@ -158,59 +158,4 @@ func (Adapter) ManualBlockers(string) (adapter.Holders, error) {
 }
 func (a Adapter) AutoBlockers(home string) (adapter.Holders, error) {
 	return a.ManualBlockers(home)
-}
-
-func credentialSecret(home string) (string, error) {
-	if secret := os.Getenv("ZCODE_CREDENTIAL_SECRET"); secret != "" {
-		return secret, nil
-	}
-	u, err := user.Current()
-	if err != nil || u.Username == "" {
-		return "", ErrCredentialSecret
-	}
-	platform := runtime.GOOS
-	if platform == "windows" {
-		platform = "win32"
-	}
-	return "zcode-credential-fallback:" + platform + ":" + home + ":" + u.Username, nil
-}
-
-func decryptCredential(home, value string) (string, error) {
-	if !strings.HasPrefix(value, "enc:v1:") {
-		return value, nil // Official desktop also accepts legacy plaintext values.
-	}
-	parts := strings.Split(strings.TrimPrefix(value, "enc:v1:"), ".")
-	if len(parts) != 3 {
-		return "", ErrCredentialFormat
-	}
-	decoded := make([][]byte, len(parts))
-	for i, part := range parts {
-		var err error
-		decoded[i], err = base64.RawURLEncoding.DecodeString(part)
-		if err != nil {
-			return "", ErrCredentialFormat
-		}
-	}
-	if len(decoded[0]) != 12 || len(decoded[1]) != 16 || len(decoded[2]) == 0 {
-		return "", ErrCredentialFormat
-	}
-	secret, err := credentialSecret(home)
-	if err != nil {
-		return "", err
-	}
-	key := sha256.Sum256([]byte(secret))
-	block, err := aes.NewCipher(key[:])
-	if err != nil {
-		return "", ErrCredentialSecret
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return "", ErrCredentialSecret
-	}
-	sealed := append(decoded[2], decoded[1]...)
-	plain, err := gcm.Open(nil, decoded[0], sealed, nil)
-	if err != nil {
-		return "", ErrCredentialSecret
-	}
-	return string(plain), nil
 }
