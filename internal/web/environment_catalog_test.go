@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"qswitch/internal/app"
+	"qswitch/internal/clock"
 )
 
 const remoteEnvironmentID = "11111111111111111111111111111111"
@@ -20,6 +21,7 @@ func TestEnvironmentCatalogTransportBoundaries(t *testing.T) {
 	for _, mode := range []string{"local", "local forged portal", "untrusted forwarded headers", "ordinary proxy", "portal", "nested prefix", "empty directory"} {
 		t.Run(mode, func(t *testing.T) {
 			a := setupApp(t)
+			a.Clock = clock.Fixed{T: time.Unix(1800000000, 0)}
 			a.Cfg.Web.Token = "synthetic-catalog-token"
 			items := []app.Environment{{ID: a.Instance().ID, Name: "Gateway"}, {ID: remoteEnvironmentID, Name: "Remote"}}
 			if mode != "empty directory" {
@@ -50,9 +52,12 @@ func TestEnvironmentCatalogTransportBoundaries(t *testing.T) {
 				t.Fatalf("catalog status %d: %s", w.Code, w.Body.String())
 			}
 			var got struct {
-				Instance      app.InstanceInfo    `json:"instance"`
-				LoginRequired *bool               `json:"login_required"`
-				Environments  []map[string]string `json:"environments"`
+				Instance            app.InstanceInfo             `json:"instance"`
+				LoginRequired       *bool                        `json:"login_required"`
+				ControlPlane        bool                         `json:"control_plane"`
+				ServerTime          int64                        `json:"server_time"`
+				ReportMaxAgeSeconds int64                        `json:"report_max_age_seconds"`
+				Environments        []map[string]json.RawMessage `json:"environments"`
 			}
 			if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 				t.Fatal(err)
@@ -62,17 +67,30 @@ func TestEnvironmentCatalogTransportBoundaries(t *testing.T) {
 			if portal {
 				count = 2
 			}
-			if got.Instance.ID != a.Instance().ID || len(got.Environments) != count || got.LoginRequired == nil || *got.LoginRequired {
+			if got.Instance.ID != a.Instance().ID || len(got.Environments) != count || got.LoginRequired == nil || *got.LoginRequired || got.ControlPlane != portal {
 				t.Fatalf("wrong catalog scope: %+v", got)
 			}
+			if got.ServerTime != a.ReportServerTime() || got.ReportMaxAgeSeconds != 60 {
+				t.Fatalf("catalog freshness clock does not match report expiry: time=%d max_age=%d", got.ServerTime, got.ReportMaxAgeSeconds)
+			}
 			for _, item := range got.Environments {
+				var id, name, routeBase string
+				_ = json.Unmarshal(item["id"], &id)
+				_ = json.Unmarshal(item["name"], &name)
+				_ = json.Unmarshal(item["api_base"], &routeBase)
 				base := prefix + "/api/"
+				fields := 3
 				if portal {
-					base = prefix + "/api/instances/" + item["id"] + "/"
-				} else if item["id"] != a.Instance().ID {
+					base = prefix + "/api/instances/" + id + "/"
+					fields++
+					var snapshot app.ReportSnapshot
+					if err := json.Unmarshal(item["snapshot"], &snapshot); err != nil || !snapshot.Stale || snapshot.Overview != nil {
+						t.Fatalf("unreported node must be unavailable: %+v %v", snapshot, err)
+					}
+				} else if id != a.Instance().ID {
 					t.Fatal("single-host transport advertised a remote instance")
 				}
-				if len(item) != 3 || item["api_base"] != base || item["name"] == "" {
+				if len(item) != fields || routeBase != base || name == "" {
 					t.Fatalf("catalog leaked URL/metadata or used wrong API prefix: %v", item)
 				}
 			}

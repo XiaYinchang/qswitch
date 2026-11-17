@@ -70,6 +70,15 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	reportDone := make(chan struct{})
+	go func() {
+		defer close(reportDone)
+		a.RunReporter(ctx)
+	}()
+	defer func() {
+		stop()
+		<-reportDone
+	}()
 	if a.Cfg.Web.Enabled {
 		addr := a.Cfg.WebAddr()
 		go func() {

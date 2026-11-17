@@ -65,6 +65,9 @@ type App struct {
 	captureRetryAt          map[adapter.Tool]time.Time
 	antigravityCaptureError string
 	claudeWriteLive         func(string, []byte, os.FileMode) error
+	reportMu                sync.Mutex
+	reportRequests          chan reportRequest
+	reportDone              chan struct{}
 
 	// Log, when set, gets a line each time a switch's progress changes.
 	Log       func(format string, args ...any)

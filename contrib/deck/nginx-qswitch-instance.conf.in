@@ -12,7 +12,7 @@ location @qswitch_target_@INSTANCE_NAME@ {
     if ($http_x_qswitch_instance != "@INSTANCE_ID@") { return 409 '{"error":"instance mismatch; no operation was performed"}'; }
     # Named locations cannot use a URI in proxy_pass. Rewrite only supported
     # API endpoints, retaining method, request body and original query args.
-    rewrite ^/qswitch/api/instances/@INSTANCE_ID@/(health|overview|capture|probe|switch|forget|auto|diagnostics|login/(?:codex|grok)(?:/cancel)?)$ /api/$1 break;
+    rewrite ^/qswitch/api/instances/@INSTANCE_ID@/(health|overview|report|capture|probe|switch|forget|auto|diagnostics|login/(?:codex|grok)(?:/cancel)?)$ /api/$1 break;
     return 404 '{"error":"未知环境或接口"}';
     include /etc/nginx/qswitch-gateway/target.conf;
     # Root:root 0600; contents: proxy_set_header Authorization "Bearer ...";

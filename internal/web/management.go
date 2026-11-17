@@ -137,7 +137,8 @@ func (s *Server) getEnvironments(w http.ResponseWriter, r *http.Request) {
 	}
 	type environmentRoute struct {
 		app.Environment
-		APIBase string `json:"api_base"`
+		APIBase  string              `json:"api_base"`
+		Snapshot *app.ReportSnapshot `json:"snapshot,omitempty"`
 	}
 	routes := make([]environmentRoute, 0, len(items))
 	for _, item := range items {
@@ -145,10 +146,20 @@ func (s *Server) getEnvironments(w http.ResponseWriter, r *http.Request) {
 		if portal {
 			base = x.path("/api/instances/" + item.ID + "/")
 		}
-		routes = append(routes, environmentRoute{Environment: item, APIBase: base})
+		route := environmentRoute{Environment: item, APIBase: base}
+		if portal {
+			// A broken or missing report only makes this instance unavailable.
+			// Reading the catalog never asks a node to collect fresh state.
+			snapshot, _ := s.App.ReportSnapshot(item.ID)
+			route.Snapshot = &snapshot
+		}
+		routes = append(routes, route)
 	}
 	_, loginRequired := s.loginRequired(r)
-	writeJSON(w, 200, map[string]any{"instance": instance, "environments": routes, "login_required": loginRequired})
+	writeJSON(w, 200, map[string]any{
+		"instance": instance, "environments": routes, "login_required": loginRequired, "control_plane": portal,
+		"server_time": s.App.ReportServerTime(), "report_max_age_seconds": int64(app.ReportMaxAge / time.Second),
+	})
 }
 
 func loginTool(r *http.Request) adapter.Tool {

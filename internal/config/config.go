@@ -36,19 +36,20 @@ const (
 )
 
 type Config struct {
-	Instance    Instance `toml:"instance"`
-	General     General  `toml:"general"`
-	Quota       Quota    `toml:"quota"`
-	Notify      Notify   `toml:"notify"`
-	Codex       Tool     `toml:"codex"`
-	Grok        Tool     `toml:"grok"`
-	Cursor      Tool     `toml:"cursor"`
-	Devin       Tool     `toml:"devin"`
-	ZCode       Tool     `toml:"zcode"`
-	Kimi        Tool     `toml:"kimi"`
-	Claude      Tool     `toml:"claude"`
-	Antigravity Tool     `toml:"antigravity"`
-	Web         Web      `toml:"web"`
+	Instance    Instance  `toml:"instance"`
+	General     General   `toml:"general"`
+	Quota       Quota     `toml:"quota"`
+	Notify      Notify    `toml:"notify"`
+	Codex       Tool      `toml:"codex"`
+	Grok        Tool      `toml:"grok"`
+	Cursor      Tool      `toml:"cursor"`
+	Devin       Tool      `toml:"devin"`
+	ZCode       Tool      `toml:"zcode"`
+	Kimi        Tool      `toml:"kimi"`
+	Claude      Tool      `toml:"claude"`
+	Antigravity Tool      `toml:"antigravity"`
+	Web         Web       `toml:"web"`
+	Reporting   Reporting `toml:"reporting"`
 }
 
 type Instance struct {
@@ -83,6 +84,13 @@ type Web struct {
 	Addr    string `toml:"addr"`
 	// Token gates every request when the listener is not on loopback.
 	// Required for a public bind; ignored on loopback.
+	Token string `toml:"token"`
+}
+
+// Reporting identifies the control-plane entrance and this node's dedicated
+// write-only report credential. Timing is a protocol default, not a setting.
+type Reporting struct {
+	URL   string `toml:"url"`
 	Token string `toml:"token"`
 }
 

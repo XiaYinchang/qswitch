@@ -93,25 +93,21 @@ func TestDashboardEnvironmentLoginPollAndDiagnosticsCannotCrossTabs(t *testing.T
 }
 
 func TestDashboardEnvironmentBootstrapURLsAndAuthentication(t *testing.T) {
-	dashboardScript(t, environmentFixtures+`
+	dashboardScript(t, controlPlaneFixtures+`
 (async()=>{
  state.gateway=null;state.envID='';state.apiBase='';state.expected=A;
  location.href='https://manage.example.test/qswitch/?expected_instance='+A+'&env='+B+'#antigravity';
- const calls=[];setFetch(async(path,opts)=>{calls.push({path,opts});if(path==='api/environments')return response({instance:info(A),login_required:true,environments:entries});return normalFetch(path,opts)});
+ const calls=[];setFetch(async(path,opts)=>{calls.push({path,opts});assert.equal(path,'api/environments');return response(controlCatalog())});
  await bootstrap();assert.equal(state.envID,B);assert.equal(state.gateway.id,A);assert.equal(state.instance.id,B);assert.equal(location.pathname,'/qswitch/');assert.equal(new URL(location.href).searchParams.get('expected_instance'),A);
- assert.equal(calls.length,2,'bootstrap only needs the catalog and target overview');assert.equal(calls[0].opts.headers['X-Qswitch-Instance'],undefined);assert.equal(calls[1].opts.headers['X-Qswitch-Instance'],B,'overview requires the target header before verification');assert(calls[1].path.endsWith('/overview'));assert.equal($('logoutForm').hidden,false);
- assert.equal(calls.filter(c=>c.path==='api/environments').length,1);
+ assert.equal(calls.length,1,'portal startup only reads the central catalog');assert.equal(calls[0].opts.headers['X-Qswitch-Instance'],undefined);assert.equal($('logoutForm').hidden,false);
  const logout=new URL($('logoutForm').action,location.href);assert.equal(logout.pathname,'/qswitch/logout');assert.equal(logout.searchParams.get('env'),B);assert.equal(logout.searchParams.get('expected_instance'),A);
- acceptOverview({...overview(B),environments:[{id:'malicious',url:'https://other.test'}]});assert.equal(state.environments[0].id,A);
  location.href='https://manage.example.test/qswitch/?expected_instance='+A+'&env='+A+'#codex';await routeFromURL();assert.equal(state.envID,A);assert.equal(state.view,'codex');
  location.href='https://manage.example.test/qswitch/?env='+B+'#antigravity';await routeFromURL();assert.equal(state.envID,B);
  const count=calls.length;location.href='https://manage.example.test/qswitch/?env=unknown#codex';await routeFromURL();assert.equal(state.envID,'unknown');assert.equal(state.overview,null);assert(state.fatal.includes('未配置'));assert.equal(calls.length,count);assert.equal(location.hash,'#codex');
  location.href='https://manage.example.test/qswitch/#codex';await routeFromURL();assert.equal(state.envID,A);assert.equal(new URL(location.href).searchParams.get('env'),A);
- renderEnvironments();assert(!$('root').innerHTML.includes('/api/instances/'));assert(!$('root').innerHTML.includes('type="url"'));assert(!$('root').innerHTML.includes('保存目录'));
- setFetch(async()=>response({error:'upstream auth'},401));await assert.rejects(api('api/overview'),/目标环境认证失败/);assert.equal(location.redirect,undefined);assert.equal(state.online,false);assert.equal(state.overview,null);assert.equal(canWrite(),false);
- const old=requestContext();await switchEnvironment(B);setFetch(async()=>response({},401,{'X-Qswitch-Login-Required':'1'}));await assert.rejects(api('api/overview',{context:old}));assert.equal(location.redirect,undefined,'stale target auth may not redirect current tab');
- await assert.rejects(api('api/overview'));assert(location.redirect.includes('/qswitch/login'));assert.equal(new URL(location.redirect).searchParams.get('expected_instance'),A);location.redirect=undefined;
- setFetch(async()=>response({},401));await assert.rejects(api('api/session',{global:true}));assert(location.redirect.includes('/qswitch/login'));
+ renderEnvironments();assert(!$('root').innerHTML.includes('/api/instances/'));assert(!$('root').innerHTML.includes('type="url"'));assert(!$('root').innerHTML.includes('保存目录'));assert($('root').innerHTML.includes('收到上报'));
+ setFetch(async()=>response({},401));assert.equal(await loadCatalog(),false);assert.equal(canWrite(),false);assert(state.overview,'expired login retains an explicitly stale snapshot');
+ assert(location.redirect.includes('/qswitch/login'));assert.equal(new URL(location.redirect).searchParams.get('expected_instance'),A);
  clearTimeout(ui.overviewTimer);
 })().catch(e=>{console.error(e);process.exitCode=1});
 `)
@@ -170,7 +166,7 @@ func TestDashboardLateRefreshDoesNotDisableNewEnvironment(t *testing.T) {
 	dashboardScript(t, environmentFixtures+`
 (async()=>{
  setFetch(normalFetch);await switchEnvironment(A);
- const delayedTab=deferred();setFetch(()=>delayedTab.promise);const changing=switchEnvironment(B);assert($('root').innerHTML.includes('正在连接环境'));assert(!$('root').innerHTML.includes('id="workspace"'));
+ const delayedTab=deferred();setFetch(()=>delayedTab.promise);const changing=switchEnvironment(B);assert($('root').innerHTML.includes('正在读取状态'));assert(!$('root').innerHTML.includes('id="workspace"'));
  setFetch(normalFetch);delayedTab.resolve(response(overview(B)));await changing;await switchEnvironment(A);
  const snapshot=deferred();setFetch(()=>snapshot.promise);
  const button=$('refreshState');button.dataset={act:'refresh-state'};
