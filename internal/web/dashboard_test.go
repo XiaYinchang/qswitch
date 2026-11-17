@@ -1,9 +1,12 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"os/exec"
+	"strings"
 	"testing"
+	"time"
 )
 
 // The production JavaScript is evaluated directly. Network and DOM boundaries
@@ -25,13 +28,20 @@ const elements=new Map();
 function element(){return {textContent:'',className:'',hidden:false,disabled:false,open:false,dataset:{},children:[],innerHTML:'',contains(){return false},querySelectorAll(){return []},setAttribute(){},removeAttribute(){},appendChild(n){this.children.push(n);n.parent=this},insertBefore(n,b){if(n.parent)n.remove();const at=b?this.children.indexOf(b):this.children.length;this.children.splice(at<0?this.children.length:at,0,n);n.parent=this},remove(){if(this.parent){this.parent.children.splice(this.parent.children.indexOf(this),1);this.parent=null}},focus(){this.focused=true},showModal(){this.open=true},close(){this.open=false}}}
 const location=new URL('http://localhost:7432/');location.assign=(url)=>{location.redirect=url};
 const history={replaceState(a,b,url){location.href=new URL(url,location.href).href},pushState(a,b,url){location.href=new URL(url,location.href).href}};
+let monotonicTime=0,wallTime=1700000000000;
+class TestDate extends Date {static now(){return wallTime}}
 let fetchImpl=async()=>({ok:true,status:200,json:async()=>({instance:{id:'fixture-a',name:'Fixture A'},tools:[]})});
-const ctx={assert,URL,Intl,AbortController,DOMException,TypeError,console,setTimeout:(fn,ms,...args)=>{const timer=setTimeout(fn,ms,...args);if(ms>=10000)timer.unref();return timer},clearTimeout,Date,Map,Set,Promise,location,history,navigator:{clipboard:{writeText:async()=>{}}},document:{hidden:false,getElementById(id){if(!elements.has(id))elements.set(id,element());return elements.get(id)},querySelector(){return element()},querySelectorAll(){return []},createElement:element,activeElement:null},fetch:(...args)=>fetchImpl(...args),setFetch(fn){fetchImpl=fn},elements};
+const ctx={assert,URL,Intl,AbortController,DOMException,TypeError,console,setTimeout:(fn,ms,...args)=>{const timer=setTimeout(fn,ms,...args);if(ms>=10000)timer.unref();return timer},clearTimeout,Date:TestDate,performance:{now:()=>monotonicTime},advanceClock(ms){monotonicTime+=ms;wallTime+=ms},advanceMonotonic(ms){monotonicTime+=ms},advanceWall(ms){wallTime+=ms},Map,Set,Promise,location,history,navigator:{clipboard:{writeText:async()=>{}}},document:{hidden:false,getElementById(id){if(!elements.has(id))elements.set(id,element());return elements.get(id)},querySelector(){return element()},querySelectorAll(){return []},createElement:element,activeElement:null},fetch:(...args)=>fetchImpl(...args),setFetch(fn){fetchImpl=fn},elements};
 vm.createContext(ctx);
-vm.runInContext(source.slice(source.indexOf('// qswitch-ui-start'),source.indexOf('// qswitch-ui-bootstrap'))+'\nstate.envID="fixture-a";state.apiBase="/api/";'+` + string(checkJSON) + `,ctx);
+const finished=vm.runInContext(source.slice(source.indexOf('// qswitch-ui-start'),source.indexOf('// qswitch-ui-bootstrap'))+'\nstate.envID="fixture-a";state.apiBase="/api/";'+` + string(checkJSON) + `,ctx);
+const watchdog=setTimeout(()=>{console.error('dashboard assertions did not finish');process.exit(1)},3000);
+Promise.resolve(finished).then(()=>{clearTimeout(watchdog);process.stdout.write('qswitch-dashboard-complete\n')},error=>{clearTimeout(watchdog);console.error(error);process.exitCode=1});
 `
-	if out, err := exec.Command(node, "-e", script).CombinedOutput(); err != nil {
-		t.Fatalf("dashboard regression: %v\n%s", err, out)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, node, "-e", script).CombinedOutput()
+	if err != nil || !strings.Contains(string(out), "qswitch-dashboard-complete") {
+		t.Fatalf("dashboard regression did not complete: %v\n%s", err, out)
 	}
 }
 

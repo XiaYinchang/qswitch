@@ -244,13 +244,17 @@ Deck 使用一个 `/qswitch/` 页面和一次网页登录，通过顶部环境 T
 
 实例 ID 首次启动随机生成并持久保存在数据目录；已有 ID 损坏时拒绝启动，不静默生成新身份。显示名称来自 `[instance].name`，缺省使用主机名。环境目录由部署维护，只保存名称与实例 ID；页面的“环境管理”展示已配置环境和当前实例信息，不提供任意目标地址编辑。直接打开各机器的 loopback 页面时只管理本机。
 
-统一入口由 lisa-hk 的 nginx 终止 TLS，复用各主机独立密钥的反向 SSH 隧道。服务器只允许对应 key 监听自己的端口：novix 7432、Mini 7433、Book 7434。`/qswitch/api/instances/<实例ID>/` 固定映射到对应端口，不能传入任意 URL、主机或端口。Mac 的 launchd 和 novix 的 systemd 在连接断开后重连；设备离线时仅对应 Tab 显示不可达，清空旧账号内容并暂停操作。模板在 `contrib/deck/`，实际 nginx 合成验证运行 `python3 scripts/nginx_gateway_test.py`（需要 nginx 或 Linux Docker）。
+各节点每 15 秒主动采集状态并上报到 novix 控制面。控制面按实例持久保存最新快照，页面首屏和自动刷新只读取控制面的 `api/environments`，Tab 切换使用已收到的数据。节点超过 60 秒没有新状态时保留历史账号和额度并标记过期，暂停账号操作；尚未收到报告时显示等待上报。页面休眠后也会重新核对快照有效期。“刷新状态”通知所选节点立即采集并上报，收到确认后再读取控制面的新快照；“查询用量”才请求供应商。
+
+统一入口由 lisa-hk 的 nginx 终止 TLS。账号操作与主动刷新复用各主机独立密钥的反向 SSH 隧道；服务器只允许对应 key 监听自己的端口：novix 7432、Mini 7433、Book 7434。`/qswitch/api/instances/<实例ID>/` 固定映射到对应端口，不能传入任意 URL、主机或端口。Mac 的 launchd 和 novix 的 systemd 在连接断开后重连；单台设备离线不阻塞其他环境的状态展示。模板在 `contrib/deck/`，实际 nginx 合成验证运行 `python3 scripts/nginx_gateway_test.py`（需要 nginx 或 Linux Docker）。
 
 网页登录沿用 novix 的管理账号。每次环境请求先由 nginx 的内部认证请求向 novix 校验统一 Cookie 或入口 Bearer；目标服务使用各自独立的服务端 token，不接收浏览器 Cookie 或入口 Bearer。这些 token 只存在目标配置与代理的私有文件中，不进页面、环境目录或仓库。novix 认证服务不可达时，统一入口停止所有远程操作。
 
 代理传递可信的 `X-Forwarded-Host / -Proto / -Prefix / -For`，保留 Origin 和浏览器给出的目标 `X-Qswitch-Instance`。所有环境请求（包括健康查询）都必须携带与路径一致的实例 ID，目标服务再核对自身 ID；接错隧道、未知实例或范围之外的操作均拒绝。代理不重放失败的写请求。切 Tab 后旧请求仍归原环境，晚到结果不能覆盖新环境；已经提交的操作不因换 Tab 被视作取消。退出统一登录后，各环境请求都需重新认证。原独立 Mini、Book 页面路径退役。
 
 部署统一入口时，把主片段和三个共享片段装入 `/etc/nginx/qswitch-gateway/`，根据实测实例 ID 与端口渲染 `instances.conf`。目标 token 单独放入 `secrets/<环境名>.conf`，内容仅为该目标的 Authorization 配置；私有目录权限 0700、文件 0600，不使用会展开密钥的 `nginx -T`。先更新各主机程序和入口 `environments.json`（仅 `id`、`name`），再用候选 nginx 配置执行 `nginx -t`，最后一次 reload 启用新路由并退役旧路径。统一入口的 shell 代理固定设置 `X-Qswitch-Portal: 1`；只有来自 loopback 可信代理的此标志才启用目录路由。普通代理、升级过渡期及本机直连均返回单机目录，不会提前请求尚未启用的路由。
+
+节点的 `config.toml` 增加 `[reporting]`，其中 `url` 为控制面入口（例如 `https://deck.xiayinchang.top/qswitch/`），`token` 为该节点独立随机生成的至少 32 字符凭据。控制面数据目录的 `reporting-tokens.json` 保存 `{实例ID: 专用上报凭据}`，文件权限必须为 0600。上报凭据只允许 `POST /api/reports/<自身实例ID>`，不得复用网页登录或管理 token；报告不包含供应商凭据。节点地址必须使用 HTTPS，本机回环地址允许 HTTP。接收方拒绝过旧、乱序、身份不符的报告，原子保存到 `reports/<实例ID>.json`；重启后继续展示，格式损坏的缓存可由下一次有效上报恢复。控制面不可用时节点下个周期重新采集并重试，不重放旧报告。实际双进程验证在 Linux 运行 `python3 scripts/reporting_smoke_test.py --binary <qswitchd>`，覆盖定时上报、主动刷新、节点离线和控制面重启。
 
 公网暴露：`[web] addr` 设为非 loopback 地址时必须先设密码或 `[web] token`，否则拒绝启动；这时所有请求都要登录或 Bearer，Origin 同源校验照常生效。明文 HTTP 下密码会经过链路，只应放在 TLS 反向代理之后。
 

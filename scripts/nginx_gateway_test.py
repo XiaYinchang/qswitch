@@ -23,6 +23,7 @@ import uuid
 SOURCE = Path(__file__).resolve().parents[1] / "contrib/deck"
 IDS = {"alpha": "a" * 32, "beta": "b" * 32, "gamma": "c" * 32}
 TOKENS = {"alpha": "synthetic-central-bearer", "beta": "synthetic-beta-service", "gamma": "synthetic-gamma-service"}
+REPORT_TOKENS = {name: "synthetic-report-" + name for name in IDS}
 COOKIE = "qswitch_session=synthetic-session"
 ORIGIN = "https://gateway.example.test"
 
@@ -77,6 +78,26 @@ class Backend:
                     return self.reply(200, {"login": True})
                 if parsed.path == "/logout":
                     return self.reply(303, {}, {"Set-Cookie": "qswitch_session=; Max-Age=0; Path=/qswitch", "Location": "/qswitch/login"})
+                if parsed.path.startswith("/api/reports/"):
+                    report_id = parsed.path.removeprefix("/api/reports/")
+                    reporter = next((key for key, value in IDS.items() if value == report_id), None)
+                    if name != "alpha" or reporter is None:
+                        return self.reply(404, {"error": "unknown reporter"})
+                    if self.command != "POST":
+                        return self.reply(405, {"error": "POST required"})
+                    if self.headers.get("Authorization") != "Bearer " + REPORT_TOKENS[reporter]:
+                        return self.reply(401, {"error": "synthetic report authentication failed"})
+                    if self.headers.get("X-Qswitch-Instance") != report_id or json.loads(body)["overview"]["instance"]["id"] != report_id:
+                        return self.reply(409, {"error": "report instance mismatch"})
+                    fault = query.get("fault", [""])[0]
+                    if fault == "disconnect":
+                        self.connection.shutdown(socket.SHUT_RDWR)
+                        self.connection.close()
+                        return
+                    if fault == "redirect":
+                        return self.reply(302, {}, {"Location": "https://untrusted.example.test/", "Set-Cookie": "untrusted=1"})
+                    extra = {"Set-Cookie": "untrusted=1", "Location": "https://untrusted.example.test/", "X-Qswitch-Login-Required": "1"} if fault == "headers" else {}
+                    return self.reply(200, {"accepted": True}, extra)
                 expected = query.get("expected_instance", [""])[0]
                 incoming_id = self.headers.get("X-Qswitch-Instance", "")
                 if expected and expected != IDS[name] or incoming_id and incoming_id != IDS[name]:
@@ -232,6 +253,84 @@ class GatewayIntegrationTest(unittest.TestCase):
     def call(self, name, endpoint="overview", **kwargs):
         headers = {"X-Qswitch-Instance": IDS[name], **kwargs.pop("headers", {})}
         return self.gateway.request(self.target(name, endpoint), headers=headers, **kwargs)
+
+    def report(self, name="beta", suffix="", **kwargs):
+        headers = {"Authorization": "Bearer " + REPORT_TOKENS[name], "X-Qswitch-Instance": IDS[name], "Content-Type": "application/json", **kwargs.pop("headers", {})}
+        body = kwargs.pop("body", json.dumps({"observed_at": 1, "overview": {"instance": {"id": IDS[name]}, "tools": []}}))
+        return self.gateway.request("/qswitch/api/reports/" + IDS[name] + suffix, method=kwargs.pop("method", "POST"), body=body, authenticated=kwargs.pop("authenticated", False), headers=headers, **kwargs)
+
+    def test_node_reports_reach_collector_without_a_browser_session(self):
+        auth_count = len(self.backends["alpha"].requests("/api/session"))
+        target_count = len(self.backends["beta"].requests())
+        status, _, body = self.report(headers={"Cookie": COOKIE, "X-Qswitch-Portal": "1"})
+        self.assertEqual(status, 200)
+        self.assertTrue(json.loads(body)["accepted"])
+        self.assertEqual(len(self.backends["alpha"].requests("/api/session")), auth_count)
+        self.assertEqual(len(self.backends["beta"].requests()), target_count)
+        report = self.backends["alpha"].requests("/api/reports/" + IDS["beta"])[-1]
+        self.assertEqual(report["method"], "POST")
+        self.assertEqual(report["headers"].get("Authorization"), "Bearer " + REPORT_TOKENS["beta"])
+        self.assertEqual(report["headers"].get("X-Qswitch-Instance"), IDS["beta"])
+        self.assertEqual(report["headers"].get("X-Forwarded-Host"), "gateway.example.test")
+        self.assertEqual(report["headers"].get("X-Forwarded-Proto"), "https")
+        self.assertEqual(report["headers"].get("X-Forwarded-Prefix"), "/qswitch")
+        self.assertEqual(report["headers"].get("Origin"), ORIGIN)
+        self.assertNotIn("Cookie", report["headers"])
+        self.assertNotIn("X-Qswitch-Portal", report["headers"])
+        self.assertEqual(json.loads(report["body"])["overview"]["instance"]["id"], IDS["beta"])
+
+    def test_reporting_credentials_are_separate_from_admin_and_target_tokens(self):
+        for token in ("", TOKENS["alpha"], TOKENS["beta"], REPORT_TOKENS["gamma"]):
+            with self.subTest(token=token):
+                status, headers, _ = self.report(authenticated=True, headers={"Authorization": "Bearer " + token})
+                self.assertEqual(status, 401)
+                self.assertNotIn("x-qswitch-login-required", headers)
+        self.assertEqual(self.report(headers={"X-Qswitch-Instance": IDS["gamma"]})[0], 409)
+        self.assertEqual(self.report(body=json.dumps({"overview": {"instance": {"id": IDS["gamma"]}}}))[0], 409)
+        self.assertEqual(self.report(headers={"Origin": "https://other.example.test"})[0], 403)
+        self.assertEqual(self.call("beta", "report", authenticated=False, method="POST", body="{}", headers={"Authorization": "Bearer " + REPORT_TOKENS["beta"]})[0], 401)
+
+    def test_reporting_route_is_exact_and_post_only(self):
+        count = len(self.backends["alpha"].requests("/api/reports/" + IDS["beta"]))
+        for method in ("GET", "HEAD", "PUT", "DELETE"):
+            self.assertEqual(self.report(method=method)[0], 405)
+        self.assertEqual(len(self.backends["alpha"].requests("/api/reports/" + IDS["beta"])), count)
+        for path in ("/qswitch/api/reports/", "/qswitch/api/reports/" + "b" * 31, "/qswitch/api/reports/" + IDS["beta"] + "/capture"):
+            self.assertEqual(self.gateway.request(path, method="POST", body="{}", authenticated=False, headers={"Authorization": "Bearer " + REPORT_TOKENS["beta"]})[0], 401)
+        self.assertEqual(self.report(body=b"x" * (1024 * 1024 + 1))[0], 413)
+        self.assertEqual(len(self.backends["alpha"].requests("/api/reports/" + IDS["beta"])), count)
+
+    def test_reporting_response_cannot_redirect_or_replay(self):
+        status, headers, _ = self.report(suffix="?fault=headers")
+        self.assertEqual(status, 200)
+        for key in ("set-cookie", "location", "x-qswitch-login-required"):
+            self.assertNotIn(key, headers)
+        status, headers, _ = self.report(suffix="?fault=redirect")
+        self.assertEqual(status, 502)
+        self.assertNotIn("location", headers)
+        self.assertNotIn("set-cookie", headers)
+        count = len(self.backends["alpha"].requests("/api/reports/" + IDS["beta"]))
+        status, _, _ = self.report(suffix="?fault=disconnect")
+        self.assertEqual(status, 503)
+        self.assertEqual(len(self.backends["alpha"].requests("/api/reports/" + IDS["beta"])), count + 1)
+
+    def test_manual_snapshot_refresh_uses_authenticated_target_route(self):
+        central_count = len(self.backends["alpha"].requests("/api/report"))
+        target_count = len(self.backends["beta"].requests("/api/report"))
+        self.assertEqual(self.call("beta", "report", authenticated=False, method="POST", body="{}")[0], 401)
+        self.assertEqual(self.call("beta", "report", method="POST", body="{}", headers={"X-Qswitch-Instance": IDS["gamma"]})[0], 409)
+        self.assertEqual(self.call("beta", "report", method="POST", body="{}")[0], 200)
+        self.assertEqual(len(self.backends["alpha"].requests("/api/report")), central_count)
+        self.assertEqual(len(self.backends["beta"].requests("/api/report")), target_count + 1)
+        target = self.backends["beta"].requests("/api/report")[-1]
+        self.assertEqual(target["headers"].get("Authorization"), "Bearer " + TOKENS["beta"])
+        self.assertEqual(target["headers"].get("X-Qswitch-Instance"), IDS["beta"])
+        self.assertNotIn("Cookie", target["headers"])
+        count = len(self.backends["beta"].requests("/api/report"))
+        status, _, body = self.call("beta", "report?fault=disconnect", method="POST", body="{}")
+        self.assertEqual(status, 503)
+        self.assertEqual(len(self.backends["beta"].requests("/api/report")), count + 1)
+        self.assertTrue(json.loads(body)["result_unknown"])
 
     def test_cookie_login_and_logout(self):
         status, headers, _ = self.call("beta", authenticated=False)

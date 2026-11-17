@@ -65,6 +65,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/environments", s.getEnvironments)
 	mux.HandleFunc("GET /api/session", s.getSession)
 	mux.HandleFunc("GET /api/overview", s.getOverview)
+	mux.HandleFunc("POST /api/report", s.postReportNow)
 	mux.HandleFunc("POST /api/capture", s.postCapture)
 	mux.HandleFunc("POST /api/probe", s.postProbe)
 	mux.HandleFunc("POST /api/forget", s.postForget)
@@ -90,6 +91,10 @@ func (s *Server) Handler() http.Handler {
 		// below would reject. same-origin keeps the Referer on this site.
 		h.Set("Referrer-Policy", "same-origin")
 		h.Set("X-Frame-Options", "DENY")
+		if id, ok := reportRequestID(r); ok {
+			s.postReport(w, r, id)
+			return
+		}
 		if !s.admit(w, r) {
 			return
 		}

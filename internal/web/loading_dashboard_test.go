@@ -82,7 +82,7 @@ func TestDashboardCatalogSuppliesLoginState(t *testing.T) {
  for(const required of [true,false,undefined]){
   state.gateway=null;state.envID='';state.apiBase='';state.online=false;state.overview=null;
   location.href='https://manage.example.test/qswitch/';const calls=[];
-  setFetch(async(path,opts)=>{calls.push(path);if(path==='api/environments')return response({instance:info(A),environments:entries,login_required:required});assert.equal(path,entries[0].api_base+'overview');return normalFetch(path,opts)});
+  setFetch(async(path,opts)=>{calls.push(path);if(path==='api/environments')return response({instance:info(A),environments:[{id:A,name:'Local',api_base:'/qswitch/api/'}],login_required:required});assert.equal(path,'/qswitch/api/overview');return normalFetch(path,opts)});
   await bootstrap();
   if(required===undefined){assert.equal(calls.length,1);assert.equal(canWrite(),false);assert(state.fatal.includes('登录状态缺失'))}
   else{assert.equal(calls.length,2);assert.equal(canWrite(),true);assert.equal($('logoutForm').hidden,!required)}
@@ -98,5 +98,33 @@ const tool=state.overview.tools[0];tool.blockers_unavailable=true;tool.busy=true
 render();assert($('toolStatus').innerHTML.includes('会话状态未知'));assert(!$('toolStatus').innerHTML.includes('会话使用中'));assert(!$('toolStatus').innerHTML.includes('会话空闲'));
 tool.blockers_unavailable=false;render();assert($('toolStatus').innerHTML.includes('会话使用中'));
 tool.busy=false;render();assert($('toolStatus').innerHTML.includes('会话空闲'));
+`)
+}
+
+func TestDashboardHardDeadlineDoesNotDependOnFetchAbort(t *testing.T) {
+	dashboardScript(t, environmentFixtures+`
+(async()=>{
+ for(const stage of ['headers','body']){
+  state.online=true;state.instance=info(A);state.trustedID=A;state.fatal='';state.connecting=true;
+  setFetch(()=>stage==='headers'?new Promise(()=>{}):Promise.resolve({ok:true,status:200,json:()=>new Promise(()=>{})}));
+  await assert.rejects(api('api/overview',{timeout:2}),/读取状态超时/);
+  assert.equal(state.connecting,false);assert.equal(state.online,false);assert.equal(canWrite(),false);
+  setFetch(normalFetch);assert.equal(await connect(),true);assert.equal(state.connecting,false);assert.equal(canWrite(),true);
+ }
+ clearTimeout(ui.overviewTimer);
+})().catch(e=>{console.error(e);process.exitCode=1});
+`)
+}
+
+func TestDashboardDiscardedRevisionReleasesRefresh(t *testing.T) {
+	dashboardScript(t, environmentFixtures+`
+(async()=>{
+ const read=deferred(),write=deferred();setFetch((path,opts)=>opts.method==='POST'?write.promise:read.promise);
+ const refresh=connect(),mutation=mutate('codex','收录','api/capture',{tool:'codex'});
+ read.resolve(response(overview(A,'superseded')));assert.equal(await refresh,false);
+ write.resolve(response({error:'synthetic validation failure'},400));assert.equal(await mutation,false);
+ assert.equal(state.connecting,false);assert.equal(state.readRequest,null);assert.equal($('refreshState').disabled,false);assert.equal(state.instance.name,'Alpha');
+ clearTimeout(ui.overviewTimer);
+})().catch(e=>{console.error(e);process.exitCode=1});
 `)
 }

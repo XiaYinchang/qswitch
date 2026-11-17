@@ -37,6 +37,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y nginx
           python3 scripts/nginx_gateway_test.py
+      - name: control-plane reporting smoke test
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          go build -o "$RUNNER_TEMP/qswitchd-reporting-smoke" ./cmd/qswitchd
+          python3 scripts/reporting_smoke_test.py --binary "$RUNNER_TEMP/qswitchd-reporting-smoke"
       - name: test
         # The tests read and write tool login files under $HOME; keep them
         # away from the runner's real home.
