@@ -1595,7 +1595,7 @@
           }
           patchHTML(
             node,
-            `<span>${attr(toolTitle(t.tool))}${t.derived_from ? " · 派生" : ""}</span><span class="nav-count">${(t.accounts || []).length}</span>`,
+            `<span>${attr(toolTitle(t.tool))}</span><span class="nav-count">${(t.accounts || []).length}</span>`,
           );
           node.setAttribute(
             "aria-current",
@@ -1657,7 +1657,7 @@
           $("toolHeading"),
           `<div class="page-heading"><div><h1>${attr(toolTitle(tool.tool))}</h1><p class="heading-meta">${(tool.accounts || []).length} 个账号${op ? " · " + attr(op.label) : ""}</p></div><div class="actions">${actionButton(tool, "probe", "查询全部用量", "probe-tool")}${!tool.derived_from ? actionButton(tool, "capture", "收录当前账号", "capture") : ""}${["codex", "grok"].includes(tool.tool) && capability(tool, "login").available ? actionButton(tool, "login", "添加账号", "login", "", 'class="primary"') : ""}</div></div>${
             tool.derived_from
-              ? `<p class="capability-note">由 ${attr(toolTitle(tool.derived_from))} 账号派生的只读用量；账号在 ${attr(toolTitle(tool.derived_from))} 中管理。</p>`
+              ? `<p class="capability-note">使用 ${attr(toolTitle(tool.derived_from))} 账号；在此查询用量，账号在 ${attr(toolTitle(tool.derived_from))} 中管理。</p>`
               : [
                   ...new Set(
                     ["capture", "probe"]
@@ -1735,7 +1735,7 @@
         else
           patchHTML(
             $("emptyAccounts"),
-            `<div class="empty"><strong>${tool.derived_from ? "暂无派生用量" : "尚未收录账号"}</strong>${tool.derived_from ? `<p>在 ${attr(toolTitle(tool.derived_from))} 中添加并查询账号后，此处会显示派生用量。</p>` : loginGuidance(tool)}<p>${tool.derived_from ? "" : tool.tool === "antigravity" ? "登录完成后会自动核验并收录；页面出现账号后再登录下一个。" : "官方客户端登录后，使用“收录当前账号”添加到本机仓库。"}</p></div>`,
+            `<div class="empty"><strong>${tool.derived_from ? "暂无用量记录" : "尚未收录账号"}</strong>${tool.derived_from ? `<p>在 ${attr(toolTitle(tool.derived_from))} 中添加并查询账号后，此处会显示 ${attr(toolTitle(tool.tool))} 用量。</p>` : loginGuidance(tool)}<p>${tool.derived_from ? "" : tool.tool === "antigravity" ? "登录完成后会自动核验并收录；页面出现账号后再登录下一个。" : "官方客户端登录后，使用“收录当前账号”添加到本机仓库。"}</p></div>`,
           );
         if (deletedFocus)
           ui.accountNodes.get(selected)?.focus({ preventScroll: true });
