@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,8 +30,22 @@ type Adapter struct {
 }
 
 type Creds struct {
-	Provider string `json:"provider"`
-	APIKey   string `json:"api_key"`
+	Provider           string              `json:"provider"`
+	APIKey             string              `json:"api_key,omitempty"`
+	OAuthAccessToken   string              `json:"oauth_access_token,omitempty"`
+	ProjectKeyLocation *ProjectKeyLocation `json:"project_key_location,omitempty"`
+}
+
+// ProjectKeyLocation identifies the current account's existing personal key;
+// APIKeyID must never be sent as quota authorization.
+type ProjectKeyLocation struct {
+	OrganizationID string `json:"organizationId"`
+	ProjectID      string `json:"projectId"`
+	APIKeyID       string `json:"apiKeyId"`
+}
+
+func (p ProjectKeyLocation) valid() bool {
+	return strings.TrimSpace(p.OrganizationID) != "" && strings.TrimSpace(p.ProjectID) != "" && strings.TrimSpace(p.APIKeyID) != ""
 }
 
 type payload struct {
@@ -96,13 +111,9 @@ func (a Adapter) Capture(home string) ([]adapter.Blob, []adapter.Warning, error)
 	if strings.TrimSpace(profile.ID) == "" || profile.ID == "unknown" {
 		return nil, nil, errors.New("zcode: desktop account profile has no stable ID")
 	}
-	apiKey, err := reader.decrypt(store[planKey(provider, profile.ID)])
+	creds, err := captureCreds(&reader, store, provider, profile.ID)
 	if err != nil {
 		return nil, nil, err
-	}
-	apiKey = strings.TrimSpace(apiKey)
-	if apiKey == "" {
-		return nil, nil, errors.New("zcode: current desktop account has no saved personal Coding Plan key")
 	}
 	id := adapter.Identity{Tool: adapter.ZCode, StableID: provider + ":" + profile.ID, Email: profile.Email, DisplayName: profile.DisplayName}
 	if id.Email == "" {
@@ -117,9 +128,10 @@ func (a Adapter) Capture(home string) ([]adapter.Blob, []adapter.Warning, error)
 	if id.DisplayName == "" {
 		id.DisplayName = profile.Username
 	}
-	// The qswitch encrypted blob needs only this account's quota key. Do not
-	// copy OAuth tokens, other accounts, provider settings, or CLI credentials.
-	data, err := json.Marshal(payload{Kind: payloadKind, Identity: id, Creds: Creds{Provider: provider, APIKey: apiKey}})
+	// Persist only the current account's quota authorization. OAuth captures
+	// retain the login token and exact personal locator, never a refresh token,
+	// another account's key, or the short-lived project token obtained later.
+	data, err := json.Marshal(payload{Kind: payloadKind, Identity: id, Creds: creds})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -127,13 +139,109 @@ func (a Adapter) Capture(home string) ([]adapter.Blob, []adapter.Warning, error)
 }
 
 func planKey(provider, id string) string {
-	return "account-provider:coding-plan:account:" + provider + "-individual-coding-plan:account:" + id + ":api-key"
+	return "account-provider:coding-plan:account:" + provider + "-individual-coding-plan:account:" + encodeURIComponent(id) + ":api-key"
+}
+
+func captureCreds(reader *credentialReader, store map[string]string, provider, id string) (Creds, error) {
+	creds := Creds{Provider: provider}
+	apiKey, err := reader.decrypt(store[planKey(provider, id)])
+	if err != nil {
+		return Creds{}, err
+	}
+	if creds.APIKey = strings.TrimSpace(apiKey); creds.APIKey != "" {
+		return creds, nil
+	}
+	location, err := reader.decrypt(store[projectLocationKey(provider, id)])
+	if err != nil {
+		return Creds{}, err
+	}
+	if location == "" {
+		return Creds{}, errors.New("zcode: 当前桌面账号尚未保存个人项目凭据，请先在 ZCode 桌面使用该账号完成初始化")
+	}
+	var locator ProjectKeyLocation
+	if json.Unmarshal([]byte(location), &locator) != nil || !locator.valid() {
+		return Creds{}, errors.New("zcode: 当前桌面账号的个人项目凭据位置无效")
+	}
+	token, err := reader.decrypt(store["oauth:"+provider+":access_token"])
+	if err != nil {
+		return Creds{}, err
+	}
+	if strings.TrimSpace(token) == "" {
+		return Creds{}, errors.New("zcode: 当前桌面账号缺少 OAuth 登录凭据，请在 ZCode 桌面重新登录")
+	}
+	creds.OAuthAccessToken, creds.ProjectKeyLocation = token, &locator
+	return creds, nil
+}
+
+func projectLocationKey(provider, id string) string {
+	origin := "https://bigmodel.cn"
+	if provider == "zai" {
+		origin = "https://api.z.ai"
+	}
+	// Match encodeURIComponent(JSON.stringify(...)) exactly; QueryEscape uses
+	// '+' for spaces and PathEscape leaves reserved characters unescaped.
+	parts := []string{origin, provider, id}
+	var tuple strings.Builder
+	tuple.WriteByte('[')
+	for i, part := range parts {
+		if i > 0 {
+			tuple.WriteByte(',')
+		}
+		tuple.WriteByte('"')
+		for _, r := range part {
+			switch r {
+			case '"', '\\':
+				tuple.WriteByte('\\')
+				tuple.WriteRune(r)
+			case '\b':
+				tuple.WriteString(`\b`)
+			case '\f':
+				tuple.WriteString(`\f`)
+			case '\n':
+				tuple.WriteString(`\n`)
+			case '\r':
+				tuple.WriteString(`\r`)
+			case '\t':
+				tuple.WriteString(`\t`)
+			default:
+				if r < 0x20 {
+					fmt.Fprintf(&tuple, `\u%04x`, r)
+				} else {
+					tuple.WriteRune(r)
+				}
+			}
+		}
+		tuple.WriteByte('"')
+	}
+	tuple.WriteString(",null,1,\"non-team\"]")
+	return "project-key-location:v1:" + encodeURIComponent(tuple.String())
+}
+
+func encodeURIComponent(value string) string {
+	var encoded strings.Builder
+	const hex = "0123456789ABCDEF"
+	for _, b := range []byte(value) {
+		if b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9' || strings.ContainsRune("-_.!~*'()", rune(b)) {
+			encoded.WriteByte(b)
+		} else {
+			encoded.WriteByte('%')
+			encoded.WriteByte(hex[b>>4])
+			encoded.WriteByte(hex[b&15])
+		}
+	}
+	return encoded.String()
 }
 
 func readPayload(blob adapter.Blob) (payload, error) {
 	var p payload
-	if json.Unmarshal(blob.Payload, &p) != nil || p.Kind != payloadKind || p.Identity.StableID == "" ||
-		(p.Creds.Provider != "bigmodel" && p.Creds.Provider != "zai") || strings.TrimSpace(p.Creds.APIKey) == "" {
+	if json.Unmarshal(blob.Payload, &p) != nil || p.Kind != payloadKind ||
+		(p.Creds.Provider != "bigmodel" && p.Creds.Provider != "zai") ||
+		!strings.HasPrefix(p.Identity.StableID, p.Creds.Provider+":") || strings.TrimSpace(strings.TrimPrefix(p.Identity.StableID, p.Creds.Provider+":")) == "" {
+		return payload{}, errors.New("zcode: invalid subscription credential blob")
+	}
+	legacy := strings.TrimSpace(p.Creds.APIKey) != "" && p.Creds.OAuthAccessToken == "" && p.Creds.ProjectKeyLocation == nil
+	oauth := p.Creds.APIKey == "" && strings.TrimSpace(p.Creds.OAuthAccessToken) != "" && p.Creds.ProjectKeyLocation != nil && p.Creds.ProjectKeyLocation.valid()
+	if !legacy && !oauth {
 		return payload{}, errors.New("zcode: invalid subscription credential blob")
 	}
 	p.Identity.Tool = adapter.ZCode

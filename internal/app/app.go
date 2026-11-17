@@ -63,6 +63,9 @@ type App struct {
 	deskFPOk                bool
 	lastDeskAt              time.Time
 	captureRetryAt          map[adapter.Tool]time.Time
+	zcodeCapturePaused      bool
+	zcodePauseRevision      int64
+	zcodePauseRevisionKnown bool
 	antigravityCaptureError string
 	claudeWriteLive         func(string, []byte, os.FileMode) error
 	reportMu                sync.Mutex
@@ -188,7 +191,12 @@ func (a *App) Init() error {
 	)
 }
 
-func (a *App) Capture(tool adapter.Tool) ([]adapter.Blob, []adapter.Warning, error) {
+func (a *App) Capture(tool adapter.Tool) (blobs []adapter.Blob, warn []adapter.Warning, captureErr error) {
+	defer func() {
+		if tool == adapter.ZCode && captureErr != nil {
+			a.setCaptureError(tool, captureErr)
+		}
+	}()
 	if err := a.CheckAction(tool, "capture"); err != nil {
 		return nil, nil, err
 	}
@@ -197,9 +205,19 @@ func (a *App) Capture(tool adapter.Tool) ([]adapter.Blob, []adapter.Warning, err
 		return nil, nil, err
 	}
 	defer lock.Close()
-	blobs, warn, err := a.captureBlobs(tool)
+	var zcodeFP [32]byte
+	if tool == adapter.ZCode {
+		zcodeFP, err = a.liveFingerprint(tool)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	blobs, warn, err = a.captureBlobs(tool)
 	if err != nil {
 		return nil, warn, err
+	}
+	if tool == adapter.ZCode && len(blobs) == 0 {
+		return nil, warn, errors.New("zcode: 未收录到有效账号，请重试")
 	}
 	desync := len(blobs) > 1
 	for _, b := range blobs {
@@ -228,6 +246,19 @@ func (a *App) Capture(tool adapter.Tool) ([]adapter.Blob, []adapter.Warning, err
 	}
 	if err := a.State.SetPointer(p); err != nil {
 		return blobs, warn, err
+	}
+	if tool == adapter.ZCode {
+		after, err := a.liveFingerprint(tool)
+		if err != nil {
+			return blobs, warn, err
+		}
+		if after != zcodeFP {
+			return blobs, warn, errors.New("zcode: 登录状态在收录期间发生变化，请重新收录")
+		}
+		if err := a.State.RememberSelfWrite("capture:zcode", zcodeFP, a.now()); err != nil {
+			return blobs, warn, err
+		}
+		a.completeZCodeCapture(zcodeFP)
 	}
 	return blobs, warn, nil
 }
@@ -949,7 +980,10 @@ func (a *App) rememberFP(tool adapter.Tool) {
 }
 
 func (a *App) Ingest(tool adapter.Tool) error {
-	if tool == adapter.Kimi || tool == adapter.Devin || tool == adapter.Claude || tool == adapter.Antigravity || tool == adapter.ZCode {
+	if a.backgroundCapturePaused(tool) {
+		return nil
+	}
+	if tool == adapter.Kimi || tool == adapter.Devin || tool == adapter.Claude || tool == adapter.Antigravity {
 		a.fpMu.Lock()
 		deferAt := a.captureRetryAt[tool]
 		a.fpMu.Unlock()
@@ -978,7 +1012,7 @@ func (a *App) Ingest(tool adapter.Tool) error {
 	if err != nil {
 		return err
 	}
-	if self {
+	if self && tool != adapter.ZCode {
 		a.setLastFP(tool, fp)
 		return nil
 	}
@@ -987,16 +1021,19 @@ func (a *App) Ingest(tool adapter.Tool) error {
 		return err
 	}
 	defer lock.Close()
+	// A manual capture may have failed while this background tick waited
+	// for the tool lock. Do not immediately reopen the same system prompt.
+	if a.backgroundCapturePaused(tool) {
+		return nil
+	}
 	blobs, _, err := a.captureBlobs(tool)
-	if tool == adapter.Kimi || tool == adapter.Devin || tool == adapter.Claude || tool == adapter.Antigravity || tool == adapter.ZCode {
+	if tool == adapter.Kimi || tool == adapter.Devin || tool == adapter.Claude || tool == adapter.Antigravity {
 		a.fpMu.Lock()
 		if a.captureRetryAt == nil {
 			a.captureRetryAt = make(map[adapter.Tool]time.Time)
 		}
 		a.captureRetryAt[tool] = time.Time{}
-		// ZCode's native credential store can show a system permission prompt.
-		// Do not repeat that read every worker tick while access is unavailable.
-		if err != nil && (tool != adapter.ZCode || errors.Is(err, zcode.ErrOSCredential) || errors.Is(err, zcode.ErrOSCredentialPending)) {
+		if err != nil {
 			a.captureRetryAt[tool] = a.now().Add(time.Minute)
 		}
 		a.fpMu.Unlock()
@@ -1938,7 +1975,12 @@ func (a *App) probeAccountLocked(ctx context.Context, tool adapter.Tool, id stri
 		if err != nil {
 			return quota.Result{Class: quota.Unknown}
 		}
-		res, _ = a.HTTP.ZCode(ctx, c.APIKey, c.Provider)
+		if c.APIKey != "" {
+			res, _ = a.HTTP.ZCode(ctx, c.APIKey, c.Provider)
+		} else if c.ProjectKeyLocation != nil {
+			p := c.ProjectKeyLocation
+			res, _ = a.HTTP.ZCodeOAuth(ctx, c.OAuthAccessToken, c.Provider, p.OrganizationID, p.ProjectID, p.APIKeyID)
+		}
 	case adapter.Devin:
 		c, err := devin.CredsFromBlob(blob)
 		if err != nil {

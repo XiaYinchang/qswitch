@@ -157,6 +157,12 @@ func (r *credentialReader) loadKey() ([]byte, error) {
 		get = readOSCredential
 	}
 	value, err := get(credentialService, account)
+	if errors.Is(err, ErrNativeRuntimeUnavailable) {
+		return nil, ErrNativeRuntimeUnavailable
+	}
+	if errors.Is(err, ErrNativeRuntimeAmbiguous) {
+		return nil, ErrNativeRuntimeAmbiguous
+	}
 	if errors.Is(err, ErrOSCredentialPending) {
 		return nil, ErrOSCredentialPending
 	}

@@ -2,25 +2,19 @@ package zcode
 
 import (
 	"context"
-	"os/exec"
-	"strings"
+	"os"
 	"time"
 )
 
-// Read the existing item only. In particular, do not invoke the desktop's
-// key-store initialization, which can create keys and migrate its files.
+// Reuse the installed ZCode CLI's Node runtime and native keyring module.
+// Never fall back to security: a different executable has different Keychain
+// authorization and can repeatedly ask the user for access.
 func readOSCredential(service, account string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "/usr/bin/security", "find-generic-password", "-s", service, "-a", account, "-w")
-	cmd.WaitDelay = time.Second
-	raw, err := cmd.Output()
-	if ctx.Err() != nil {
-		return "", ErrOSCredentialPending
-	}
+	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", ErrOSCredential
+		return "", ErrNativeRuntimeUnavailable
 	}
-	// security appends a single newline; do not normalize the secret itself.
-	return strings.TrimSuffix(string(raw), "\n"), nil
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return readNodeCredential(ctx, nativeRuntimeOptions{home: home, path: os.Getenv("PATH"), node: os.Getenv("ZCODE_NODE"), env: os.Environ()}, service, account, runNativeNode)
 }

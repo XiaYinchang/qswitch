@@ -6,6 +6,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -356,8 +357,9 @@ func TestZCodeV2SecretRecoveryPreservesExistingSubscription(t *testing.T) {
 
 type zcodeCaptureFailureAdapter struct {
 	adapter.Adapter
-	captureErr error
-	calls      int
+	captureErr   error
+	calls        int
+	afterCapture func()
 }
 
 func (a *zcodeCaptureFailureAdapter) Capture(home string) ([]adapter.Blob, []adapter.Warning, error) {
@@ -365,80 +367,331 @@ func (a *zcodeCaptureFailureAdapter) Capture(home string) ([]adapter.Blob, []ada
 	if a.captureErr != nil {
 		return nil, nil, a.captureErr
 	}
-	return a.Adapter.Capture(home)
+	blobs, warnings, err := a.Adapter.Capture(home)
+	if err == nil && a.afterCapture != nil {
+		a.afterCapture()
+	}
+	return blobs, warnings, err
 }
 
-func TestZCodeKeyringCaptureBackoffAndRecovery(t *testing.T) {
+func independentZCodeApp(t *testing.T, source *App, ad adapter.Adapter) *App {
+	t.Helper()
+	db, err := state.Open(filepath.Join(source.DataDir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return &App{UserHome: source.UserHome, DataDir: source.DataDir, Cfg: source.cfgSnapshot(), State: db, Vault: source.Vault, Clock: source.Clock, Adapters: map[adapter.Tool]adapter.Adapter{adapter.ZCode: ad}}
+}
+
+func replaceZCodeDesktopAccount(t *testing.T, home string) {
+	t.Helper()
+	path := filepath.Join(home, ".zcode", "v2", "credentials.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var store map[string]string
+	if err := json.Unmarshal(raw, &store); err != nil {
+		t.Fatal(err)
+	}
+	store["oauth:bigmodel:user_info"] = `{"id":"second-fixture","email":"second@example.test"}`
+	store["account-provider:coding-plan:account:bigmodel-individual-coding-plan:account:second-fixture:api-key"] = "second-synthetic-key"
+	raw, err = json.Marshal(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestZCodeExternalCaptureDoesNotMarkLaterDesktopAccountAsCaptured(t *testing.T) {
+	a, _ := setup(t)
+	writeZCodeSubscriptionFixture(t, a.UserHome)
+	if _, _, err := a.Capture(adapter.ZCode); err != nil {
+		t.Fatal(err)
+	}
+	base := a.Adapters[adapter.ZCode]
+	injected := &zcodeCaptureFailureAdapter{Adapter: base, captureErr: zcode.ErrOSCredentialPending}
+	a.Adapters[adapter.ZCode] = injected
+	if _, _, err := a.Capture(adapter.ZCode); !errors.Is(err, zcode.ErrOSCredentialPending) {
+		t.Fatal("daemon did not pause")
+	}
+	other := independentZCodeApp(t, a, base)
+	if _, _, err := other.Capture(adapter.ZCode); err != nil {
+		t.Fatal(err)
+	}
+	_, capturedFP, err := a.State.SelfWriteRevision("capture:zcode")
+	if err != nil {
+		t.Fatal(err)
+	}
+	replaceZCodeDesktopAccount(t, a.UserHome)
+	currentFP, err := base.Fingerprint(a.UserHome)
+	if err != nil || currentFP == capturedFP {
+		t.Fatal("fixture did not change the desktop fingerprint")
+	}
+	// Legacy self-write records outlive their TTL. ZCode never restores the
+	// desktop file, so an old B record must not suppress this newly observed B.
+	if err := a.State.RememberSelfWrite("fingerprint:zcode", currentFP, a.now().Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	injected.captureErr = nil
+	if err := a.Ingest(adapter.ZCode); err != nil || injected.calls != 2 {
+		t.Fatalf("later desktop account was skipped: calls=%d err=%v", injected.calls, err)
+	}
+	pointer, err := a.State.GetPointer("zcode")
+	if err != nil || pointer.StableID != "bigmodel:second-fixture" {
+		t.Fatal("ingest did not capture the later desktop account")
+	}
+}
+
+func TestZCodeIncompleteExternalCaptureDoesNotResumeDaemon(t *testing.T) {
+	for _, failure := range []string{"pointer write", "completion marker write", "desktop changed during capture"} {
+		t.Run(failure, func(t *testing.T) {
+			a, _ := setup(t)
+			writeZCodeSubscriptionFixture(t, a.UserHome)
+			if _, _, err := a.Capture(adapter.ZCode); err != nil {
+				t.Fatal(err)
+			}
+			base := a.Adapters[adapter.ZCode]
+			injected := &zcodeCaptureFailureAdapter{Adapter: base, captureErr: zcode.ErrOSCredentialPending}
+			a.Adapters[adapter.ZCode] = injected
+			if _, _, err := a.Capture(adapter.ZCode); !errors.Is(err, zcode.ErrOSCredentialPending) {
+				t.Fatal("daemon did not pause")
+			}
+			gen, fp, err := a.State.SelfWriteRevision("capture:zcode")
+			if err != nil {
+				t.Fatal(err)
+			}
+			otherAdapter := &zcodeCaptureFailureAdapter{Adapter: base}
+			other := independentZCodeApp(t, a, otherAdapter)
+			if failure == "desktop changed during capture" {
+				otherAdapter.afterCapture = func() { replaceZCodeDesktopAccount(t, a.UserHome) }
+			} else {
+				db, err := sql.Open("sqlite", filepath.Join(a.DataDir, "state.db"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer db.Close()
+				statement := `CREATE TRIGGER reject_capture BEFORE INSERT ON live_pointer WHEN NEW.tool='zcode' BEGIN SELECT RAISE(FAIL,'synthetic pointer failure'); END`
+				if failure == "completion marker write" {
+					statement = `CREATE TRIGGER reject_capture BEFORE INSERT ON self_writes WHEN NEW.path='capture:zcode' BEGIN SELECT RAISE(FAIL,'synthetic marker failure'); END`
+				}
+				if _, err := db.Exec(statement); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, _, err := other.Capture(adapter.ZCode); err == nil {
+				t.Fatal("incomplete capture was reported successful")
+			}
+			if gotGen, gotFP, err := a.State.SelfWriteRevision("capture:zcode"); err != nil || gotGen != gen || gotFP != fp {
+				t.Fatal("incomplete capture committed a recovery marker")
+			}
+			if err := a.Ingest(adapter.ZCode); err != nil || injected.calls != 1 || !a.backgroundCapturePaused(adapter.ZCode) {
+				t.Fatal("incomplete external capture resumed daemon keyring reads")
+			}
+		})
+	}
+}
+
+func TestZCodeKeyringCapturePauseAndManualRecovery(t *testing.T) {
 	for _, failure := range []struct {
 		name string
 		err  error
 	}{{"unavailable", zcode.ErrOSCredential}, {"authorization pending", zcode.ErrOSCredentialPending}} {
-		for _, recovery := range []string{"manual during backoff", "background after backoff"} {
-			t.Run(failure.name+"/"+recovery, func(t *testing.T) {
-				a, _ := setup(t)
-				now := time.Date(2035, 2, 3, 4, 5, 6, 0, time.UTC)
-				a.Clock = clock.Fixed{T: now}
-				files := writeZCodeSubscriptionFixture(t, a.UserHome)
-				defer assertZCodeFilesUnchanged(t, files)
-				if err := a.Ingest(adapter.ZCode); err != nil {
+		t.Run(failure.name, func(t *testing.T) {
+			a, _ := setup(t)
+			now := time.Date(2035, 2, 3, 4, 5, 6, 0, time.UTC)
+			a.Clock = clock.Fixed{T: now}
+			files := writeZCodeSubscriptionFixture(t, a.UserHome)
+			defer assertZCodeFilesUnchanged(t, files)
+			if err := a.Ingest(adapter.ZCode); err != nil {
+				t.Fatal(err)
+			}
+			pointer, err := a.State.GetPointer("zcode")
+			if err != nil || pointer.StableID != "bigmodel:zcode-fixture" {
+				t.Fatal("initial subscription missing")
+			}
+			before, err := a.State.GetAccount("zcode", pointer.StableID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			beforeRevision, _, err := a.State.SelfWriteRevision("capture:zcode")
+			if err != nil {
+				t.Fatal(err)
+			}
+			injected := &zcodeCaptureFailureAdapter{Adapter: a.Adapters[adapter.ZCode], captureErr: fmt.Errorf("synthetic read: %w", failure.err)}
+			a.Adapters[adapter.ZCode] = injected
+			if _, _, err := a.Capture(adapter.ZCode); !errors.Is(err, failure.err) || injected.calls != 1 {
+				t.Fatalf("manual failure=%v calls=%d", err, injected.calls)
+			}
+			captureError := a.captureStatus(adapter.ZCode)
+			if !strings.Contains(captureError, "后台收录已暂停") {
+				t.Fatal("pause was not explained to the user")
+			}
+			for _, elapsed := range []time.Duration{0, time.Minute, time.Hour, 48 * time.Hour} {
+				a.Clock = clock.Fixed{T: now.Add(elapsed)}
+				if err := a.Ingest(adapter.ZCode); err != nil || injected.calls != 1 || a.captureStatus(adapter.ZCode) != captureError {
+					t.Fatalf("background retried paused keyring after %v: calls=%d err=%v", elapsed, injected.calls, err)
+				}
+			}
+			if _, _, err := a.Capture(adapter.ZCode); !errors.Is(err, failure.err) || injected.calls != 2 {
+				t.Fatal("manual retry was blocked")
+			}
+			if err := a.Ingest(adapter.ZCode); err != nil || injected.calls != 2 || !a.backgroundCapturePaused(adapter.ZCode) {
+				t.Fatal("failed manual retry resumed background reads")
+			}
+			injected.captureErr = nil
+			a.Clock = clock.Fixed{T: now}
+			if blobs, _, err := a.Capture(adapter.ZCode); err != nil || len(blobs) != 1 || injected.calls != 3 {
+				t.Fatalf("manual recovery=%v calls=%d", err, injected.calls)
+			}
+			if a.captureStatus(adapter.ZCode) != "" || a.backgroundCapturePaused(adapter.ZCode) {
+				t.Fatal("successful capture retained pause")
+			}
+			after, err := a.State.GetAccount("zcode", pointer.StableID)
+			if err != nil || after.VaultGen != before.VaultGen || after.LastCapturedAt != before.LastCapturedAt {
+				t.Fatal("same-second capture changed unrelated account metadata")
+			}
+			if gen, _, err := a.State.SelfWriteRevision("capture:zcode"); err != nil || gen != beforeRevision+1 {
+				t.Fatal("manual capture did not commit its completion revision")
+			}
+			if current, err := a.State.GetPointer("zcode"); err != nil || current != pointer {
+				t.Fatal("recovery changed the account pointer")
+			}
+			if err := a.Ingest(adapter.ZCode); err != nil || injected.calls != 3 {
+				t.Fatal("successful manual recovery reread the keyring")
+			}
+		})
+	}
+}
+
+func TestZCodeIndependentCaptureResumesPausedDaemonWithoutReadingKeyring(t *testing.T) {
+	for _, recovery := range []string{"independent App capture", "committed marker update"} {
+		t.Run(recovery, func(t *testing.T) {
+			a, _ := setup(t)
+			now := time.Date(2035, 2, 3, 4, 5, 6, 0, time.UTC)
+			a.Clock = clock.Fixed{T: now}
+			files := writeZCodeSubscriptionFixture(t, a.UserHome)
+			defer assertZCodeFilesUnchanged(t, files)
+			if _, _, err := a.Capture(adapter.ZCode); err != nil {
+				t.Fatal(err)
+			}
+			before, err := a.State.GetAccount("zcode", "bigmodel:zcode-fixture")
+			if err != nil {
+				t.Fatal(err)
+			}
+			beforeRevision, _, err := a.State.SelfWriteRevision("capture:zcode")
+			if err != nil {
+				t.Fatal(err)
+			}
+			injected := &zcodeCaptureFailureAdapter{Adapter: a.Adapters[adapter.ZCode], captureErr: zcode.ErrOSCredentialPending}
+			a.Adapters[adapter.ZCode] = injected
+			if _, _, err := a.Capture(adapter.ZCode); !errors.Is(err, zcode.ErrOSCredentialPending) {
+				t.Fatal("daemon capture did not pause")
+			}
+			if recovery == "independent App capture" {
+				// A separate App has no shared pause state. Reuse only the fixture
+				// vault, matching two clients opening the same encrypted account DB.
+				db, err := state.Open(filepath.Join(a.DataDir, "state.db"))
+				if err != nil {
 					t.Fatal(err)
 				}
-				pointer, err := a.State.GetPointer("zcode")
-				if err != nil || pointer.StableID != "bigmodel:zcode-fixture" {
-					t.Fatal("initial ingest did not select the synthetic subscription")
+				defer db.Close()
+				other := &App{UserHome: a.UserHome, DataDir: a.DataDir, Cfg: a.cfgSnapshot(), State: db, Vault: a.Vault, Clock: clock.Fixed{T: now}, Adapters: map[adapter.Tool]adapter.Adapter{adapter.ZCode: injected.Adapter}}
+				if _, _, err := other.Capture(adapter.ZCode); err != nil {
+					t.Fatalf("independent capture failed: %v", err)
 				}
+			} else {
 				fp, err := a.Adapters[adapter.ZCode].Fingerprint(a.UserHome)
-				if err != nil || !a.sameLastFP(adapter.ZCode, fp) {
-					t.Fatal("initial ingest did not remember the desktop fingerprint")
+				if err != nil {
+					t.Fatal(err)
 				}
-				injected := &zcodeCaptureFailureAdapter{Adapter: a.Adapters[adapter.ZCode], captureErr: fmt.Errorf("synthetic read: %w", failure.err)}
-				a.Adapters[adapter.ZCode] = injected
-				if _, _, err := a.Capture(adapter.ZCode); !errors.Is(err, failure.err) || injected.calls != 1 {
-					t.Fatalf("explicit capture did not expose the simulated keyring failure: %v", err)
+				if err := a.State.RememberSelfWrite("capture:zcode", fp, now); err != nil {
+					t.Fatal(err)
 				}
-				if err := a.Ingest(adapter.ZCode); !errors.Is(err, failure.err) || injected.calls != 2 {
-					t.Fatalf("background capture did not retry the unchanged failed fingerprint: %v", err)
+			}
+			if err := a.Ingest(adapter.ZCode); err != nil || injected.calls != 1 || a.captureStatus(adapter.ZCode) != "" || a.backgroundCapturePaused(adapter.ZCode) {
+				t.Fatalf("external success failed to resume without another key read: calls=%d err=%v", injected.calls, err)
+			}
+			if err := a.Ingest(adapter.ZCode); err != nil || injected.calls != 1 {
+				t.Fatal("resumed daemon recaptured unchanged credentials")
+			}
+			after, err := a.State.GetAccount("zcode", before.StableID)
+			if err != nil || after.VaultGen != before.VaultGen || after.LastCapturedAt != before.LastCapturedAt {
+				t.Fatal("external capture changed unrelated account metadata")
+			}
+			if gen, _, err := a.State.SelfWriteRevision("capture:zcode"); err != nil || gen != beforeRevision+1 {
+				t.Fatal("external same-second capture lost its completion revision")
+			}
+		})
+	}
+}
+
+func TestZCodePauseIgnoresQuotaDeletionAndStateReadFailure(t *testing.T) {
+	for _, mutation := range []string{"quota update", "account deletion", "vault generation update", "state unavailable"} {
+		t.Run(mutation, func(t *testing.T) {
+			a, _ := setup(t)
+			writeZCodeSubscriptionFixture(t, a.UserHome)
+			if _, _, err := a.Capture(adapter.ZCode); err != nil {
+				t.Fatal(err)
+			}
+			injected := &zcodeCaptureFailureAdapter{Adapter: a.Adapters[adapter.ZCode], captureErr: zcode.ErrOSCredential}
+			a.Adapters[adapter.ZCode] = injected
+			if _, _, err := a.Capture(adapter.ZCode); !errors.Is(err, zcode.ErrOSCredential) {
+				t.Fatal("capture did not pause")
+			}
+			switch mutation {
+			case "quota update":
+				if err := a.State.UpdateQuotaSnapshot("zcode", "bigmodel:zcode-fixture", "ok", 18, a.now().Add(time.Hour).Unix(), a.now().Unix()); err != nil {
+					t.Fatal(err)
 				}
-				captureError := a.captureStatus(adapter.ZCode)
-				if captureError == "" {
-					t.Fatal("keyring failure was not retained for the dashboard")
+			case "account deletion":
+				if err := a.State.DeleteAccount("zcode", "bigmodel:zcode-fixture"); err != nil {
+					t.Fatal(err)
 				}
-				// The simulated keyring recovers immediately. Background ticks must
-				// still respect the one-minute delay and retain the last error.
-				injected.captureErr = nil
-				for _, elapsed := range []time.Duration{0, 59 * time.Second, time.Minute - time.Nanosecond} {
-					a.Clock = clock.Fixed{T: now.Add(elapsed)}
-					if err := a.Ingest(adapter.ZCode); err != nil || injected.calls != 2 || a.captureStatus(adapter.ZCode) != captureError {
-						t.Fatalf("background retry escaped backoff or cleared the error at %v: calls=%d err=%v", elapsed, injected.calls, err)
-					}
+			case "vault generation update":
+				account, err := a.State.GetAccount("zcode", "bigmodel:zcode-fixture")
+				if err != nil {
+					t.Fatal(err)
 				}
-				if recovery == "manual during backoff" {
-					if blobs, _, err := a.Capture(adapter.ZCode); err != nil || len(blobs) != 1 || injected.calls != 3 {
-						t.Fatalf("explicit capture was blocked by background backoff: calls=%d err=%v", injected.calls, err)
-					}
-				} else {
-					a.Clock = clock.Fixed{T: now.Add(time.Minute)}
-					if err := a.Ingest(adapter.ZCode); err != nil || injected.calls != 3 {
-						t.Fatalf("background did not retry at the one-minute boundary: calls=%d err=%v", injected.calls, err)
-					}
+				account.VaultGen++
+				if err := a.State.UpsertAccount(account); err != nil {
+					t.Fatal(err)
 				}
-				if a.captureStatus(adapter.ZCode) != "" {
-					t.Fatal("successful recovery left capture_error visible")
+			case "state unavailable":
+				if err := a.State.Close(); err != nil {
+					t.Fatal(err)
 				}
-				if accounts, err := a.State.ListAccounts("zcode"); err != nil || len(accounts) != 1 || accounts[0].StableID != pointer.StableID {
-					t.Fatalf("recovery duplicated or changed the saved subscription: count=%d err=%v", len(accounts), err)
-				}
-				if current, err := a.State.GetPointer("zcode"); err != nil || current != pointer {
-					t.Fatal("recovery changed the current subscription pointer")
-				}
-				if currentFP, err := injected.Fingerprint(a.UserHome); err != nil || currentFP != fp || !a.sameLastFP(adapter.ZCode, fp) {
-					t.Fatal("recovery did not preserve the exact same desktop fingerprint")
-				}
-				if err := a.Ingest(adapter.ZCode); err != nil || injected.calls != 3 {
-					t.Fatal("a recovered unchanged credential was captured repeatedly")
-				}
-			})
-		}
+			}
+			if err := a.Ingest(adapter.ZCode); err != nil || injected.calls != 1 || a.captureStatus(adapter.ZCode) == "" || !a.backgroundCapturePaused(adapter.ZCode) {
+				t.Fatalf("non-capture mutation resumed keyring access: calls=%d err=%v", injected.calls, err)
+			}
+		})
+	}
+}
+
+func TestZCodeManualSaveFailureRetainsPause(t *testing.T) {
+	a, _ := setup(t)
+	writeZCodeSubscriptionFixture(t, a.UserHome)
+	if _, _, err := a.Capture(adapter.ZCode); err != nil {
+		t.Fatal(err)
+	}
+	injected := &zcodeCaptureFailureAdapter{Adapter: a.Adapters[adapter.ZCode], captureErr: zcode.ErrOSCredential}
+	a.Adapters[adapter.ZCode] = injected
+	if _, _, err := a.Capture(adapter.ZCode); !errors.Is(err, zcode.ErrOSCredential) {
+		t.Fatal("capture did not pause")
+	}
+	injected.captureErr = nil
+	if err := a.State.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := a.Capture(adapter.ZCode); err == nil || injected.calls != 2 {
+		t.Fatal("manual persistence failure was ignored")
+	}
+	if err := a.Ingest(adapter.ZCode); err != nil || injected.calls != 2 || !a.backgroundCapturePaused(adapter.ZCode) {
+		t.Fatal("failed manual save resumed background keyring access")
 	}
 }
 

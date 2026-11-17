@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 
 	"qswitch/internal/adapter"
+	"qswitch/internal/adapter/zcode"
 	"qswitch/internal/config"
 	"qswitch/internal/livefile"
 )
@@ -98,11 +99,75 @@ func (a *App) setCaptureError(tool adapter.Tool, err error) {
 	if a.captureErrors == nil {
 		a.captureErrors = map[adapter.Tool]string{}
 	}
+	if tool == adapter.ZCode {
+		if err == nil && a.zcodeCapturePaused {
+			// A successful read is not yet a successfully saved manual capture.
+			// Keep the pause until Capture commits its blob and pointer.
+			return
+		}
+		if !a.zcodeCapturePaused && (errors.Is(err, zcode.ErrOSCredential) || errors.Is(err, zcode.ErrOSCredentialPending)) {
+			a.zcodeCapturePaused = true
+			gen, _, readErr := a.State.SelfWriteRevision("capture:zcode")
+			a.zcodePauseRevision, a.zcodePauseRevisionKnown = gen, readErr == nil
+		}
+	}
 	if err == nil || os.IsNotExist(err) {
 		delete(a.captureErrors, tool)
 	} else {
 		a.captureErrors[tool] = err.Error()
+		if tool == adapter.ZCode && a.zcodeCapturePaused {
+			a.captureErrors[tool] += "；后台收录已暂停，请处理后点击“收录当前账号”重试"
+		}
 	}
+}
+
+func (a *App) backgroundCapturePaused(tool adapter.Tool) bool {
+	if tool != adapter.ZCode {
+		return false
+	}
+	a.fpMu.Lock()
+	if !a.zcodeCapturePaused {
+		a.fpMu.Unlock()
+		return false
+	}
+	gen, fp, err := a.State.SelfWriteRevision("capture:zcode")
+	if err != nil {
+		a.fpMu.Unlock()
+		return true
+	}
+	if !a.zcodePauseRevisionKnown {
+		// A missing baseline cannot prove that another process captured a key.
+		a.zcodePauseRevision, a.zcodePauseRevisionKnown = gen, true
+		a.fpMu.Unlock()
+		return true
+	}
+	if gen <= a.zcodePauseRevision {
+		a.fpMu.Unlock()
+		return true
+	}
+	a.zcodeCapturePaused = false
+	a.zcodePauseRevisionKnown = false
+	delete(a.captureErrors, adapter.ZCode)
+	if a.lastFP == nil {
+		a.lastFP = make(map[adapter.Tool][32]byte)
+	}
+	a.lastFP[adapter.ZCode] = fp
+	a.fpMu.Unlock()
+	// Only the committed capture's fingerprint is known. Ingest must compare
+	// it with the live file, which may already contain a different account.
+	return false
+}
+
+func (a *App) completeZCodeCapture(fp [32]byte) {
+	a.fpMu.Lock()
+	a.zcodeCapturePaused = false
+	a.zcodePauseRevisionKnown = false
+	delete(a.captureErrors, adapter.ZCode)
+	if a.lastFP == nil {
+		a.lastFP = make(map[adapter.Tool][32]byte)
+	}
+	a.lastFP[adapter.ZCode] = fp
+	a.fpMu.Unlock()
 }
 
 func (a *App) captureStatus(tool adapter.Tool) string {
