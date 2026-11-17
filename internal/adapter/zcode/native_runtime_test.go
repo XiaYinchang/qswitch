@@ -35,6 +35,17 @@ func nativeRuntimeFixture(t *testing.T, prefix string) nativeRuntime {
 	module := filepath.Join(root, "node_modules", "@napi-rs", "keyring")
 	nativeFixtureFile(t, filepath.Join(module, "package.json"), `{"name":"@napi-rs/keyring","main":"index.js"}`, 0o600)
 	nativeFixtureFile(t, filepath.Join(module, "index.js"), "synthetic module; never run", 0o600)
+	// Discovery resolves installation paths; Windows also canonicalizes the
+	// casing and short names in the temporary directory while doing so.
+	var err error
+	node, err = filepath.EvalSymlinks(node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	module, err = filepath.EvalSymlinks(module)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return nativeRuntime{node: node, module: module}
 }
 

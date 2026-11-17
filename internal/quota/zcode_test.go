@@ -198,7 +198,7 @@ func TestZCodeOAuthRejectsFailedOrInvalidProjectAuthorization(t *testing.T) {
 		{"invalid token type", strings.Replace(valid, `"tokenType":"Bearer"`, `"tokenType":"Other"`, 1), 200, Unknown},
 		{"missing expiry", `{"code":200,"data":{"enabled":true,"accessToken":"response-secret-must-not-escape","tokenType":"Bearer"}}`, 200, Unknown},
 		{"expired absolute", `{"code":200,"data":{"enabled":true,"accessToken":"response-secret-must-not-escape","tokenType":"Bearer","expiresIn":120,"expiresAt":1}}`, 200, Unknown},
-		{"expired relative", strings.Replace(valid, `"expiresIn":120`, `"expiresIn":1e-12`, 1), 200, Unknown},
+		{"expired relative", strings.Replace(valid, `"expiresIn":120`, `"expiresIn":0.001`, 1), 200, Unknown},
 		{"negative relative", strings.Replace(valid, `"expiresIn":120`, `"expiresIn":-1`, 1), 200, Unknown},
 		{"invalid expiry type", strings.Replace(valid, `"expiresIn":120`, `"expiresIn":"120"`, 1), 200, Unknown},
 		{"malformed", `not-json response-secret-must-not-escape`, 200, Unknown},
@@ -210,6 +210,11 @@ func TestZCodeOAuthRejectsFailedOrInvalidProjectAuthorization(t *testing.T) {
 				calls++
 				if calls != 1 || req.Method != http.MethodPost {
 					t.Fatal("failed project exchange retried, redirected, or queried quota")
+				}
+				if tc.name == "expired relative" {
+					// Let the 1 ms TTL actually elapse, including on Windows clocks
+					// where an immediate synthetic response can measure zero time.
+					time.Sleep(30 * time.Millisecond)
 				}
 				return &http.Response{StatusCode: tc.status, Body: io.NopCloser(strings.NewReader(tc.body)), Header: http.Header{"Location": []string{"https://bigmodel.cn/other"}, "Retry-After": []string{"9"}}, Request: req}, nil
 			})}}
