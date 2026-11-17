@@ -39,8 +39,11 @@ type ToolView struct {
 	Managed      []ManagedView         `json:"managed,omitempty"`
 	// ManagedUnavailable means runner state could not be read this time;
 	// blocking PIDs may still be managed sessions.
-	ManagedUnavailable bool          `json:"managed_unavailable,omitempty"`
-	Accounts           []AccountView `json:"accounts"`
+	ManagedUnavailable bool `json:"managed_unavailable,omitempty"`
+	// BlockersUnavailable distinguishes an unknown session state from idle.
+	// Busy stays conservative when an observation fails.
+	BlockersUnavailable bool          `json:"blockers_unavailable,omitempty"`
+	Accounts            []AccountView `json:"accounts"`
 }
 
 // ManagedView reports the sessions that qswitch coordinates during rotation.
@@ -102,30 +105,42 @@ func (a *App) Overview() Overview {
 	now := a.now().Unix()
 	for _, t := range a.ManagedTools() {
 		p, _ := a.State.GetPointer(string(t))
-		ad := a.Adapters[t]
-		man, _ := ad.ManualBlockers(a.UserHome)
-		aut, _ := ad.AutoBlockers(a.UserHome)
+		var holders adapter.Holders
+		var sessions []managed.StatusInfo
+		var blockersErr error
 		if t == adapter.Claude {
-			man = aut
+			// The same runner observation supplies both blockers and details.
+			// Plain Claude processes are not part of managed account rotation.
+			sessions, blockersErr = managed.Status(a.DataDir)
+			for _, session := range sessions {
+				if !session.Exited && session.ChildPID > 0 {
+					holders.Manual = append(holders.Manual, adapter.Proc{PID: session.ChildPID})
+				}
+			}
+		} else {
+			// AutoBlockers includes manual blockers plus desktop indicators.
+			// Only this display request reuses it; mutation guards stay fresh.
+			holders, blockersErr = a.Adapters[t].AutoBlockers(a.UserHome)
 		}
 		pend, _ := a.State.GetPending(string(t))
 		caps := a.Capabilities(t)
 		tv := ToolView{
-			Capabilities: caps,
-			CaptureError: a.captureStatus(t),
-			Tool:         string(t),
-			LiveID:       p.StableID,
-			Enabled:      cfg.ToolEnabled(string(t)),
-			Auto:         cfg.General.AutoSwitch && cfg.ToolEnabled(string(t)) && caps["auto_switch"].Available,
-			Switchable:   caps["switch"].Available,
-			Desync:       p.Desync && (t != adapter.Cursor || a.cursorDesktopSync()),
-			Busy:         man.ManualBusy(),
-			ChatGPTApp:   aut.ChatGPTApp,
-			CursorApp:    aut.CursorApp || man.CursorApp,
-			GrokBotApp:   aut.GrokBotApp,
-			DevinApp:     aut.DevinApp,
-			BlockedPIDs:  man.ManualPIDs(),
-			PendingTo:    pend.ToID,
+			Capabilities:        caps,
+			CaptureError:        a.captureStatus(t),
+			Tool:                string(t),
+			LiveID:              p.StableID,
+			Enabled:             cfg.ToolEnabled(string(t)),
+			Auto:                cfg.General.AutoSwitch && cfg.ToolEnabled(string(t)) && caps["auto_switch"].Available,
+			Switchable:          caps["switch"].Available,
+			Desync:              p.Desync && (t != adapter.Cursor || a.cursorDesktopSync()),
+			Busy:                blockersErr != nil || holders.ManualBusy(),
+			ChatGPTApp:          holders.ChatGPTApp,
+			CursorApp:           holders.CursorApp,
+			GrokBotApp:          holders.GrokBotApp,
+			DevinApp:            holders.DevinApp,
+			BlockedPIDs:         holders.ManualPIDs(),
+			PendingTo:           pend.ToID,
+			BlockersUnavailable: blockersErr != nil,
 		}
 		if !tv.Auto {
 			switch {
@@ -141,8 +156,7 @@ func (a *App) Overview() Overview {
 			tv.CaptureError = a.antigravityCaptureStatus()
 		}
 		if t == adapter.Claude {
-			sessions, err := managed.Status(a.DataDir)
-			tv.ManagedUnavailable = err != nil
+			tv.ManagedUnavailable = blockersErr != nil
 			for _, s := range sessions {
 				if s.Exited && s.Recovery == "" {
 					continue
@@ -205,12 +219,13 @@ func splitCursorBot(tv ToolView) (ToolView, ToolView) {
 
 func splitCursorBotAt(tv ToolView, now, maxAge int64) (ToolView, ToolView) {
 	bot := ToolView{
-		DerivedFrom:  "cursor",
-		Capabilities: map[string]Capability{},
-		Tool:         "grokbot",
-		LiveID:       tv.LiveID,
-		Busy:         tv.Busy,
-		CursorApp:    tv.CursorApp,
+		DerivedFrom:         "cursor",
+		Capabilities:        map[string]Capability{},
+		Tool:                "grokbot",
+		LiveID:              tv.LiveID,
+		Busy:                tv.Busy,
+		CursorApp:           tv.CursorApp,
+		BlockersUnavailable: tv.BlockersUnavailable,
 	}
 	for _, action := range []string{"capture", "probe", "switch", "auto_switch", "login", "run", "desktop_sync", "live_refresh", "parked_refresh", "continuation"} {
 		bot.Capabilities[action] = Capability{Reason: "只支持查询用量，账号在 Cursor 中管理"}

@@ -147,7 +147,8 @@ func (s *Server) getEnvironments(w http.ResponseWriter, r *http.Request) {
 		}
 		routes = append(routes, environmentRoute{Environment: item, APIBase: base})
 	}
-	writeJSON(w, 200, map[string]any{"instance": instance, "environments": routes})
+	_, loginRequired := s.loginRequired(r)
+	writeJSON(w, 200, map[string]any{"instance": instance, "environments": routes, "login_required": loginRequired})
 }
 
 func loginTool(r *http.Request) adapter.Tool {

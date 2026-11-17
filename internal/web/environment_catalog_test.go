@@ -50,8 +50,9 @@ func TestEnvironmentCatalogTransportBoundaries(t *testing.T) {
 				t.Fatalf("catalog status %d: %s", w.Code, w.Body.String())
 			}
 			var got struct {
-				Instance     app.InstanceInfo    `json:"instance"`
-				Environments []map[string]string `json:"environments"`
+				Instance      app.InstanceInfo    `json:"instance"`
+				LoginRequired *bool               `json:"login_required"`
+				Environments  []map[string]string `json:"environments"`
 			}
 			if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 				t.Fatal(err)
@@ -61,7 +62,7 @@ func TestEnvironmentCatalogTransportBoundaries(t *testing.T) {
 			if portal {
 				count = 2
 			}
-			if got.Instance.ID != a.Instance().ID || len(got.Environments) != count {
+			if got.Instance.ID != a.Instance().ID || len(got.Environments) != count || got.LoginRequired == nil || *got.LoginRequired {
 				t.Fatalf("wrong catalog scope: %+v", got)
 			}
 			for _, item := range got.Environments {
@@ -234,5 +235,36 @@ func TestNavigationDistinguishesAbsentAndEmptyEnvironment(t *testing.T) {
 		if got := preserveNavigation("/qswitch/login", query); got != want {
 			t.Errorf("env present=%v: got %s, want %s", present, got, want)
 		}
+	}
+}
+
+func TestEnvironmentCatalogCarriesLoginRequirement(t *testing.T) {
+	a := setupApp(t)
+	if err := SetPassword(a.DataDir, testUser, testPass); err != nil {
+		t.Fatal(err)
+	}
+	a.Cfg.Web.Token = "synthetic-catalog-token"
+	for _, mode := range []string{"local", "proxy", "public"} {
+		t.Run(mode, func(t *testing.T) {
+			addr := "127.0.0.1:7432"
+			r := local("GET", "/api/environments")
+			if mode == "proxy" {
+				r = proxied("GET", "/api/environments")
+			}
+			if mode == "public" {
+				addr = "0.0.0.0:7432"
+			}
+			r.Header.Set("Authorization", "Bearer synthetic-catalog-token")
+			w := do(New(a, addr).Handler(), r)
+			var got struct {
+				LoginRequired *bool `json:"login_required"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+				t.Fatal(err)
+			}
+			if w.Code != http.StatusOK || got.LoginRequired == nil || *got.LoginRequired != (mode != "local") {
+				t.Fatalf("catalog login state does not match transport: status=%d body=%s", w.Code, w.Body.String())
+			}
+		})
 	}
 }

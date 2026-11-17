@@ -67,7 +67,7 @@ render=()=>{};renderMessage=()=>{};
  await assert.rejects(api('api/auto',{method:'POST',body:{tool:'codex',enabled:true}}));assert.equal(wrote,false);
  state.fatal='';state.envID='fixture-a';state.trustedID='fixture-a';state.online=true;state.messages.set('codex',{text:'操作失败，须处理',error:true});
  let first,second,count=0;setFetch(()=>new Promise(resolve=>{if(++count===1)first=resolve;else second=resolve}));
- const a=loadSnapshot(),b=loadSnapshot();
+ const a=loadSnapshot();state.revision++;const b=loadSnapshot();
  second({ok:true,status:200,json:async()=>({instance:{id:'fixture-a',name:'newer'},tools:[]})});await b;
  first({ok:true,status:200,json:async()=>({instance:{id:'fixture-a',name:'older'},tools:[]})});await a;
  assert.equal(state.instance.name,'newer');assert.equal(state.messages.get('codex').text,'操作失败，须处理');

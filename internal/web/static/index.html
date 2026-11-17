@@ -1149,7 +1149,7 @@
         messages: new Map(),
         revision: 0,
         readSequence: 0,
-        readController: null,
+        readRequest: null,
         environments: [],
         lastRead: 0,
         connectionError: "",
@@ -1177,7 +1177,7 @@
         cursor: "Cursor",
         grokbot: "Grok Bot",
         devin: "Devin CLI",
-        zcode: "ZCode 订阅",
+        zcode: "ZCode",
         kimi: "Kimi Code",
         claude: "Claude Code",
         antigravity: "Antigravity",
@@ -1676,7 +1676,7 @@
         );
         patchHTML(
           $("toolStatus"),
-          `<div class="tool-status">${tool.derived_from ? pill("只读用量") : pill("自动切换 " + (tool.auto ? "开启" : "关闭"), tool.auto ? "current" : "") + pill(tool.managed_unavailable || tool.session_error ? "会话状态未知" : tool.busy ? "会话使用中" : "会话空闲", tool.managed_unavailable || tool.session_error || tool.busy ? "warn" : "")}${tool.pending_to ? pill("切换排队中", "warn") : ""}${tool.desync ? pill("客户端账号不一致", "error") : ""}</div>`,
+          `<div class="tool-status">${tool.derived_from ? pill("只读用量") : pill("自动切换 " + (tool.auto ? "开启" : "关闭"), tool.auto ? "current" : "") + pill(tool.blockers_unavailable || tool.managed_unavailable || tool.session_error ? "会话状态未知" : tool.busy ? "会话使用中" : "会话空闲", tool.blockers_unavailable || tool.managed_unavailable || tool.session_error || tool.busy ? "warn" : "")}${tool.pending_to ? pill("切换排队中", "warn") : ""}${tool.desync ? pill("客户端账号不一致", "error") : ""}</div>`,
         );
         renderMessage();
         const problem = [
@@ -1806,9 +1806,14 @@
           (updated.auto_reason || "请查看工具设置中的生效条件。")
         );
       }
-      function acceptOverview(ov) {
-        if (!ov?.instance || ov.instance.id !== state.trustedID)
-          throw new Error("返回数据来自其他实例，已停止操作。");
+      function acceptOverview(ov, context = requestContext()) {
+        if (!isCurrent(context)) return;
+        if (!context.envID || !ov?.instance || ov.instance.id !== context.envID)
+          throw new Error("目标实例不匹配，返回数据来自其他实例，已停止操作。");
+        if (ov.tools !== null && !Array.isArray(ov.tools))
+          throw new Error("状态数据不完整，已停止操作。请刷新状态重试。");
+        state.trustedID = context.envID;
+        state.fatal = "";
         state.instance = ov.instance;
         state.overview = ov;
         state.view = normalizedView(state.view || hashView());
@@ -1914,6 +1919,9 @@
         }
       }
       function disconnect(reason) {
+        state.readRequest?.controller.abort();
+        state.readRequest = null;
+        state.readSequence++;
         clearEnvironmentUI(false);
         state.online = false;
         state.connecting = false;
@@ -1930,46 +1938,39 @@
         if (!isCurrent(context) || !context.apiBase) return false;
         state.connecting = true;
         renderConnection();
-        try {
-          const health = await api("api/health", { timeout: 10000, context });
-          if (!isCurrent(context)) return false;
-          const id = health.instance?.id;
-          if (!id || id !== context.envID) {
-            state.fatal = "目标实例不匹配，已停止操作。请检查环境配置。";
-            disconnect(state.fatal);
-            return false;
-          }
-          state.instance = health.instance;
-          state.trustedID = id;
-          state.fatal = "";
-          // Writes stay disabled until a complete overview is accepted.
-          return await loadSnapshot(context);
-        } catch (e) {
-          if (isCurrent(context)) disconnect(e.message);
-          return false;
-        }
+        // The authenticated overview identifies the target itself; a separate
+        // health round trip does not establish any additional trust.
+        return await loadSnapshot(context);
       }
-      async function loadSnapshot(context = requestContext()) {
-        if (!isCurrent(context)) return false;
+      function loadSnapshot(context = requestContext()) {
+        if (!isCurrent(context)) return Promise.resolve(false);
+        const pending = state.readRequest;
+        if (pending && isCurrent(pending.context) && pending.context.apiBase === context.apiBase &&
+            pending.revision === state.revision && !pending.controller.signal.aborted)
+          return pending.promise;
         const sequence = ++state.readSequence, revision = state.revision;
-        state.readController?.abort();
+        pending?.controller.abort();
         const controller = new AbortController();
-        state.readController = controller;
-        try {
-          const ov = await api("api/overview", { signal: controller.signal, context });
-          if (!isCurrent(context) || sequence !== state.readSequence || revision !== state.revision)
+        const request = { context, revision, controller, promise: null };
+        state.readRequest = request;
+        request.promise = (async () => {
+          try {
+            const ov = await api("api/overview", { signal: controller.signal, context });
+            if (!isCurrent(context) || sequence !== state.readSequence || revision !== state.revision)
+              return false;
+            acceptOverview(ov, context);
+            return true;
+          } catch (e) {
+            if (!isCurrent(context) || sequence !== state.readSequence || controller.signal.aborted)
+              return false;
+            if (/其他实例/.test(e.message)) state.fatal = e.message;
+            disconnect(e.message);
             return false;
-          acceptOverview(ov);
-          return true;
-        } catch (e) {
-          if (!isCurrent(context) || sequence !== state.readSequence || controller.signal.aborted)
-            return false;
-          if (/其他实例/.test(e.message)) state.fatal = e.message;
-          disconnect(e.message);
-          return false;
-        } finally {
-          if (state.readController === controller) state.readController = null;
-        }
+          } finally {
+            if (state.readRequest === request) state.readRequest = null;
+          }
+        })();
+        return request.promise;
       }
       async function mutate(tool, label, path, body, onSuccess) {
         const context = requestContext(), key = operationKey(tool, context);
@@ -1996,6 +1997,7 @@
           if (!isCurrent(context)) return false;
           message(tool, e.message, true);
           if (e.unknown) {
+            state.revision++;
             if (state.online) await loadSnapshot(context);
             else await connect(context);
           }
@@ -2495,9 +2497,16 @@
         ui.tool = "";
       }
       async function switchEnvironment(id, push = true, view = hashView()) {
+        const env = state.environments.find((entry) => entry.id === id);
+        if (id === state.envID && canWrite() && state.overview && env?.api_base === state.apiBase) {
+          state.view = normalizedView(view);
+          replaceViewHash();
+          render();
+          return;
+        }
         clearTimeout(ui.overviewTimer);
-        state.readController?.abort();
-        state.readController = null;
+        state.readRequest?.controller.abort();
+        state.readRequest = null;
         clearEnvironmentUI();
         state.epoch++;
         state.readSequence++;
@@ -2510,7 +2519,6 @@
         state.online = false;
         state.lastRead = 0;
         state.connectionError = "";
-        const env = state.environments.find((entry) => entry.id === id);
         state.apiBase = env?.api_base || "";
         state.fatal = env ? "" : "环境不存在或未配置，未连接任何实例。";
         state.connecting = Boolean(env);
@@ -2558,10 +2566,9 @@
           }
           state.gateway = gateway;
           state.environments = catalog.environments;
-          const session = await api("api/session", { global: true });
-          if (session.instance && session.instance.id !== gateway.id)
-            throw new Error("入口会话实例不匹配，已停止连接。");
-          $("logoutForm").hidden = !session.login_required;
+          if (typeof catalog.login_required !== "boolean")
+            throw new Error("入口登录状态缺失，已停止连接。");
+          $("logoutForm").hidden = !catalog.login_required;
           const url = new URL(location.href);
           await switchEnvironment(url.searchParams.has("env") ? url.searchParams.get("env") : gateway.id, false, hashView());
         } catch (e) {
