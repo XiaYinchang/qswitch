@@ -31,6 +31,8 @@ type fakeRunner struct {
 	// got busy right after a status check.
 	busyOnPrepare               bool
 	prepares, releases, resumes int
+	statuses                    int
+	statusError                 bool
 	committed                   bool
 }
 
@@ -70,6 +72,12 @@ func startFakeRunner(t *testing.T, a *App, n int, s *fakeRunner) {
 		}
 		ready := s.ready
 		switch r.URL.Path {
+		case "/status":
+			s.statuses++
+			if s.statusError {
+				http.Error(w, "synthetic status unavailable", http.StatusServiceUnavailable)
+				return
+			}
 		case "/prepare":
 			s.prepares++
 			s.generation = c.Generation

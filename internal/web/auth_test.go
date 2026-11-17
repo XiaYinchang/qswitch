@@ -315,8 +315,8 @@ func TestProxiedThroughDeck(t *testing.T) {
 	r := proxied(http.MethodGet, "/")
 	r.AddCookie(ck)
 	w := do(h, r)
-	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `api/overview`) || !strings.Contains(w.Body.String(), `api/environments`) || !strings.Contains(w.Body.String(), `api/session`) {
-		t.Fatalf("page must retain global catalog/session and target API entry points: %d", w.Code)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `api/overview`) || !strings.Contains(w.Body.String(), `api/environments`) || !strings.Contains(w.Body.String(), `catalog.login_required`) {
+		t.Fatalf("page must retain the authenticated catalog and target API entry points: %d", w.Code)
 	}
 	csp := w.Header().Get("Content-Security-Policy")
 	nonce := strings.SplitN(csp, "'nonce-", 2)[1]

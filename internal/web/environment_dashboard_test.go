@@ -10,7 +10,7 @@ const overview=(id,name)=>({instance:info(id,name),tools:[{tool:id===A?'codex':'
 const response=(data,status=200,headers={})=>({ok:status>=200&&status<300,status,headers:{get:key=>headers[key]||null},json:async()=>data});
 const deferred=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b});return {promise,resolve,reject}};
 const settle=async()=>{for(let i=0;i<12;i++)await Promise.resolve()};
-const normalFetch=async(path,opts)=>{const id=path.includes(B)?B:A;assert.equal(opts.headers['X-Qswitch-Instance'],id);return response(path.endsWith('/health')?{instance:info(id)}:overview(id))};
+const normalFetch=async(path,opts)=>{const id=path.includes(B)?B:A;assert.equal(opts.headers['X-Qswitch-Instance'],id);return response(overview(id))};
 state.gateway=info(A);state.environments=entries;state.envID=A;state.apiBase=entries[0].api_base;state.trustedID=A;state.instance=info(A);state.online=true;state.overview=overview(A);
 location.href='https://manage.example.test/qswitch/?env='+A+'#codex';
 `
@@ -97,9 +97,9 @@ func TestDashboardEnvironmentBootstrapURLsAndAuthentication(t *testing.T) {
 (async()=>{
  state.gateway=null;state.envID='';state.apiBase='';state.expected=A;
  location.href='https://manage.example.test/qswitch/?expected_instance='+A+'&env='+B+'#antigravity';
- const calls=[];setFetch(async(path,opts)=>{calls.push({path,opts});if(path==='api/environments')return response({instance:info(A),environments:entries});if(path==='api/session')return response({login_required:true});return normalFetch(path,opts)});
+ const calls=[];setFetch(async(path,opts)=>{calls.push({path,opts});if(path==='api/environments')return response({instance:info(A),login_required:true,environments:entries});return normalFetch(path,opts)});
  await bootstrap();assert.equal(state.envID,B);assert.equal(state.gateway.id,A);assert.equal(state.instance.id,B);assert.equal(location.pathname,'/qswitch/');assert.equal(new URL(location.href).searchParams.get('expected_instance'),A);
- assert.equal(calls[0].opts.headers['X-Qswitch-Instance'],undefined);assert.equal(calls[1].opts.headers['X-Qswitch-Instance'],A);assert.equal(calls[2].opts.headers['X-Qswitch-Instance'],B,'health requires the target header before verification');
+ assert.equal(calls.length,2,'bootstrap only needs the catalog and target overview');assert.equal(calls[0].opts.headers['X-Qswitch-Instance'],undefined);assert.equal(calls[1].opts.headers['X-Qswitch-Instance'],B,'overview requires the target header before verification');assert(calls[1].path.endsWith('/overview'));assert.equal($('logoutForm').hidden,false);
  assert.equal(calls.filter(c=>c.path==='api/environments').length,1);
  const logout=new URL($('logoutForm').action,location.href);assert.equal(logout.pathname,'/qswitch/logout');assert.equal(logout.searchParams.get('env'),B);assert.equal(logout.searchParams.get('expected_instance'),A);
  acceptOverview({...overview(B),environments:[{id:'malicious',url:'https://other.test'}]});assert.equal(state.environments[0].id,A);
@@ -122,8 +122,8 @@ func TestDashboardDirectEnvironmentAndInvalidCatalog(t *testing.T) {
 (async()=>{
  const cases=[{environments:[{id:A,name:'Local',api_base:'/api/'}],ok:true},{environments:[{id:B,name:'Wrong local',api_base:'/api/'}],ok:false},{environments:[{id:A,name:'External',api_base:'https://external.example.test/api/'}],ok:false},{environments:[entries[0],entries[0]],ok:false}];
  for(const fixture of cases){state.gateway=null;state.envID='';state.apiBase='';state.expected='';location.href='http://localhost:7432/';let targetCalls=0;
- setFetch(async(path,opts)=>{if(path==='api/environments')return response({instance:info(A),environments:fixture.environments});if(path==='api/session')return response({login_required:false});targetCalls++;assert(path.startsWith('/api/'));assert.equal(opts.headers['X-Qswitch-Instance'],A);return response(path.endsWith('/health')?{instance:info(A)}:overview(A))});
- await bootstrap();assert.equal(canWrite(),fixture.ok);assert.equal(targetCalls,fixture.ok?2:0);clearTimeout(ui.overviewTimer);
+ setFetch(async(path,opts)=>{if(path==='api/environments')return response({instance:info(A),login_required:true,environments:fixture.environments});targetCalls++;assert(path.startsWith('/api/'));assert.equal(opts.headers['X-Qswitch-Instance'],A);return response(overview(A))});
+ await bootstrap();assert.equal(canWrite(),fixture.ok);assert.equal(targetCalls,fixture.ok?1:0);clearTimeout(ui.overviewTimer);
  }
 })().catch(e=>{console.error(e);process.exitCode=1});
 `)
@@ -140,7 +140,7 @@ func TestDashboardEnvironmentLateFailuresDoNotPoisonCurrentTab(t *testing.T) {
   assert.equal(state.instance.id,B);assert.equal(canWrite(),true);assert.equal(state.fatal,'');assert.equal(location.redirect,undefined);
  }
  const superseded=deferred();setFetch(()=>superseded.promise);const sameEnvironment=loadSnapshot();
- setFetch(normalFetch);await loadSnapshot();superseded.resolve(response({error:'instance mismatch'},409));await sameEnvironment;assert.equal(canWrite(),true);assert.equal(state.fatal,'');
+ setFetch(normalFetch);state.revision++;await loadSnapshot();superseded.resolve(response({error:'instance mismatch'},409));await sameEnvironment;assert.equal(canWrite(),true);assert.equal(state.fatal,'');
  const lateNetwork=deferred();setFetch(()=>lateNetwork.promise);const old=loadSnapshot();
  setFetch(normalFetch);await switchEnvironment(A);lateNetwork.reject(new TypeError('old connection lost'));await old;
  assert.equal(state.instance.id,A);assert.equal(canWrite(),true);assert.equal(state.connectionError,'');
@@ -154,14 +154,14 @@ func TestDashboardCurrentShellPrefixAndBootstrapRetry(t *testing.T) {
 (async()=>{
  for(const prefix of ['/','/qswitch/','/qswitch-mini/','/custom/tools/']){
   state.gateway=null;state.envID='';state.apiBase='';state.expected='';location.href='https://manage.example.test'+prefix;
-  const calls=[];setFetch(async(path,opts)=>{calls.push(path);if(path==='api/environments')return response({instance:info(A),environments:[{id:A,name:'Local',api_base:prefix+'api/'}]});if(path==='api/session')return response({login_required:true});assert.equal(opts.headers['X-Qswitch-Instance'],A);return response(path.endsWith('/health')?{instance:info(A)}:overview(A))});
-  await bootstrap();assert.equal(canWrite(),true);const logout=new URL($('logoutForm').action,location.href);assert.equal(logout.pathname,prefix+'logout');assert.equal(logout.searchParams.get('env'),A);assert.equal(logout.searchParams.get('expected_instance'),A);assert(calls.includes(prefix+'api/health'));assert(calls.includes(prefix+'api/overview'));clearTimeout(ui.overviewTimer);
+  const calls=[];setFetch(async(path,opts)=>{calls.push(path);if(path==='api/environments')return response({instance:info(A),login_required:true,environments:[{id:A,name:'Local',api_base:prefix+'api/'}]});assert.equal(opts.headers['X-Qswitch-Instance'],A);return response(overview(A))});
+  await bootstrap();assert.equal(canWrite(),true);const logout=new URL($('logoutForm').action,location.href);assert.equal(logout.pathname,prefix+'logout');assert.equal(logout.searchParams.get('env'),A);assert.equal(logout.searchParams.get('expected_instance'),A);assert.deepEqual(calls,['api/environments',prefix+'api/overview']);clearTimeout(ui.overviewTimer);
  }
- location.href='https://manage.example.test/custom/tools/';state.gateway=null;let failSession=true;
- setFetch(async(path,opts)=>{if(path==='api/environments')return response({instance:info(A),environments:[{id:A,name:'Local',api_base:'/custom/tools/api/'}]});if(path==='api/session'&&failSession)throw new TypeError('session temporarily unavailable');if(path==='api/session')return response({login_required:true});return response(path.endsWith('/health')?{instance:info(A)}:overview(A))});
- await bootstrap();assert.equal(state.gateway,null);assert.equal(canWrite(),false);failSession=false;
+ location.href='https://manage.example.test/custom/tools/';state.gateway=null;let failCatalog=true;
+ setFetch(async(path,opts)=>{if(path==='api/environments'){if(failCatalog)throw new TypeError('catalog temporarily unavailable');return response({instance:info(A),login_required:true,environments:[{id:A,name:'Local',api_base:'/custom/tools/api/'}]})}return response(overview(A))});
+ await bootstrap();assert.equal(state.gateway,null);assert.equal(canWrite(),false);failCatalog=false;
  await onClick({target:{closest:s=>s==='[data-act]'?{dataset:{act:'refresh-state'}}:null}});assert.equal(canWrite(),true);clearTimeout(ui.overviewTimer);
- state.gateway=null;setFetch(async()=>response({instance:info(A),environments:entries}));await bootstrap();assert.equal(canWrite(),false,'a different shell prefix must be rejected');
+ state.gateway=null;setFetch(async()=>response({instance:info(A),login_required:true,environments:entries}));await bootstrap();assert.equal(canWrite(),false,'a different shell prefix must be rejected');
 })().catch(e=>{console.error(e);process.exitCode=1});
 `)
 }
@@ -171,12 +171,12 @@ func TestDashboardLateRefreshDoesNotDisableNewEnvironment(t *testing.T) {
 (async()=>{
  setFetch(normalFetch);await switchEnvironment(A);
  const delayedTab=deferred();setFetch(()=>delayedTab.promise);const changing=switchEnvironment(B);assert($('root').innerHTML.includes('正在连接环境'));assert(!$('root').innerHTML.includes('id="workspace"'));
- setFetch(normalFetch);delayedTab.resolve(response({instance:info(B)}));await changing;await switchEnvironment(A);
- const health=deferred();setFetch(()=>health.promise);
+ setFetch(normalFetch);delayedTab.resolve(response(overview(B)));await changing;await switchEnvironment(A);
+ const snapshot=deferred();setFetch(()=>snapshot.promise);
  const button=$('refreshState');button.dataset={act:'refresh-state'};
  const refresh=onClick({target:{closest:s=>s==='[data-act]'?button:null}});assert.equal(button.disabled,true);
  setFetch(normalFetch);await switchEnvironment(B);assert.equal(button.disabled,false);
- health.resolve(response({instance:info(A)}));await refresh;assert.equal(button.disabled,false);assert.equal(state.instance.id,B);
+ snapshot.resolve(response(overview(A)));await refresh;assert.equal(button.disabled,false);assert.equal(state.instance.id,B);
  clearTimeout(ui.overviewTimer);
 })().catch(e=>{console.error(e);process.exitCode=1});
 `)
@@ -189,7 +189,7 @@ func TestDashboardGatewayUnknownWriteOnlyRechecksState(t *testing.T) {
  const failed=deferred();setFetch((path,opts)=>{if(opts.method==='POST'){posts++;return failed.promise}reads++;return normalFetch(path,opts)});
  const pending=mutate('codex','切换账号','api/switch',{tool:'codex',id:'synthetic-target'});
  failed.resolve(response({error:'目标连接中断；已提交的操作结果尚未确认，请刷新状态核对，不要重复提交',result_unknown:true},503));
- assert.equal(await pending,false);assert.equal(posts,1);assert.equal(reads,2);assert.equal(state.online,true);
+ assert.equal(await pending,false);assert.equal(posts,1);assert.equal(reads,1);assert.equal(state.online,true);
  assert(state.messages.get('codex').text.includes('不要重复提交'));assert(state.messages.get('codex').error);
  setFetch(async()=>response({error:'读取失败',result_unknown:true},503));
  try{await api('api/overview');throw Error('expected failure')}catch(e){assert.equal(e.unknown,false)}
@@ -200,10 +200,7 @@ func TestDashboardGatewayUnknownWriteOnlyRechecksState(t *testing.T) {
 }
 
 func TestDashboardBootstrap401PreservesRequestedEnvironment(t *testing.T) {
-	for _, stage := range []string{"catalog", "session"} {
-		t.Run(stage, func(t *testing.T) {
-			dashboardScript(t, environmentFixtures+`
-const expiredStage='`+stage+`';
+	dashboardScript(t, environmentFixtures+`
 (async()=>{
  for(const requested of [B,'','not-configured',null]){
   state.gateway=null;state.envID='';state.apiBase='';state.trustedID='';state.instance=null;state.online=false;state.overview=null;state.expected=A;
@@ -211,9 +208,7 @@ const expiredStage='`+stage+`';
   if(requested!==null)page.searchParams.set('env',requested);
   location.href=page.href;location.redirect=undefined;
   const calls=[];setFetch(async(path,opts)=>{
-   calls.push(path);
-   if(path==='api/environments')return expiredStage==='catalog'?response({},401):response({instance:info(A),environments:entries});
-   assert.equal(path,'api/session');assert.equal(opts.headers['X-Qswitch-Instance'],A);return response({},401);
+   calls.push(path);assert.equal(path,'api/environments');return response({},401);
   });
   await bootstrap();
   assert(location.redirect,'authentication failure must redirect to login');
@@ -222,12 +217,10 @@ const expiredStage='`+stage+`';
   assert.equal(login.searchParams.has('env'),requested!==null,'preserve absent versus empty env');
   assert.equal(login.searchParams.get('env'),requested,'bootstrap must not replace the requested environment with the gateway');
   assert.equal(login.searchParams.get('expected_instance'),A,'login identity must remain the gateway');
-  assert.equal(state.envID,'');assert.equal(calls.length,expiredStage==='catalog'?1:2);
+  assert.equal(state.envID,'');assert.equal(calls.length,1);
  }
 })().catch(e=>{console.error(e);process.exitCode=1});
 `)
-		})
-	}
 }
 
 func TestDashboardSelectedEnvironmentTakesPriorityOn401(t *testing.T) {
