@@ -364,6 +364,26 @@ ON CONFLICT(path) DO UPDATE SET gen=gen+1, sha256=excluded.sha256, ignore_until_
 	return err
 }
 
+// SelfWriteRevision returns the committed revision and exact fingerprint. A
+// missing record is revision zero; malformed or unreadable records are errors.
+func (d *DB) SelfWriteRevision(path string) (int64, [32]byte, error) {
+	var gen int64
+	var raw []byte
+	var sum [32]byte
+	err := d.sql.QueryRow(`SELECT gen, sha256 FROM self_writes WHERE path=?`, path).Scan(&gen, &raw)
+	if err == sql.ErrNoRows {
+		return 0, sum, nil
+	}
+	if err != nil {
+		return 0, sum, err
+	}
+	if gen <= 0 || len(raw) != len(sum) {
+		return 0, sum, fmt.Errorf("invalid self-write revision")
+	}
+	copy(sum[:], raw)
+	return gen, sum, nil
+}
+
 func (d *DB) IsSelfWrite(path string, sum [32]byte, now time.Time) (bool, error) {
 	var stored []byte
 	var until int64
