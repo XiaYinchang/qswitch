@@ -949,7 +949,7 @@ func (a *App) rememberFP(tool adapter.Tool) {
 }
 
 func (a *App) Ingest(tool adapter.Tool) error {
-	if tool == adapter.Kimi || tool == adapter.Devin || tool == adapter.Claude || tool == adapter.Antigravity {
+	if tool == adapter.Kimi || tool == adapter.Devin || tool == adapter.Claude || tool == adapter.Antigravity || tool == adapter.ZCode {
 		a.fpMu.Lock()
 		deferAt := a.captureRetryAt[tool]
 		a.fpMu.Unlock()
@@ -988,13 +988,15 @@ func (a *App) Ingest(tool adapter.Tool) error {
 	}
 	defer lock.Close()
 	blobs, _, err := a.captureBlobs(tool)
-	if tool == adapter.Kimi || tool == adapter.Devin || tool == adapter.Claude || tool == adapter.Antigravity {
+	if tool == adapter.Kimi || tool == adapter.Devin || tool == adapter.Claude || tool == adapter.Antigravity || tool == adapter.ZCode {
 		a.fpMu.Lock()
 		if a.captureRetryAt == nil {
 			a.captureRetryAt = make(map[adapter.Tool]time.Time)
 		}
 		a.captureRetryAt[tool] = time.Time{}
-		if err != nil {
+		// ZCode's native credential store can show a system permission prompt.
+		// Do not repeat that read every worker tick while access is unavailable.
+		if err != nil && (tool != adapter.ZCode || errors.Is(err, zcode.ErrOSCredential) || errors.Is(err, zcode.ErrOSCredentialPending)) {
 			a.captureRetryAt[tool] = a.now().Add(time.Minute)
 		}
 		a.fpMu.Unlock()

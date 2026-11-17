@@ -54,6 +54,7 @@ func writeFixture(t *testing.T, home string, values map[string]string) []byte {
 func TestCaptureCurrentDesktopSubscriptionOnly(t *testing.T) {
 	for _, provider := range []string{"bigmodel", "zai"} {
 		t.Run(provider, func(t *testing.T) {
+			t.Setenv("ZCODE_CREDENTIAL_SECRET_FILE", "")
 			t.Setenv("ZCODE_CREDENTIAL_SECRET", "fixture-secret")
 			home := t.TempDir()
 			profile := `{"id":"current","username":"current@example.test","displayName":"Current","rawProfile":{"email":"current@example.test"}}`
@@ -120,6 +121,7 @@ func TestCaptureCurrentDesktopSubscriptionOnly(t *testing.T) {
 
 func TestCredentialEncryptionAndMissingSecret(t *testing.T) {
 	home := t.TempDir()
+	t.Setenv("ZCODE_CREDENTIAL_SECRET_FILE", "")
 	t.Setenv("ZCODE_CREDENTIAL_SECRET", "")
 	secret, err := credentialSecret(home)
 	if err != nil {
