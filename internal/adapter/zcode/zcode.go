@@ -64,7 +64,7 @@ func (a Adapter) Capture(home string) ([]adapter.Blob, []adapter.Warning, error)
 	if json.Unmarshal(raw, &store) != nil || store == nil {
 		return nil, nil, errors.New("zcode: invalid desktop credential store")
 	}
-	reader := credentialReader{home: home, store: store, keyringGet: a.keyringGet}
+	reader := credentialReader{home: home, rawStore: string(raw), keyringGet: a.keyringGet}
 	provider, err := reader.decrypt(store["oauth:active_provider"])
 	if err != nil {
 		return nil, nil, err

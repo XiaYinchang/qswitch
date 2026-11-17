@@ -32,7 +32,7 @@ var (
 // migrates the desktop store, and never retains a failed key lookup globally.
 type credentialReader struct {
 	home           string
-	store          map[string]string
+	rawStore       string
 	keyringGet     func(service, account string) (string, error)
 	selected       bool
 	source, secret string
@@ -102,11 +102,10 @@ func (r *credentialReader) resolveSource() (string, string, error) {
 	if pinned && string(marker) != "os\n" {
 		return "", "", errors.New("zcode: 桌面凭据的 credential-source 加密来源标记无效")
 	}
-	hasEnv := false
-	for _, value := range r.store {
-		pinned = pinned || strings.HasPrefix(value, "enc:v2:os:")
-		hasEnv = hasEnv || strings.HasPrefix(value, "enc:v2:env:")
-	}
+	// The desktop checks the raw file, including keys and plaintext values.
+	// Match that decision exactly before selecting an existing key source.
+	pinned = pinned || strings.Contains(r.rawStore, "enc:v2:os:")
+	hasEnv := strings.Contains(r.rawStore, "enc:v2:env:")
 	if pinned {
 		return "os", "", nil
 	}
@@ -295,6 +294,6 @@ func (r *credentialReader) decrypt(value string) (string, error) {
 }
 
 func decryptCredential(home, value string) (string, error) {
-	r := credentialReader{home: home, store: map[string]string{"value": value}}
+	r := credentialReader{home: home, rawStore: value}
 	return r.decrypt(value)
 }

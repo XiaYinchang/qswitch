@@ -163,7 +163,7 @@ func TestV2SourceSelectionAndFileRules(t *testing.T) {
 		{"both explicit settings", true}, {"missing env key", true}, {"missing explicit file", true},
 		{"short file", true}, {"oversize file", true}, {"non UTF8 file", true}, {"directory file", true},
 		{"public default file", runtime.GOOS != "windows"}, {"marker pins OS", true}, {"other ciphertext pins OS", true},
-		{"plaintext mentioning encryption does not pin", false},
+		{"plaintext mentioning encryption pins OS", true}, {"key mentioning encryption pins OS", true},
 		{"invalid marker", true}, {"empty marker", true}, {"unreadable marker", true},
 		{"explicit secret ignores invalid marker", false},
 	} {
@@ -221,9 +221,13 @@ func TestV2SourceSelectionAndFileRules(t *testing.T) {
 				writeSecret([]byte(secret), 0o600)
 				store["unrelated"] = encryptV2Fixture(t, "os", key[:], "other")
 				writeFixture(t, home, store)
-			case "plaintext mentioning encryption does not pin":
+			case "plaintext mentioning encryption pins OS":
 				writeSecret([]byte(secret), 0o600)
 				store["unrelated"] = "plaintext mentioning enc:v2:os: is not ciphertext"
+				writeFixture(t, home, store)
+			case "key mentioning encryption pins OS":
+				writeSecret([]byte(secret), 0o600)
+				store["enc:v2:os:hint"] = "plaintext"
 				writeFixture(t, home, store)
 			case "invalid marker":
 				writeMarker("env\n")
