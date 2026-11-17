@@ -213,7 +213,7 @@ func splitCursorBotAt(tv ToolView, now, maxAge int64) (ToolView, ToolView) {
 		CursorApp:    tv.CursorApp,
 	}
 	for _, action := range []string{"capture", "probe", "switch", "auto_switch", "login", "run", "desktop_sync", "live_refresh", "parked_refresh", "continuation"} {
-		bot.Capabilities[action] = Capability{Reason: "由 Cursor 账号派生的只读用量"}
+		bot.Capabilities[action] = Capability{Reason: "只支持查询用量，账号在 Cursor 中管理"}
 	}
 	bot.Capabilities["probe"] = Capability{Available: true}
 	cursor := tv

@@ -114,7 +114,7 @@ render=()=>{};
 
 func TestDashboardDerivedToolDoesNotExposeAccountMutations(t *testing.T) {
 	dashboardScript(t, `
-const tool={tool:'grokbot',derived_from:'cursor',capabilities:{probe:{available:true},switch:{available:false,reason:'由Cursor账号派生的只读用量'}}};
+const tool={tool:'grokbot',derived_from:'cursor',capabilities:{probe:{available:true},switch:{available:false,reason:'只支持查询用量，账号在 Cursor 中管理'}}};
 const html=accountHTML({tool:'grokbot',stable_id:'synthetic',email:'fixture@example.test',class:'unknown'},tool);
 assert(html.includes('data-act="probe"'));assert(!html.includes('data-act="forget"'));assert(!html.includes('data-act="switch"'));
 renderToolSettings(tool);assert($('toolSettings').innerHTML.includes('管理 Cursor 账号'));assert(!$('toolSettings').innerHTML.includes('data-act="auto"'));assert.equal(actionTool('grokbot'),'cursor');
