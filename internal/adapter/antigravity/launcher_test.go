@@ -33,6 +33,9 @@ func TestMain(m *testing.M) {
 // This subprocess implements only the startup contract, using synthetic RPC
 // data and a fresh TLS listener. It never loads any native credentials.
 func syntheticCLIChild() int {
+	if os.Getenv("CLOUD_CODE_URL") != os.Getenv("QSWITCH_SYNTHETIC_CLOUD_CODE_URL") {
+		return 82
+	}
 	var csrf, logPath string
 	var forwarded []string
 	for _, arg := range os.Args[1:] {
@@ -77,6 +80,8 @@ func TestLauncherRejectsManagedAndAlternateIdentityArguments(t *testing.T) {
 		{"--settings", `{"customModels":[]}`}, {"--model", "synthetic-model", "--settings={}"},
 		{"--hub"}, {"--hub-port=41001"}, {"--remote-control"}, {"--remote-agent"},
 		{"--use_host_auth"}, {"--host_bridge_url=http://localhost"}, {"--read_host_bridge_token_from_stdin"},
+		{"--cloud_code_endpoint=https://cloudcode-pa.googleapis.com"}, {"--cloud-code-endpoint", "https://cloudcode-pa.googleapis.com"},
+		{"synthetic request", "--cloud_code_endpoint=https://cloudcode-pa.googleapis.com"},
 		{"acp"}, {"remote-control", "start"}, {"--model", "synthetic-model", "acp"},
 	} {
 		if err := validateCLIArgs(args); err == nil || strings.Contains(err.Error(), "do-not-echo") {
@@ -86,10 +91,55 @@ func TestLauncherRejectsManagedAndAlternateIdentityArguments(t *testing.T) {
 	if err := validateCLIArgs([]string{"--model", "synthetic-model", "--conversation", "synthetic-conversation", "--print", "synthetic request", "--effort=max"}); err != nil {
 		t.Fatalf("normal native arguments rejected: %v", err)
 	}
-	for _, args := range [][]string{{"--", "--hub"}, {"--print", "--hub"}, {"--prompt-interactive=--hub"}} {
+	for _, args := range [][]string{{"--", "--hub"}, {"--print", "--hub"}, {"--prompt-interactive=--hub"}, {"--print", "--cloud_code_endpoint=synthetic prompt"}} {
 		if err := validateCLIArgs(args); err != nil {
 			t.Fatalf("native prompt text mistaken for a control flag: %v", err)
 		}
+	}
+}
+
+func TestLauncherRejectsUnsupportedCloudEndpointBeforeStartingChild(t *testing.T) {
+	for _, endpoint := range []string{"https://private.invalid/secret", "https://daily-cloudcode-pa.googleapis.com?secret=synthetic", "https://cloudcode-pa.googleapis.com:443", " "} {
+		t.Run(strconv.Itoa(len(endpoint)), func(t *testing.T) {
+			t.Setenv("CLOUD_CODE_URL", endpoint)
+			data := t.TempDir()
+			err := runCLI(context.Background(), data, "must-not-start", nil, nil, io.Discard, io.Discard)
+			if err == nil || !strings.Contains(err.Error(), "CLOUD_CODE_URL") || strings.Contains(err.Error(), "secret") {
+				t.Fatalf("unsafe endpoint was started or exposed: %v", err)
+			}
+			entries, err := os.ReadDir(data)
+			if err != nil || len(entries) != 0 {
+				t.Fatal("invalid endpoint created startup metadata")
+			}
+		})
+	}
+}
+
+func TestCLICloudEndpointMatchesInheritedEnvironmentSemantics(t *testing.T) {
+	const daily = "https://daily-cloudcode-pa.googleapis.com"
+	const production = "https://cloudcode-pa.googleapis.com"
+	mixedCase := daily
+	if runtime.GOOS == "windows" {
+		mixedCase = production
+	}
+	for _, test := range []struct {
+		name string
+		env  []string
+		want string
+	}{
+		{"absent", nil, daily},
+		{"explicit empty", []string{"CLOUD_CODE_URL="}, daily},
+		{"override", []string{"CLOUD_CODE_URL=" + production}, production},
+		{"mixed case", []string{"Cloud_Code_Url=" + production}, mixedCase},
+		{"last wins", []string{"CLOUD_CODE_URL=" + daily, "CLOUD_CODE_URL=" + production}, production},
+		{"mixed case last wins on Windows", []string{"CLOUD_CODE_URL=" + daily, "Cloud_Code_Url=" + production}, mixedCase},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := cliCloudCodeEndpoint(test.env)
+			if err != nil || got != test.want {
+				t.Fatalf("environment/record mismatch: got=%q want=%q err=%v", got, test.want, err)
+			}
+		})
 	}
 }
 
@@ -147,6 +197,12 @@ func TestLauncherRegistersNativeRPCAndCleansUpOnChildExit(t *testing.T) {
 	for _, code := range []int{0, 7} {
 		t.Run(strconv.Itoa(code), func(t *testing.T) {
 			t.Setenv("QSWITCH_SYNTHETIC_AGY_EXIT", strconv.Itoa(code))
+			cloudURL, expected := "", "https://daily-cloudcode-pa.googleapis.com"
+			if code != 0 {
+				cloudURL, expected = "https://cloudcode-pa.googleapis.com", "https://cloudcode-pa.googleapis.com"
+			}
+			t.Setenv("CLOUD_CODE_URL", cloudURL)
+			t.Setenv("QSWITCH_SYNTHETIC_CLOUD_CODE_URL", cloudURL)
 			dataDir, home := t.TempDir(), t.TempDir()
 			input, feed := io.Pipe()
 			defer input.Close()
@@ -167,14 +223,15 @@ func TestLauncherRegistersNativeRPCAndCleansUpOnChildExit(t *testing.T) {
 						t.Fatal(err)
 					}
 					var record struct {
-						PID       int    `json:"pid"`
-						HTTPSPort int    `json:"httpsPort"`
-						CSRF      string `json:"csrfToken"`
+						PID               int    `json:"pid"`
+						HTTPSPort         int    `json:"httpsPort"`
+						CSRF              string `json:"csrfToken"`
+						CloudCodeEndpoint string `json:"cloudCodeEndpoint"`
 					}
 					if err := json.Unmarshal(body, &record); err != nil {
 						t.Fatal(err)
 					}
-					endpoint = Endpoint{record.PID, record.HTTPSPort, record.CSRF}
+					endpoint = Endpoint{PID: record.PID, HTTPSPort: record.HTTPSPort, CSRF: record.CSRF, CloudCodeEndpoint: record.CloudCodeEndpoint}
 					break
 				}
 				time.Sleep(20 * time.Millisecond)
@@ -182,11 +239,20 @@ func TestLauncherRegistersNativeRPCAndCleansUpOnChildExit(t *testing.T) {
 			if endpoint.PID <= 0 || endpoint.PID == os.Getpid() {
 				t.Fatal("native child was not registered")
 			}
+			if endpoint.CloudCodeEndpoint != expected {
+				t.Fatal("managed record lost the child's actual quota endpoint")
+			}
 			endpoints, err := DiscoverManaged(home, dataDir, func() ([]adapter.Proc, error) {
 				return []adapter.Proc{{PID: endpoint.PID, Command: `"` + binary + `"`}}, nil
 			})
 			if err != nil || len(endpoints) != 1 || endpoints[0] != endpoint {
 				t.Fatalf("managed native endpoint not discovered: count=%d err=%v", len(endpoints), err)
+			}
+			cloud, err := CloudCodeEndpoint(home, dataDir, func() ([]adapter.Proc, error) {
+				return []adapter.Proc{{PID: endpoint.PID, Command: `"` + binary + `"`}}, nil
+			})
+			if err != nil || cloud != expected {
+				t.Fatalf("managed CLI without desktop flags lost its quota channel: %q %v", cloud, err)
 			}
 			if idle, err := endpoint.Idle(ctx, 30*time.Second); err != nil || !idle {
 				t.Fatalf("managed native RPC failed: idle=%t err=%v", idle, err)

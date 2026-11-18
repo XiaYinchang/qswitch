@@ -23,9 +23,9 @@ type cloudEndpointObservation struct {
 	Source     string `json:"source"`
 }
 
-// CloudCodeEndpoint follows explicit native runtime arguments. Only when no
-// native process is running may a previous verified local observation be used.
-// Invalid, missing or conflicting live arguments never fall back to the cache.
+// CloudCodeEndpoint follows native runtime arguments or a managed CLI's private
+// launch record. Only when no native process is running may a previous verified
+// local observation be used. Uncertain live state never falls back to the cache.
 func CloudCodeEndpoint(home, dataDir string, list func() ([]adapter.Proc, error)) (string, error) {
 	if list == nil {
 		list = (busy.PS{}).List
@@ -41,6 +41,7 @@ func CloudCodeEndpoint(home, dataDir string, list func() ([]adapter.Proc, error)
 		}
 	}
 	verified := make(map[int]bool)
+	managed := make(map[int]string)
 	if len(native) > 0 {
 		endpoints, err := DiscoverManaged(home, dataDir, func() ([]adapter.Proc, error) { return processes, nil })
 		if err != nil {
@@ -48,6 +49,12 @@ func CloudCodeEndpoint(home, dataDir string, list func() ([]adapter.Proc, error)
 		}
 		for _, endpoint := range endpoints {
 			verified[endpoint.PID] = true
+			if endpoint.CloudCodeEndpoint != "" {
+				if prior := managed[endpoint.PID]; prior != "" && prior != endpoint.CloudCodeEndpoint {
+					return "", errors.New("antigravity: 受管 CLI 的额度后端记录冲突")
+				}
+				managed[endpoint.PID] = endpoint.CloudCodeEndpoint
+			}
 		}
 	}
 	var endpoint string
@@ -55,9 +62,12 @@ func CloudCodeEndpoint(home, dataDir string, list func() ([]adapter.Proc, error)
 		if !verified[process.PID] {
 			return "", errors.New("antigravity: 原生服务缺少可验证的本机记录")
 		}
-		current, err := processCloudEndpoint(process.Command)
-		if err != nil {
-			return "", err
+		current := managed[process.PID]
+		if current == "" {
+			current, err = processCloudEndpoint(process.Command)
+			if err != nil {
+				return "", err
+			}
 		}
 		if endpoint != "" && endpoint != current {
 			return "", errors.New("antigravity: 正在运行的原生服务使用不同额度后端")

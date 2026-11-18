@@ -162,3 +162,102 @@ func TestCloudEndpointNoRuntimeRequiresPrivateValidObservation(t *testing.T) {
 		})
 	}
 }
+
+func writeManagedCloudEndpointRecord(t *testing.T, data string, pid, port int, endpoint string) string {
+	t.Helper()
+	dir := cliRecordDir(data)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "synthetic-cli.json")
+	if err := writeCLIRecord(path, Endpoint{PID: pid, HTTPSPort: port, CSRF: "synthetic-csrf-value", CloudCodeEndpoint: endpoint}); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestCloudEndpointManagedCLIRecordCanMergeNativeDaemonMetadata(t *testing.T) {
+	home, data := t.TempDir(), t.TempDir()
+	const wanted = "https://cloudcode-pa.googleapis.com"
+	writeRPCTestRecord(t, home, "antigravity-cli", "native.json", 101, 41001)
+	writeManagedCloudEndpointRecord(t, data, 101, 41001, wanted)
+	list := func() ([]adapter.Proc, error) {
+		return []adapter.Proc{{PID: 101, Command: "/synthetic/agy --model synthetic-model"}}, nil
+	}
+	endpoint, err := CloudCodeEndpoint(home, data, list)
+	if err != nil || endpoint != wanted {
+		t.Fatalf("native metadata obscured managed launch context: %q %v", endpoint, err)
+	}
+	endpoints, err := DiscoverManaged(home, data, list)
+	if err != nil || len(endpoints) != 1 || endpoints[0].CloudCodeEndpoint != wanted {
+		t.Fatalf("duplicate native record was not merged: count=%d err=%v", len(endpoints), err)
+	}
+	offline, err := CloudCodeEndpoint(home, data, func() ([]adapter.Proc, error) { return nil, nil })
+	if err != nil || offline != wanted {
+		t.Fatal("verified CLI launch context was not persisted")
+	}
+}
+
+func TestCloudEndpointUncertainCLIRecordsCannotBorrowCachedChannel(t *testing.T) {
+	for _, mode := range []string{"old record", "unsupported origin", "public record", "wrong pid", "native metadata only", "conflicting desktop", "conflicting csrf"} {
+		t.Run(mode, func(t *testing.T) {
+			home, data := t.TempDir(), t.TempDir()
+			cache := filepath.Join(data, cloudEndpointCacheName)
+			if err := writeCloudEndpointObservation(cache, cloudEndpointObservation{Endpoint: "https://daily-cloudcode-pa.googleapis.com", ObservedAt: time.Now().Unix(), Source: "native_process"}); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.ReadFile(cache)
+			if err != nil {
+				t.Fatal(err)
+			}
+			endpoint := "https://cloudcode-pa.googleapis.com"
+			if mode == "old record" {
+				endpoint = ""
+			}
+			if mode == "unsupported origin" {
+				endpoint = "https://private.invalid?secret=synthetic"
+			}
+			path := writeManagedCloudEndpointRecord(t, data, 101, 41001, endpoint)
+			processes := []adapter.Proc{{PID: 101, Command: "/synthetic/agy"}}
+			switch mode {
+			case "public record":
+				rpcTestMetadataACL(t, path, true)
+			case "wrong pid":
+				processes[0].PID = 102
+			case "native metadata only":
+				// Only qswitch's own launch records can assert CLI environment.
+				native := writeRPCTestRecord(t, home, "antigravity-cli", "native.json", 101, 41001)
+				raw, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(native, raw, 0600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+			case "conflicting desktop":
+				writeRPCTestRecord(t, home, "antigravity", "desktop.json", 102, 41002)
+				processes = append(processes, adapter.Proc{PID: 102, Command: "/synthetic/language_server --cloud_code_endpoint=https://daily-cloudcode-pa.googleapis.com"})
+			case "conflicting csrf":
+				native := writeRPCTestRecord(t, home, "antigravity-cli", "native.json", 101, 41001)
+				raw, err := json.Marshal(map[string]any{"pid": 101, "httpsPort": 41001, "csrfToken": "synthetic-different-csrf"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(native, raw, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, err := CloudCodeEndpoint(home, data, func() ([]adapter.Proc, error) { return processes, nil })
+			if err == nil || got != "" || strings.Contains(err.Error(), "secret") {
+				t.Fatalf("uncertain CLI context borrowed cached quota endpoint: %q %v", got, err)
+			}
+			after, err := os.ReadFile(cache)
+			if err != nil || !bytes.Equal(before, after) {
+				t.Fatal("uncertain CLI context overwrote cache")
+			}
+		})
+	}
+}

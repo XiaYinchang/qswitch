@@ -49,7 +49,7 @@ func TestAntigravityProbeUsesVerifiedRuntimeBackendAndPersistsBothGroups(t *test
 				if r.URL.String() != endpoint+"/v1internal:retrieveUserQuotaSummary" {
 					t.Fatal("query ignored verified runtime origin")
 				}
-				body := antigravityPipelineBody(t, now, [4]float64{1, 1, .008, .501}, -1, -1)
+				body := antigravityPipelineBody(t, now, [4]float64{1, 1, .123, .456}, -1, -1)
 				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(string(body))), Request: r}, nil
 			})}
 			result := a.ProbeAccount(context.Background(), adapter.Antigravity, antigravityPipelineID)
@@ -61,7 +61,7 @@ func TestAntigravityProbeUsesVerifiedRuntimeBackendAndPersistsBothGroups(t *test
 				t.Fatal(err)
 			}
 			buckets := quota.DecodeBuckets(account.QuotaDetail)
-			if len(buckets) != 4 || math.Abs(buckets[2].UsedPct-99.2) > 1e-8 || math.Abs(buckets[3].UsedPct-49.9) > 1e-8 || buckets[0].UsedPct != 0 || account.LastQuotaClass != "ok" {
+			if len(buckets) != 4 || math.Abs(buckets[2].UsedPct-87.7) > 1e-8 || math.Abs(buckets[3].UsedPct-54.4) > 1e-8 || buckets[0].UsedPct != 0 || account.LastQuotaClass != "ok" {
 				t.Fatal("third-party values were lost or Gemini availability ignored")
 			}
 			after, err := a.State.GetPointer("antigravity")

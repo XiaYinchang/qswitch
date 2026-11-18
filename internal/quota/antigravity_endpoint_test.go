@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"math"
 	"net/http"
 	"strings"
 	"testing"
@@ -21,11 +22,11 @@ func TestAntigravityHTTPUsesOnlyValidatedNativeOrigins(t *testing.T) {
 				if r.Header.Get("Authorization") != "Bearer synthetic-native-token" {
 					t.Fatal("missing synthetic authorization")
 				}
-				body, _ := json.Marshal(antigravityTestSummary([4]float64{1, 1, .008, .501}))
+				body, _ := json.Marshal(antigravityTestSummary([4]float64{1, 1, .123, .456}))
 				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(string(body))), Request: r}, nil
 			})}}
 			result, err := h.AntigravityAt(context.Background(), "synthetic-native-token", "", endpoint)
-			if err != nil || calls != 1 || result.Class != OK || len(result.Buckets) != 4 || result.Buckets[2].UsedPct < 99 || result.UsedPct != 0 {
+			if err != nil || calls != 1 || result.Class != OK || len(result.Buckets) != 4 || math.Abs(result.Buckets[2].UsedPct-87.7) > 1e-8 || math.Abs(result.Buckets[3].UsedPct-54.4) > 1e-8 || result.UsedPct != 0 {
 				t.Fatalf("quota result=%+v err=%v calls=%d", result, err, calls)
 			}
 		})

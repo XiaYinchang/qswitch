@@ -24,9 +24,10 @@ const maxRPCResponseBytes = 8 << 20
 // Endpoint is discovered only from a private native daemon record whose PID
 // belongs to a running Antigravity executable. CSRF must never be logged.
 type Endpoint struct {
-	PID       int    `json:"pid"`
-	HTTPSPort int    `json:"httpsPort"`
-	CSRF      string `json:"-"`
+	PID               int    `json:"pid"`
+	HTTPSPort         int    `json:"httpsPort"`
+	CSRF              string `json:"-"`
+	CloudCodeEndpoint string `json:"-"` // Only populated from qswitch's private CLI launch record.
 }
 
 // String keeps fmt-based diagnostics from accidentally rendering the CSRF.
@@ -56,7 +57,7 @@ func DiscoverManaged(home, dataDir string, list func() ([]adapter.Proc, error)) 
 		}
 	}
 	var endpoints []Endpoint
-	seen := make(map[string]bool)
+	seen := make(map[string]int)
 	directories := []string{filepath.Join(home, ".gemini", "antigravity", "daemon"), filepath.Join(home, ".gemini", "antigravity-cli", "daemon")}
 	if dataDir != "" {
 		directories = append(directories, cliRecordDir(dataDir))
@@ -79,9 +80,10 @@ func DiscoverManaged(home, dataDir string, list func() ([]adapter.Proc, error)) 
 				return nil, err
 			}
 			var record struct {
-				PID       int    `json:"pid"`
-				HTTPSPort int    `json:"httpsPort"`
-				CSRF      string `json:"csrfToken"`
+				PID               int    `json:"pid"`
+				HTTPSPort         int    `json:"httpsPort"`
+				CSRF              string `json:"csrfToken"`
+				CloudCodeEndpoint string `json:"cloudCodeEndpoint"`
 			}
 			if json.Unmarshal(raw, &record) != nil {
 				return nil, errors.New("antigravity discovery: invalid daemon metadata")
@@ -92,12 +94,26 @@ func DiscoverManaged(home, dataDir string, list func() ([]adapter.Proc, error)) 
 			if record.HTTPSPort < 1 || record.HTTPSPort > 65535 || strings.TrimSpace(record.CSRF) == "" {
 				return nil, errors.New("antigravity discovery: incomplete daemon metadata")
 			}
+			cloudEndpoint := ""
+			if dataDir != "" && dir == cliRecordDir(dataDir) && record.CloudCodeEndpoint != "" {
+				cloudEndpoint, err = allowedCloudEndpoint(record.CloudCodeEndpoint)
+				if err != nil {
+					return nil, errors.New("antigravity discovery: invalid managed CLI quota endpoint")
+				}
+			}
 			key := strconv.Itoa(record.PID) + ":" + strconv.Itoa(record.HTTPSPort)
-			if seen[key] {
+			if index, found := seen[key]; found {
+				prior := &endpoints[index]
+				if prior.CSRF != record.CSRF || prior.CloudCodeEndpoint != "" && cloudEndpoint != "" && prior.CloudCodeEndpoint != cloudEndpoint {
+					return nil, errors.New("antigravity discovery: conflicting daemon metadata")
+				}
+				if cloudEndpoint != "" {
+					prior.CloudCodeEndpoint = cloudEndpoint
+				}
 				continue
 			}
-			seen[key] = true
-			endpoints = append(endpoints, Endpoint{PID: record.PID, HTTPSPort: record.HTTPSPort, CSRF: record.CSRF})
+			seen[key] = len(endpoints)
+			endpoints = append(endpoints, Endpoint{PID: record.PID, HTTPSPort: record.HTTPSPort, CSRF: record.CSRF, CloudCodeEndpoint: cloudEndpoint})
 		}
 	}
 	if len(active) != 0 && len(endpoints) == 0 {
