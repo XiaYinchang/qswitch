@@ -56,7 +56,11 @@ class DeploymentTransactionTest(unittest.TestCase):
             if failure == "checksum":
                 (stage / "qswitch").write_bytes(b"corrupt synthetic executable")
 
-            service = {"version": OLD}
+            service = {
+                "version": OLD,
+                "tearing_down": False,
+                "teardown_polls": 999 if failure == "stuck bootout" else (2 if mac_start == "async bootout" else 0),
+            }
             calls = []
             replaced = []
             real_replace = os.replace
@@ -91,15 +95,30 @@ class DeploymentTransactionTest(unittest.TestCase):
 
                 if args[:2] == ["launchctl", "bootout"]:
                     self.assertEqual(args[2:], ["gui/501/com.qswitch"])
-                    service["version"] = None
+                    if service["teardown_polls"] > 0:
+                        service["tearing_down"] = True
+                    else:
+                        service["version"] = None
                     return completed(0)
                 if args[:2] == ["launchctl", "bootstrap"]:
                     self.assertEqual(args[2:], ["gui/501", str(home / "Library/LaunchAgents/com.qswitch.plist")])
+                    if service["tearing_down"]:
+                        return completed(5)
+                    if mac_start == "async bootout":
+                        service["version"] = (bindir / "qswitchd").read_text().splitlines()[0]
+                        return completed(0)
                     if mac_start == "already loaded":
                         service["version"] = (bindir / "qswitchd").read_text().splitlines()[0]
                     return completed(5)
                 if args[:2] == ["launchctl", "print"]:
                     self.assertEqual(args[2:], ["gui/501/com.qswitch"])
+                    if service["tearing_down"]:
+                        service["teardown_polls"] -= 1
+                        if service["teardown_polls"] <= 0:
+                            service["tearing_down"] = False
+                            service["version"] = None
+                            return completed(113)
+                        return completed(0)
                     return completed(0 if service["version"] is not None else 113)
                 if args[:1] == ["sudo"]:
                     self.assertEqual(args, ["sudo", "-n", "launchctl", "asuser", "501", "launchctl", "bootstrap", "gui/501", str(home / "Library/LaunchAgents/com.qswitch.plist")])
@@ -121,6 +140,9 @@ class DeploymentTransactionTest(unittest.TestCase):
                 return subprocess.CompletedProcess(args, 0, stdout=executable.read_text().splitlines()[0] + "\n", stderr="")
 
             def urlopen(url, **kwargs):
+                if service["tearing_down"] and failure != "stuck bootout":
+                    service["tearing_down"] = False
+                    service["version"] = None
                 version = service["version"]
                 if version is None or failure == "health" and version == NEW:
                     raise URLError("synthetic stopped or unhealthy service")
@@ -176,12 +198,14 @@ class DeploymentTransactionTest(unittest.TestCase):
             elif mac_start:
                 self.assertIn(("launchctl", "bootout", "gui/501/com.qswitch"), calls)
                 gui_calls = [args for args in calls if args[0] == "sudo"]
-                if mac_start == "already loaded":
-                    self.assertFalse(gui_calls, "an already-loaded job was bootstrapped twice")
+                if mac_start in ("already loaded", "async bootout") or failure == "stuck bootout":
+                    self.assertFalse(gui_calls, "an already-loaded, direct-bootstrap, or unstopped job used GUI fallback")
                 else:
                     self.assertEqual(len(gui_calls), 2 if failure or mac_start == "both fail" else 1, "GUI fallback was not shared by apply and rollback")
             else:
                 self.assertIn(("systemctl", "--user", "stop", "qswitchd.service"), calls)
+            if failure == "stuck bootout":
+                self.assertEqual(replaced, [], "binaries were replaced before launchd finished unloading the old job")
             if failure == "second replace":
                 self.assertEqual(replaced, ["qswitch", "qswitchd"], "fault did not occur after the first executable changed")
 
@@ -190,6 +214,12 @@ class DeploymentTransactionTest(unittest.TestCase):
 
     def test_mac_bootstrap_uses_noninteractive_gui_session_fallback(self):
         self.exercise(mac_start="gui fallback")
+
+    def test_mac_bootout_waits_for_async_launchd_teardown(self):
+        self.exercise(mac_start="async bootout")
+
+    def test_mac_stuck_bootout_aborts_before_replacing_binaries(self):
+        self.exercise("stuck bootout", mac_start="async bootout")
 
     def test_mac_failed_bootstraps_do_not_report_success(self):
         self.exercise(mac_start="both fail")
