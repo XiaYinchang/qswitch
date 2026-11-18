@@ -249,11 +249,11 @@ getPassword() { if(++reads!==1) throw Error(); return `+string(encoded)+`; }
 setPassword() { throw Error("must not write"); }
 deleteCredential() { throw Error("must not delete"); }
 };`, 0o600)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	raw, err := runNativeNode(ctx, node, []string{"-e", nativeKeyReadScript, module, "synthetic-service", "synthetic-account"}, nativeNodeEnvironment(os.Environ()))
 	if err != nil || string(raw) != value {
-		t.Fatalf("synthetic native read failed: %v", err)
+		t.Fatalf("synthetic native read failed: %v (ctx=%v)", err, ctx.Err())
 	}
 }
 

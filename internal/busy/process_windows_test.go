@@ -1,8 +1,12 @@
 package busy
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"os"
 	"testing"
+	"time"
 )
 
 func TestWindowsProcessSnapshot(t *testing.T) {
@@ -61,6 +65,32 @@ func TestWindowsProcessListIncludesCaller(t *testing.T) {
 		}
 	}
 	t.Fatal("native process snapshot omitted caller")
+}
+
+func TestWindowsProcessListRetriesOnceAfterColdStartTimeout(t *testing.T) {
+	attempts := 0
+	rows, err := listWindowsProcesses(func(timeout time.Duration) ([]byte, error) {
+		if timeout != windowsProcessQueryTimeout {
+			t.Fatalf("unexpected timeout %v", timeout)
+		}
+		attempts++
+		if attempts == 1 {
+			return nil, fmt.Errorf("%w: exit status 1", context.DeadlineExceeded)
+		}
+		return []byte(`[{"ProcessId":42,"CommandLine":"\"C:\\Apps\\Antigravity.exe\"","Name":"Antigravity.exe"}]`), nil
+	})
+	if err != nil || attempts != 2 || len(rows) != 1 || rows[0].PID != 42 {
+		t.Fatalf("attempts=%d rows=%v err=%v", attempts, rows, err)
+	}
+
+	nonTimeoutAttempts := 0
+	_, err = listWindowsProcesses(func(time.Duration) ([]byte, error) {
+		nonTimeoutAttempts++
+		return nil, errors.New("cim provider unavailable")
+	})
+	if err == nil || nonTimeoutAttempts != 1 {
+		t.Fatalf("non-timeout error retried: attempts=%d err=%v", nonTimeoutAttempts, err)
+	}
 }
 
 func TestWindowsAlive(t *testing.T) {
