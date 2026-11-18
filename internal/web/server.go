@@ -400,7 +400,7 @@ func (s *Server) postProbe(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, map[string]any{
 		"buckets": res.Buckets,
-		"updated": res.Class == quota.OK || res.Class == quota.Soft || res.Class == quota.Exhausted,
+		"updated": app.QuotaResultUpdated(res),
 		"class":   res.Class, "used_pct": res.UsedPct, "resets_at": res.ResetsAt, "source": res.Source,
 	})
 }

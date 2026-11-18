@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"qswitch/internal/adapter"
 	"qswitch/internal/app"
 )
 
@@ -71,12 +72,49 @@ func (s *Server) postReport(w http.ResponseWriter, r *http.Request, id string) {
 // This operator command uses the standard management authentication and target
 // instance guard, unlike the receiving endpoint above.
 func (s *Server) postReportNow(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Tool string `json:"tool"`
+	}
+	if !readJSON(w, r, &req) {
+		return
+	}
+	var tool adapter.Tool
+	if strings.TrimSpace(req.Tool) != "" {
+		var err error
+		tool, err = adapter.ParseTool(req.Tool)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if !s.requireTool(w, tool, "probe") {
+			return
+		}
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
 	defer cancel()
+	var summary *app.QuotaRefreshSummary
+	if tool != "" {
+		queryCtx, stopQuery := context.WithTimeout(ctx, 70*time.Second)
+		result, err := s.App.RefreshToolQuota(queryCtx, tool)
+		stopQuery()
+		if err != nil {
+			if errors.Is(err, app.ErrQuotaRefreshBusy) {
+				writeErr(w, http.StatusConflict, err.Error())
+			} else {
+				writeErr(w, http.StatusServiceUnavailable, "quota refresh is unavailable")
+			}
+			return
+		}
+		summary = &result
+	}
 	observedAt, err := s.App.ReportNow(ctx)
 	if err != nil {
 		writeErr(w, http.StatusServiceUnavailable, "node status collection or reporting failed")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"instance": s.App.Instance(), "observed_at": observedAt, "reported": true})
+	response := map[string]any{"instance": s.App.Instance(), "observed_at": observedAt, "reported": true}
+	if summary != nil {
+		response["quota"] = summary
+	}
+	writeJSON(w, http.StatusOK, response)
 }

@@ -13,12 +13,33 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
 )
 
 func cliRecordDir(dataDir string) string { return filepath.Join(dataDir, "antigravity-cli") }
+
+// The official CLI's daemon initialization selects daily Cloud Code; its
+// CodeAssist client gives CLOUD_CODE_URL precedence. This is separate from
+// CLIAuthProvider's OAuth endpoint, which must not be changed here.
+func cliCloudCodeEndpoint(environment []string) (string, error) {
+	endpoint := ""
+	for _, entry := range environment {
+		key, value, found := strings.Cut(entry, "=")
+		if found && (key == "CLOUD_CODE_URL" || runtime.GOOS == "windows" && strings.EqualFold(key, "CLOUD_CODE_URL")) {
+			endpoint = value
+		}
+	}
+	if endpoint == "" {
+		endpoint = "https://daily-cloudcode-pa.googleapis.com"
+	}
+	if endpoint, err := allowedCloudEndpoint(endpoint); err == nil {
+		return endpoint, nil
+	}
+	return "", errors.New("qswitch run antigravity: CLOUD_CODE_URL 必须使用受支持的官方额度后端")
+}
 
 // RunCLI starts the official CLI in the current terminal. It adds only native
 // RPC authentication and a private startup log; prompts and terminal input go
@@ -28,6 +49,7 @@ func RunCLI(ctx context.Context, dataDir, binary string, args []string) error {
 }
 
 func validateCLIArgs(args []string) error {
+	positional := false
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if arg == "--" {
@@ -35,15 +57,18 @@ func validateCLIArgs(args []string) error {
 		}
 		if !strings.HasPrefix(arg, "-") {
 			// The official CLI recognizes these maintenance subcommands.
-			switch arg {
-			case "acp", "agent", "agents", "changelog", "help", "install", "mcp", "mic-serve", "models", "plugin", "plugins", "remote-control", "update":
-				return errors.New("run Antigravity maintenance subcommands directly with agy; qswitch run antigravity starts a local session")
+			if !positional {
+				switch arg {
+				case "acp", "agent", "agents", "changelog", "help", "install", "mcp", "mic-serve", "models", "plugin", "plugins", "remote-control", "update":
+					return errors.New("run Antigravity maintenance subcommands directly with agy; qswitch run antigravity starts a local session")
+				}
 			}
-			break
+			positional = true
+			continue // Native flags after positional input still need validation.
 		}
 		name := strings.SplitN(strings.TrimLeft(arg, "-"), "=", 2)[0]
 		switch name {
-		case "csrf_token", "log-file", "app_data_dir", "gemini_dir", "hub", "hub-port", "remote-agent", "remote-control", "remote-control-name", "host_bridge_url", "read_host_bridge_token_from_stdin", "use_host_auth", "bg-updater", "settings":
+		case "csrf_token", "log-file", "app_data_dir", "gemini_dir", "hub", "hub-port", "remote-agent", "remote-control", "remote-control-name", "host_bridge_url", "read_host_bridge_token_from_stdin", "use_host_auth", "bg-updater", "settings", "cloud_code_endpoint", "cloud-code-endpoint":
 			return fmt.Errorf("qswitch run antigravity does not support --%s; it manages the local shared consumer account", name)
 		case "print", "p", "prompt", "print-timeout", "output-format", "input-format", "json-schema", "model", "effort", "agent", "conversation", "prompt-interactive", "i", "mode", "add-dir", "project", "release_base_url":
 			// These exact native flags take a value, which can itself start
@@ -67,6 +92,13 @@ func runCLI(ctx context.Context, dataDir, binary string, args []string, stdin io
 	}
 	if dataDir == "" {
 		return errors.New("antigravity CLI requires a qswitch data directory")
+	}
+	// Record exactly the environment inherited by this child, even if another
+	// goroutine changes the launcher's environment before cmd.Start.
+	environment := os.Environ()
+	cloudEndpoint, err := cliCloudCodeEndpoint(environment)
+	if err != nil {
+		return err
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -108,6 +140,7 @@ func runCLI(ctx context.Context, dataDir, binary string, args []string, stdin io
 	// Never format cmd.Args or this command's diagnostic output into errors.
 	commandArgs := append([]string{"--csrf_token=" + csrf, "--log-file=" + logPath}, args...)
 	cmd := exec.CommandContext(ctx, binary, commandArgs...)
+	cmd.Env = environment
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, stdout, stderr
 	configureCLICommand(cmd)
 	// Both processes share the console. agy receives Ctrl+C itself; the parent
@@ -147,7 +180,7 @@ func runCLI(ctx context.Context, dataDir, binary string, args []string, stdin io
 			if port == 0 || port == registeredPort {
 				continue
 			}
-			endpoint := Endpoint{PID: cmd.Process.Pid, HTTPSPort: port, CSRF: csrf}
+			endpoint := Endpoint{PID: cmd.Process.Pid, HTTPSPort: port, CSRF: csrf, CloudCodeEndpoint: cloudEndpoint}
 			probe, cancel := context.WithTimeout(ctx, 2*time.Second)
 			err = endpoint.Call(probe, "GetAuthStatus", struct{}{}, nil)
 			cancel()
@@ -205,10 +238,11 @@ func writeCLIRecord(path string, endpoint Endpoint) error {
 	}
 	defer os.Remove(path + ".pending")
 	err = json.NewEncoder(file).Encode(struct {
-		PID       int    `json:"pid"`
-		HTTPSPort int    `json:"httpsPort"`
-		CSRF      string `json:"csrfToken"`
-	}{endpoint.PID, endpoint.HTTPSPort, endpoint.CSRF})
+		PID               int    `json:"pid"`
+		HTTPSPort         int    `json:"httpsPort"`
+		CSRF              string `json:"csrfToken"`
+		CloudCodeEndpoint string `json:"cloudCodeEndpoint,omitempty"`
+	}{endpoint.PID, endpoint.HTTPSPort, endpoint.CSRF, endpoint.CloudCodeEndpoint})
 	closeErr := file.Close()
 	if err != nil || closeErr != nil {
 		return errors.New("cannot write private CLI endpoint")

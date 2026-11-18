@@ -6,6 +6,14 @@ const controlPlaneFixtures = environmentFixtures + `
 const report=(id,at=100,stale=false,value=overview(id))=>({overview:value,observed_at:value?at:0,received_at:value?at+1:0,stale});
 const controlCatalog=(at=100)=>({instance:info(A),login_required:true,control_plane:true,server_time:at+1,report_max_age_seconds:60,environments:entries.map(env=>({...env,snapshot:report(env.id,at)}))});
 const startPortal=async(catalog=controlCatalog())=>{state.gateway=null;state.envID='';state.apiBase='';state.online=false;state.overview=null;setFetch(async(path)=>{assert.equal(path,'api/environments');return response(catalog)});await bootstrap()};
+const quotaCatalog=(at=100,used=0)=>{
+ const catalog=controlCatalog(at),tool=catalog.environments[1].snapshot.overview.tools[0];
+ tool.capabilities.probe={available:true};
+ Object.assign(tool.accounts[0],{tool:'antigravity',live:true,class:'ok',used_pct:used,last_quota_at:at,last_probe_at:at,last_probe_class:'ok',quota_stale:false,
+  buckets:[{id:'gemini_5h',used_pct:0},{id:'gemini_weekly',used_pct:0},{id:'third_party_5h',used_pct:used},{id:'third_party_weekly',used_pct:used}]});
+ return catalog;
+};
+const clickRefresh=()=>onClick({target:{closest:selector=>selector==='[data-act]'?$('refreshState'):null}});
 `
 
 func TestDashboardPortalTabsAndPollingOnlyReadCentralSnapshots(t *testing.T) {
@@ -195,6 +203,167 @@ func TestDashboardPortalZCodeCaptureErrorClearsOnRecoveredReport(t *testing.T) {
  assert.equal($('toolProblem').hidden,true);assert.equal($('toolProblem').textContent,'');
  assert.equal(state.selected.get('zcode'),selected);assert.equal(state.overview.tools[0].live_id,account.stable_id);assert.equal(state.overview.tools[0].accounts.length,1);assert.equal(state.overview.tools[0].accounts[0].live,true);
  assert($('accountDetail').innerHTML.includes('recovery@example.test'));assert($('accountDetail').innerHTML.includes('37%'));assert.equal(state.lastRead,201);
+ clearTimeout(ui.overviewTimer);clearTimeout(ui.snapshotExpiryTimer);
+})().catch(e=>{console.error(e);process.exitCode=1});
+`)
+}
+
+func TestDashboardPortalHeaderRefreshQueriesCurrentToolAndDisplaysReportedQuota(t *testing.T) {
+	dashboardScript(t, controlPlaneFixtures+`
+(async()=>{
+ await startPortal(quotaCatalog());await switchEnvironment(B);
+ const button=$('refreshState');button.dataset={act:'refresh-state'};
+ const ack=deferred(),calls=[];
+ setFetch((path,opts)=>{
+  calls.push({path,opts});
+  if(opts.method==='POST'){
+   assert.equal(path,entries[1].api_base+'report');assert.equal(opts.headers['X-Qswitch-Instance'],B);
+   assert.deepEqual(JSON.parse(opts.body),{tool:'antigravity'});return ack.promise;
+  }
+  assert.equal(path,'api/environments');return Promise.resolve(response(quotaCatalog(200,47)));
+ });
+ const refresh=clickRefresh(),duplicate=refreshReportedSnapshot(requestContext(),'antigravity');
+ assert.equal(calls.length,1);assert.equal(button.disabled,true);assert($('globalNotice').textContent.includes('正在查询 Antigravity 额度并上报'));
+ assert.equal(state.overview.tools[0].accounts[0].last_quota_at,100);
+ ack.resolve(response({instance:info(B),reported:true,observed_at:200,quota:{tool:'antigravity',attempted:1,updated:1,failed:0,skipped:0}}));
+ await refresh;assert.equal(await duplicate,true);assert.deepEqual(calls.map(c=>c.opts.method),['POST','GET']);
+ assert.equal(state.overview.tools[0].accounts[0].last_quota_at,200);
+ assert.equal(state.overview.tools[0].accounts[0].buckets[2].used_pct,47);assert($('accountDetail').innerHTML.includes('已用 47%'));
+ assert($('globalNotice').textContent.includes('额度已更新并上报'));assert($('globalNotice').textContent.includes('状态上报'));
+ assert(!$('globalNotice').textContent.includes('节点采集'));assert.equal(button.disabled,false);
+ const reads=calls.length;await pollOverview();assert.equal(calls.length,reads+1);assert.equal(calls.at(-1).opts.method,'GET','periodic polling must not query provider quota');
+ clearTimeout(ui.overviewTimer);clearTimeout(ui.snapshotExpiryTimer);
+})().catch(e=>{console.error(e);process.exitCode=1});
+`)
+}
+
+func TestDashboardPortalHeaderRefreshHandlesDerivedUnavailableAndManagementViews(t *testing.T) {
+	dashboardScript(t, controlPlaneFixtures+`
+(async()=>{
+ await startPortal(quotaCatalog());await switchEnvironment(B);$('refreshState').dataset={act:'refresh-state'};
+ for(const mode of ['derived','unavailable','management','missing']){
+  const catalog=quotaCatalog(200);
+  if(mode==='derived'){
+   const cursor=catalog.environments[1].snapshot.overview.tools[0];cursor.tool='cursor';
+   catalog.environments[1].snapshot.overview.instance.managed_tools=['cursor'];
+   catalog.environments[1].snapshot.overview.tools.push({...cursor,tool:'grokbot',derived_from:'cursor'});
+  }
+  if(mode==='unavailable')catalog.environments[1].snapshot.overview.tools[0].capabilities.probe={available:false};
+  if(mode==='missing')catalog.environments[1].snapshot=report(B,0,true,null);
+  setFetch(async()=>response(catalog));await loadCatalog();
+  if(mode==='derived')selectView('grokbot');else if(mode==='management')selectView('environments');else if(mode!=='missing')selectView('antigravity');
+  const calls=[];
+  setFetch(async(path,opts)=>{
+   calls.push({path,opts});
+   if(opts.method==='POST'){
+    const body=JSON.parse(opts.body);assert.deepEqual(body,mode==='derived'?{tool:'cursor'}:{});
+    return response({instance:info(B),reported:true,observed_at:200,...(mode==='derived'?{quota:{tool:'cursor',attempted:1,updated:1,failed:0,skipped:0}}:{})});
+   }
+   assert.equal(path,'api/environments');return response(catalog);
+  });
+  await clickRefresh();assert.equal(calls.filter(c=>c.opts.method==='POST').length,1);
+ }
+ clearTimeout(ui.overviewTimer);clearTimeout(ui.snapshotExpiryTimer);
+})().catch(e=>{console.error(e);process.exitCode=1});
+`)
+}
+
+func TestDashboardPortalQuotaRefreshReportsFailuresAndSkippedQueries(t *testing.T) {
+	dashboardScript(t, controlPlaneFixtures+`
+(async()=>{
+ for(const quota of [
+  {tool:'antigravity',attempted:2,updated:1,failed:1,skipped:0},
+  {tool:'antigravity',attempted:0,updated:0,failed:0,skipped:1},
+  {tool:'antigravity',attempted:1,updated:0,failed:1,skipped:1},
+ ]){
+  await startPortal(quotaCatalog());await switchEnvironment(B);
+  const snapshot=quotaCatalog(200);snapshot.environments[1].snapshot.overview.tools[0].accounts[0].last_quota_at=100;
+  setFetch(async(path,opts)=>opts.method==='POST'?response({instance:info(B),reported:true,observed_at:200,quota}):response(snapshot));
+  assert.equal(await refreshReportedSnapshot(requestContext(),'antigravity'),false);
+  assert.equal(state.lastRead,201);assert.equal(canWrite(),true,'partial quota failure must not imply an offline node');
+  const notice=state.reportMessages.get(B);assert.equal(notice.error,true);assert(!notice.text.includes('额度已更新并上报'));
+  if(quota.failed)assert(notice.text.includes('失败 '+quota.failed+' 个'));
+  if(quota.skipped)assert(notice.text.includes('跳过 '+quota.skipped+' 个（未重新查询）'));
+  assert.equal(state.overview.tools[0].accounts[0].last_quota_at,100,'report acknowledgement must not fabricate a new quota timestamp');
+ }
+ await startPortal(quotaCatalog());await switchEnvironment(B);
+ setFetch(async(path,opts)=>opts.method==='POST'?response({instance:info(B),reported:true,observed_at:200,quota:{tool:'antigravity',attempted:0,updated:0,failed:0,skipped:0}}):response(quotaCatalog(200)));
+ assert.equal(await refreshReportedSnapshot(requestContext(),'antigravity'),true);assert(state.reportMessages.get(B).text.includes('暂无可查询'));
+ for(const quota of [undefined,{tool:'codex',attempted:1,updated:1,failed:0,skipped:0},{tool:'antigravity',attempted:1,updated:'1',failed:0,skipped:0},{tool:'antigravity',attempted:1,updated:1,failed:-1,skipped:0},{tool:'antigravity',attempted:1,updated:1,failed:1,skipped:0}]){
+  await startPortal(quotaCatalog());await switchEnvironment(B);let reads=0;
+  setFetch(async(path,opts)=>{if(opts.method==='POST')return response({instance:info(B),reported:true,observed_at:200,quota});reads++;return response(quotaCatalog(200))});
+  assert.equal(await refreshReportedSnapshot(requestContext(),'antigravity'),false);assert.equal(reads,0);
+  assert.equal(state.reportMessages.get(B).error,true);
+ }
+ clearTimeout(ui.overviewTimer);clearTimeout(ui.snapshotExpiryTimer);
+})().catch(e=>{console.error(e);process.exitCode=1});
+`)
+}
+
+func TestDashboardPortalProbeImmediatelyPublishesWithoutRepeatingQuotaQuery(t *testing.T) {
+	dashboardScript(t, controlPlaneFixtures+`
+(async()=>{
+ for(const single of [true,false]){
+  await startPortal(quotaCatalog());await switchEnvironment(B);
+  const newer=quotaCatalog(200,58),id=single?B+'-account':'',ack=deferred(),calls=[];
+  setFetch((path,opts)=>{
+   calls.push({path,opts});
+   if(path.endsWith('/probe'))return Promise.resolve(response(single?{updated:true,class:'ok',used_pct:58}:newer.environments[1].snapshot.overview));
+   if(path.endsWith('/report')){assert.deepEqual(JSON.parse(opts.body),{});return ack.promise}
+   assert.equal(path,'api/environments');return Promise.resolve(response(newer));
+  });
+  const probing=mutate('antigravity','查询用量','api/probe',{tool:'antigravity',id},r=>probeFeedback(r,'antigravity',id));
+  await settle();assert.equal(calls.length,2);assert.equal(state.overview.tools[0].accounts[0].last_quota_at,100);
+  ack.resolve(response({instance:info(B),reported:true,observed_at:200}));assert.equal(await probing,true);
+  assert.deepEqual(calls.map(c=>c.path),[entries[1].api_base+'probe',entries[1].api_base+'report','api/environments']);
+  assert.equal(state.overview.tools[0].accounts[0].last_quota_at,200);assert($('accountDetail').innerHTML.includes('已用 58%'));
+  const text=state.messages.get('antigravity').text;assert(!text.includes('下次上报'));assert(!text.includes('控制面暂未更新'));
+  if(single)assert(text.includes('查询完成'));else assert(text.includes('请以各账号“用量记录”时间为准'));
+ }
+ clearTimeout(ui.overviewTimer);clearTimeout(ui.snapshotExpiryTimer);
+})().catch(e=>{console.error(e);process.exitCode=1});
+`)
+}
+
+func TestDashboardPortalProbeRequiresReportAfterCompletionAndKeepsEnvironmentPin(t *testing.T) {
+	dashboardScript(t, controlPlaneFixtures+`
+(async()=>{
+ await startPortal(quotaCatalog());await switchEnvironment(B);
+ const before=deferred(),after=deferred(),calls=[];let reports=0,at=100;
+ setFetch((path,opts)=>{
+  calls.push({path,opts});
+  if(path.endsWith('/report')){assert.equal(opts.headers['X-Qswitch-Instance'],B);assert.deepEqual(JSON.parse(opts.body),{});return ++reports===1?before.promise:after.promise}
+  if(path.endsWith('/probe'))return Promise.resolve(response({updated:true,class:'ok',used_pct:69}));
+  assert.equal(path,'api/environments');return Promise.resolve(response(quotaCatalog(at,at===300?69:0)));
+ });
+ const earlier=refreshReportedSnapshot(),probe=mutate('antigravity','查询用量','api/probe',{tool:'antigravity',id:B+'-account'},r=>probeFeedback(r,'antigravity',B+'-account'));
+ await settle();assert.equal(reports,1,'report commands for one environment must remain serialized');
+ at=200;before.resolve(response({instance:info(B),reported:true,observed_at:200}));await earlier;await settle();assert.equal(reports,2,'a report started before probe completion cannot acknowledge the probe');
+ assert.equal(state.overview.tools[0].accounts[0].used_pct,0);
+ await switchEnvironment(A);assert.equal(state.instance.id,A);assert.equal(state.messages.size,0);
+ at=300;after.resolve(response({instance:info(B),reported:true,observed_at:300}));assert.equal(await probe,false);
+ assert.equal(state.instance.id,A);assert.equal(state.messages.size,0);assert($('accountDetail').innerHTML.includes('alpha@example.test'));
+ assert(!calls.some(c=>c.opts.method==='POST'&&c.path.startsWith(entries[0].api_base)),'late work must never target the newly selected environment');
+ assert.equal(state.reportRequests.size,0);
+ await switchEnvironment(B);assert.equal(state.overview.tools[0].accounts[0].used_pct,69);
+ clearTimeout(ui.overviewTimer);clearTimeout(ui.snapshotExpiryTimer);
+})().catch(e=>{console.error(e);process.exitCode=1});
+`)
+}
+
+func TestDashboardPortalProbeDoesNotClaimSuccessBeforeConfirmedReport(t *testing.T) {
+	dashboardScript(t, controlPlaneFixtures+`
+(async()=>{
+ await startPortal(quotaCatalog());await switchEnvironment(B);let feedback=0;
+ setFetch(async(path,opts)=>{
+  if(path.endsWith('/probe'))return response({updated:true,class:'ok',used_pct:81});
+  if(path.endsWith('/report'))return response({instance:info(B),reported:true,observed_at:200});
+  return response(quotaCatalog());
+ });
+ assert.equal(await mutate('antigravity','查询用量','api/probe',{tool:'antigravity',id:B+'-account'},()=>{feedback++;return '查询完成'}),true);
+ assert.equal(feedback,0);assert.equal(state.messages.get('antigravity').error,true);
+ assert(state.messages.get('antigravity').text.includes('尚未确认本次结果'));assert.equal(state.overview.tools[0].accounts[0].last_quota_at,100);
+ assert(probeFeedback({updated:false,class:'ok',source:'backoff'},'antigravity',B+'-account').includes('本次未重新查询'));
  clearTimeout(ui.overviewTimer);clearTimeout(ui.snapshotExpiryTimer);
 })().catch(e=>{console.error(e);process.exitCode=1});
 `)

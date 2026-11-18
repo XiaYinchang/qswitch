@@ -192,7 +192,7 @@ func TestAntigravityHTTPContract(t *testing.T) {
 		calls := 0
 		h := HTTP{Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			calls++
-			if req.Method != http.MethodPost || req.URL.String() != "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary" || req.Header.Get("Authorization") != "Bearer synthetic-token" || req.Header.Get("Content-Type") != "application/json" || req.Header.Get("User-Agent") != "antigravity/2.32.1" {
+			if req.Method != http.MethodPost || req.URL.String() != "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary" || req.Header.Get("Authorization") != "Bearer synthetic-token" || req.Header.Get("Content-Type") != "application/json" || req.Header.Get("User-Agent") != "antigravity/2.32.1" {
 				t.Fatal("quota request contract mismatch")
 			}
 			var body map[string]string
