@@ -105,10 +105,14 @@ def safe():
  assert n==0 and not (data/'managed-claude/pending.json').exists(),'switch in progress; deployment refused'
 def stop():
  if mac:
-  result=subprocess.run(['launchctl','bootout',f'gui/{uid}/com.qswitch'],capture_output=True,text=True)
-  if result.returncode:
+  subprocess.run(['launchctl','bootout',f'gui/{uid}/com.qswitch'],capture_output=True,text=True)
+  # launchctl bootout can return before launchd finishes removing the job; wait
+  # until the label disappears so bootstrap and print do not race teardown.
+  for _ in range(50):
    present=subprocess.run(['launchctl','print',f'gui/{uid}/com.qswitch'],capture_output=True,text=True)
-   if present.returncode==0: raise RuntimeError('unable to stop launchd service')
+   if present.returncode!=0: return
+   time.sleep(0.1)
+  raise RuntimeError('unable to stop launchd service')
  else: run(['systemctl','--user','stop','qswitchd.service'])
 def start():
  if not mac: return run(['systemctl','--user','start','qswitchd.service'])
