@@ -185,7 +185,9 @@ func TestDashboardBotProbeFeedbackUsesIndependentResult(t *testing.T) {
  for(const cls of ['unknown','expired','']){const text=probeFeedback(bot(cls),'grokbot','account');assert(text.includes('未能确认')||text.includes('未确认'));assert(!text.includes('查询完成'))}
  assert(probeFeedback({class:'ok',updated:true},'grokbot','account').includes('未能确认'));
  assert(probeFeedback({class:'unknown',updated:false,buckets:[{id:'bot',class:'ok'}]},'grokbot','account').includes('查询完成'));
- assert(probeFeedback({tools:[{tool:'cursor',accounts:[{class:'ok'}]},{tool:'grokbot',accounts:[{class:'unknown'},{class:'expired'},{class:'ok',quota_stale:true},{class:'ok'}]}]},'grokbot','').includes('1 个账号已确认，3 个尚未确认（1 个认证已失效'));
+ assert(probeFeedback({tools:[{tool:'cursor',accounts:[{class:'ok'}]},{tool:'grokbot',accounts:[{class:'unknown'},{class:'expired'},{class:'ok',quota_stale:true},{class:'ok'}]}]},'grokbot','').includes('1 个账号有已确认的用量记录，3 个尚未确认（1 个认证已失效'));
+ const existing=probeFeedback({tools:[{tool:'codex',accounts:[{class:'ok',last_quota_at:100}]}]},'codex','');
+ assert(existing.includes('请以各账号“用量记录”时间为准'));assert(!existing.includes('查询完成'));
  assert(probeFeedback({tools:[{tool:'cursor',accounts:[{class:'ok'}]}]},'grokbot','').includes('未能确认'));
  assert(probeFeedback({tools:[{tool:'codex',accounts:[{class:'ok',last_probe_class:'unknown'}]}]},'codex','').includes('1 个尚未确认'));
  state.overview={tools:[{tool:'grokbot',derived_from:'cursor',accounts:[{stable_id:'account'}]}]};

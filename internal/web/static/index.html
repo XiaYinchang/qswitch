@@ -1331,12 +1331,19 @@
           return "unknown";
         return ac.class || "unknown";
       }
+      function quotaSourceNote(tool, source) {
+        return tool === "antigravity" && source === "endpoint_unknown"
+          ? "无法确认 Antigravity 的额度服务入口；请启动已配置的客户端后刷新。"
+          : "";
+      }
       function quotaNote(ac) {
         const known =
             quotaBuckets(ac).some((b) => clampPct(b.used_pct) != null) ||
             (["ok", "soft", "exhausted"].includes(ac.class) &&
               clampPct(ac.used_pct) != null),
           parts = [];
+        const sourceNote = quotaSourceNote(ac.tool, ac.last_probe_source);
+        if (sourceNote) parts.push(sourceNote);
         if (ac.class === "expired") parts.push("认证已失效，请重新登录。");
         if (
           ac.tool === "antigravity" &&
@@ -1504,7 +1511,7 @@
       function accountHTML(ac, tool) {
         const readOnly = Boolean(tool.derived_from || ac.derived || ac.desktop);
         const cls = quotaClass(ac);
-        return `<button class="ghost mobile-back" data-act="back-to-accounts" data-focus="back-to-accounts">← 返回账号列表</button><div class="detail-heading"><div class="identity"><h2 id="accountTitle" tabindex="-1">${attr(accountLabel(ac))}</h2><div class="identity-meta">${ac.live ? pill("当前账号", "current") : ""}${ac.plan && ac.plan !== "-" ? pill(ac.plan) : ""}${accountStatus(ac)}${ac.desktop ? pill("桌面快照") : ""}${ac.incomplete ? pill("凭据待补齐", "warn") : ""}</div></div></div><div class="detail-actions">${actionButton(tool, "probe", "查询用量", "probe", ac.stable_id)}${!ac.live && !readOnly ? actionButton(tool, "switch", "切换到此账号", "switch", ac.stable_id, 'class="primary"') : ""}${!ac.live && !ac.derived && !tool.derived_from ? `<details class="more" data-detail="account-more"><summary aria-label="此账号的更多操作" data-focus="account-more">更多</summary><div class="more-menu"><button class="danger" data-act="forget" data-tool="${attr(tool.tool)}" data-id="${attr(ac.stable_id)}" data-focus="forget:${attr(ac.stable_id)}" ${!canWrite() || busy(tool.tool) ? "disabled" : ""}>删除已收录账号</button></div></details>` : ""}</div>${bucketHTML(ac)}<p class="quota-note">${attr(quotaNote(ac))}</p>${cls === "expired" ? `<div class="details-content">${loginGuidance(tool)}</div>` : ""}${!capability(tool, "switch").available ? `<p class="capability-note">${attr(capability(tool, "switch").reason || "当前工具不支持账号切换")}</p>` : ""}<details class="details" data-detail="account-details"><summary data-focus="account-details">账号与查询详情</summary><div class="details-content"><dl class="facts"><dt>账号 ID</dt><dd><code>${attr(ac.stable_id)}</code></dd><dt>认证</dt><dd>${ac.class === "expired" ? "已失效" : ac.incomplete ? "信息不完整" : "已收录"}</dd><dt>最近收录</dt><dd>${fmtTime(ac.last_captured_at) || "暂无记录"}</dd><dt>最近查询</dt><dd>${fmtTime(ac.last_probe_at || ac.last_probed_at) || "暂无记录"}</dd><dt>查询来源</dt><dd>${attr(ac.last_probe_source || "暂无记录")}</dd>${ac.stale_cli ? "<dt>CLI</dt><dd>登录快照偏旧，需在官方 CLI 重新登录后收录</dd>" : ""}</dl></div></details>`;
+        return `<button class="ghost mobile-back" data-act="back-to-accounts" data-focus="back-to-accounts">← 返回账号列表</button><div class="detail-heading"><div class="identity"><h2 id="accountTitle" tabindex="-1">${attr(accountLabel(ac))}</h2><div class="identity-meta">${ac.live ? pill("当前账号", "current") : ""}${ac.plan && ac.plan !== "-" ? pill(ac.plan) : ""}${accountStatus(ac)}${ac.desktop ? pill("桌面快照") : ""}${ac.incomplete ? pill("凭据待补齐", "warn") : ""}</div></div></div><div class="detail-actions">${actionButton(tool, "probe", "查询用量", "probe", ac.stable_id)}${!ac.live && !readOnly ? actionButton(tool, "switch", "切换到此账号", "switch", ac.stable_id, 'class="primary"') : ""}${!ac.live && !ac.derived && !tool.derived_from ? `<details class="more" data-detail="account-more"><summary aria-label="此账号的更多操作" data-focus="account-more">更多</summary><div class="more-menu"><button class="danger" data-act="forget" data-tool="${attr(tool.tool)}" data-id="${attr(ac.stable_id)}" data-focus="forget:${attr(ac.stable_id)}" ${!canWrite() || busy(tool.tool) ? "disabled" : ""}>删除已收录账号</button></div></details>` : ""}</div>${bucketHTML(ac)}<p class="quota-note">${attr(quotaNote(ac))}</p>${cls === "expired" ? `<div class="details-content">${loginGuidance(tool)}</div>` : ""}${!capability(tool, "switch").available ? `<p class="capability-note">${attr(capability(tool, "switch").reason || "当前工具不支持账号切换")}</p>` : ""}<details class="details" data-detail="account-details"><summary data-focus="account-details">账号与查询详情</summary><div class="details-content"><dl class="facts"><dt>账号 ID</dt><dd><code>${attr(ac.stable_id)}</code></dd><dt>认证</dt><dd>${ac.class === "expired" ? "已失效" : ac.incomplete ? "信息不完整" : "已收录"}</dd><dt>最近收录</dt><dd>${fmtTime(ac.last_captured_at) || "暂无记录"}</dd><dt>最近查询</dt><dd>${fmtTime(ac.last_probe_at || ac.last_probed_at) || "暂无记录"}</dd><dt>查询来源</dt><dd>${attr(quotaSourceNote(ac.tool, ac.last_probe_source) || ac.last_probe_source || "暂无记录")}</dd>${ac.stale_cli ? "<dt>CLI</dt><dd>登录快照偏旧，需在官方 CLI 重新登录后收录</dd>" : ""}</dl></div></details>`;
       }
       // Outer navigation and account buttons keep their identity across observations.
       // Only changed detail content is replaced; focus and disclosure state survive it.
@@ -1590,7 +1597,7 @@
         }, Math.max(1, Math.ceil(Math.min(...remaining) * 1000)));
       }
       function snapshotTime(snapshot) {
-        return [snapshot?.observed_at ? "节点采集 " + fmtTime(snapshot.observed_at) : "",
+        return [snapshot?.observed_at ? "状态上报 " + fmtTime(snapshot.observed_at) : "",
           snapshot?.received_at ? "收到上报 " + fmtTime(snapshot.received_at) : ""].filter(Boolean).join(" · ");
       }
       function renderConnection() {
@@ -1815,6 +1822,8 @@
       function probeFeedback(result, tool, id) {
         const label = tool === "grokbot" ? "Bot 用量" : "用量";
         const known = (value) => ["ok", "soft", "exhausted"].includes(value);
+        const sourceNote = quotaSourceNote(tool, result?.source);
+        if (sourceNote) return sourceNote;
         if (!id) {
           const accounts = result?.tools?.find(
             (entry) => entry.tool === tool,
@@ -1829,14 +1838,17 @@
               ["unknown", "expired"].includes(account.last_probe_class),
           );
           if (!unconfirmed.length)
-            return `${label}查询完成，${accounts.length} 个账号已确认。`;
+            return `${label}查询已结束；${accounts.length} 个账号有已确认的用量记录，请以各账号“用量记录”时间为准。`;
           const expired = unconfirmed.filter(
             (account) =>
               account.class === "expired" ||
               account.last_probe_class === "expired",
           ).length;
-          return `${label}查询完成：${accounts.length - unconfirmed.length} 个账号已确认，${unconfirmed.length} 个尚未确认${expired ? `（${expired} 个认证已失效，请重新登录）` : ""}。`;
+          const sourceNote = unconfirmed.map((account) => quotaSourceNote(tool, account.last_probe_source)).find(Boolean);
+          return `${label}查询已结束：${accounts.length - unconfirmed.length} 个账号有已确认的用量记录，${unconfirmed.length} 个尚未确认${expired ? `（${expired} 个认证已失效，请重新登录）` : ""}；请以各账号“用量记录”时间为准。${sourceNote ? " " + sourceNote : ""}`;
         }
+        if (["backoff", "refresh_backoff", "cached"].includes(result?.source))
+          return `本次未重新查询${label}，显示已有用量记录，请稍后重试。`;
         const cls =
           tool === "grokbot"
             ? result?.buckets?.find((bucket) => bucket.id === "bot")?.class
@@ -1990,20 +2002,31 @@
         return Boolean(state.controlPlane && state.gateway && isCurrent(context) && !state.fatal &&
           state.environments.some((env) => env.id === context.envID && env.api_base === context.apiBase));
       }
-      function refreshReportedSnapshot(context = requestContext()) {
+      function refreshReportedSnapshot(context = requestContext(), tool = "") {
         if (!canRefreshReport(context)) return Promise.resolve(false);
         const pending = state.reportRequests.get(context.envID);
-        if (pending) return pending.promise;
-        const request = { promise: null };
+        if (pending) {
+          // A probe completed after this report began. Wait for it, then send a
+          // new report so the mutation cannot accept a pre-completion snapshot.
+          if (pending.revision !== state.revision)
+            return pending.promise.then(() => isCurrent(context) ? refreshReportedSnapshot(context, tool) : false);
+          return pending.promise;
+        }
+        const request = { promise: null, revision: state.revision };
         state.reportRequests.set(context.envID, request);
-        state.reportMessages.set(context.envID, { text: "正在请求节点采集并上报…" });
+        state.reportMessages.set(context.envID, { text: tool ? `正在查询 ${toolTitle(tool)} 额度并上报…` : "正在请求节点上报状态…" });
         renderConnection();
         request.promise = (async () => {
           try {
-            const result = await api("api/report", { method: "POST", body: {}, timeout: 95000, context });
+            const result = await api("api/report", { method: "POST", body: tool ? { tool } : {}, timeout: 95000, context });
             if (result.instance?.id !== context.envID || result.reported !== true ||
                 !Number.isInteger(result.observed_at) || result.observed_at <= 0)
               throw new Error("节点未确认有效上报，请重试。");
+            const quota = result.quota;
+            if (tool && (quota?.tool !== tool ||
+                !["attempted", "updated", "failed", "skipped"].every((key) => Number.isSafeInteger(quota[key]) && quota[key] >= 0) ||
+                quota.attempted !== quota.updated + quota.failed))
+              throw new Error("节点未确认本次额度查询结果，请重试。");
             const refreshed = await loadCatalog(true);
             const env = state.environments.find((entry) => entry.id === context.envID);
             const received = refreshed && env?.snapshot?.overview &&
@@ -2015,8 +2038,20 @@
               receivedAt: env?.snapshot?.received_at || 0, observedAt: result.observed_at,
             });
             if (isCurrent(context)) applyControlSnapshot();
-            state.reportMessages.set(context.envID, { text: received ? "节点已上报，显示控制面记录。" : "尚未读到本次上报，保留上次记录，可稍后重试。", error: !received });
-            return Boolean(received);
+            let text = "节点已上报，显示控制面记录。";
+            const incomplete = tool && (quota.failed > 0 || quota.skipped > 0);
+            if (tool) {
+              if (incomplete) {
+                const counts = [`更新 ${quota.updated} 个账号`];
+                if (quota.failed) counts.push(`失败 ${quota.failed} 个`);
+                if (quota.skipped) counts.push(`跳过 ${quota.skipped} 个（未重新查询）`);
+                text = `${toolTitle(tool)}额度查询：${counts.join("，")}；状态已上报，请查看未更新账号的查询详情。`;
+              } else text = quota.updated > 0
+                ? `${toolTitle(tool)} ${quota.updated} 个账号的额度已更新并上报。`
+                : `暂无可查询的 ${toolTitle(tool)} 账号，状态已上报。`;
+            }
+            state.reportMessages.set(context.envID, { text: received ? text : "尚未读到本次上报，保留上次记录，可稍后重试。", error: !received || Boolean(incomplete) });
+            return Boolean(received && !incomplete);
           } catch (e) {
             const env = state.environments.find((entry) => entry.id === context.envID);
             state.targetErrors.set(context.envID, { reason: "刷新失败：" + e.message, receivedAt: env?.snapshot?.received_at || 0 });
@@ -2231,9 +2266,14 @@
           const result = await api(path, { method: "POST", body, timeout: 95000, context });
           if (!isCurrent(context)) return false;
           state.revision++;
-          const fresh = await loadSnapshot(context);
+          const reportedProbe = state.controlPlane && path === "api/probe";
+          const fresh = reportedProbe ? await refreshReportedSnapshot(context) : await loadSnapshot(context);
           if (!isCurrent(context)) return false;
-          const success = state.controlPlane
+          if (reportedProbe && !fresh) {
+            message(tool, "查询已返回，但控制面尚未确认本次结果；保留上次记录，请刷新状态重试。", true);
+            return true;
+          }
+          const success = state.controlPlane && !reportedProbe
             ? "操作已完成，状态将在下次上报后更新。"
             : onSuccess ? onSuccess(result) : label + "完成。";
           message(tool, success + (fresh ? "" : state.controlPlane ? " 控制面状态暂未更新，保留上次记录。" : " 操作已返回成功，但页面状态未能更新；请刷新状态核对。"), !fresh);
@@ -2552,7 +2592,8 @@
           }
           if (act === "refresh-state") {
             b.disabled = true;
-            if (state.controlPlane) await refreshReportedSnapshot(context);
+            const currentTool = toolView(state.view);
+            if (state.controlPlane) await refreshReportedSnapshot(context, capability(currentTool, "probe").available ? actionTool(currentTool.tool) : "");
             else if (state.gateway) await connect(context);
             else await bootstrap();
             if (isCurrent(context)) b.disabled = false;

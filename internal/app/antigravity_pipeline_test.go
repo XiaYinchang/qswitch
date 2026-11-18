@@ -67,6 +67,7 @@ const antigravityPipelineAccess = "synthetic-pipeline-access-token"
 func antigravityPipelineFixture(t *testing.T) (*App, time.Time) {
 	t.Helper()
 	a, _ := setup(t)
+	antigravityNativeEndpointFixture(t, a, "https://daily-cloudcode-pa.googleapis.com")
 	now := time.Date(2090, 1, 1, 0, 0, 0, 0, time.UTC)
 	a.Clock = clock.Fixed{T: now}
 	id := adapter.Identity{Tool: adapter.Antigravity, StableID: antigravityPipelineID, Email: "pipeline@example.test"}

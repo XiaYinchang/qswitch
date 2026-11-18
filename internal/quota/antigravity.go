@@ -8,13 +8,14 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"strings"
 	"time"
 )
 
 // AntigravityQuotaURL is the consumer quota-summary endpoint verified with
-// Antigravity 2.32.1. It is an internal, versioned API, not the Gemini API-key
+// Antigravity 2.32.1/2.32.2 desktop defaults. It is an internal, versioned API, not the Gemini API-key
 // quota service. The endpoint requires the native product user agent.
-const AntigravityQuotaURL = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
+const AntigravityQuotaURL = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
 
 const antigravityQuotaUserAgent = "antigravity/2.32.1"
 
@@ -218,7 +219,19 @@ func earlierAntigravityReset(a, b int64) int64 {
 // Antigravity reads one account without changing the active desktop or CLI
 // identity. The caller refreshes expired OAuth tokens and owns vault writes.
 func (h HTTP) Antigravity(ctx context.Context, accessToken, project string) (Result, error) {
+	return h.AntigravityAt(ctx, accessToken, project, "https://daily-cloudcode-pa.googleapis.com")
+}
+
+// AntigravityAt follows the native backend's origin without allowing it to
+// choose an arbitrary destination, API path, port or redirect for OAuth tokens.
+func (h HTTP) AntigravityAt(ctx context.Context, accessToken, project, endpoint string) (Result, error) {
 	unknown := Result{Class: Unknown, Source: "http"}
+	endpoint = strings.TrimSuffix(endpoint, "/")
+	switch endpoint {
+	case "https://daily-cloudcode-pa.googleapis.com", "https://cloudcode-pa.googleapis.com":
+	default:
+		return unknown, errors.New("antigravity: unsupported cloud-code endpoint")
+	}
 	if accessToken == "" {
 		return unknown, errors.New("antigravity: missing access token")
 	}
@@ -228,7 +241,7 @@ func (h HTTP) Antigravity(ctx context.Context, accessToken, project string) (Res
 	if err != nil {
 		return unknown, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, AntigravityQuotaURL, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint+"/v1internal:retrieveUserQuotaSummary", bytes.NewReader(body))
 	if err != nil {
 		return unknown, err
 	}

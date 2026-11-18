@@ -105,17 +105,21 @@ func (a *App) keepAliveAntigravityAccounts(ctx context.Context) {
 }
 
 func (a *App) probeAntigravityLocked(ctx context.Context, blob adapter.Blob) quota.Result {
+	endpoint, err := antigravity.CloudCodeEndpoint(a.UserHome, a.DataDir, a.ListProcs)
+	if err != nil {
+		return quota.Result{Class: quota.Unknown, Source: "endpoint_unknown"}
+	}
 	nb, token, err := a.keepAliveAntigravityLocked(ctx, blob, false)
 	if err != nil {
 		return a.refreshFailureResult(adapter.Antigravity, blob.Identity.StableID)
 	}
-	r, _ := a.HTTP.Antigravity(ctx, token, "")
+	r, _ := a.HTTP.AntigravityAt(ctx, token, "", endpoint)
 	if r.Class == quota.Expired {
 		_, renewed, err := a.keepAliveAntigravityLocked(ctx, nb, true)
 		if err != nil {
 			return a.refreshFailureResult(adapter.Antigravity, blob.Identity.StableID)
 		}
-		r, _ = a.HTTP.Antigravity(ctx, renewed, "")
+		r, _ = a.HTTP.AntigravityAt(ctx, renewed, "", endpoint)
 	}
 	return r
 }
