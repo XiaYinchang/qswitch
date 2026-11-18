@@ -3,6 +3,7 @@ package busy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strconv"
@@ -14,17 +15,39 @@ import (
 	"qswitch/internal/adapter"
 )
 
+const windowsProcessQueryTimeout = 30 * time.Second
+
 func platformProcesses() ([]adapter.Proc, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	return listWindowsProcesses(runWindowsProcessQuery)
+}
+
+func listWindowsProcesses(query func(time.Duration) ([]byte, error)) ([]adapter.Proc, error) {
+	raw, err := query(windowsProcessQueryTimeout)
+	if err != nil && errors.Is(err, context.DeadlineExceeded) {
+		// Cold-starting PowerShell and the Win32_Process CIM provider on a busy
+		// host can spend most of the first budget; retry once with warm caches.
+		raw, err = query(windowsProcessQueryTimeout)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("list Windows processes: %w", err)
+	}
+	return parseWindowsProcesses(raw)
+}
+
+func runWindowsProcessQuery(timeout time.Duration) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	const script = "$ErrorActionPreference = 'Stop'; [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); ConvertTo-Json -Compress -InputObject @(Get-CimInstance Win32_Process -ErrorAction Stop | Select-Object ProcessId,CommandLine,ExecutablePath,Name)"
 	cmd := exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	raw, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("list Windows processes: %w", err)
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("%w: %v", ctx.Err(), err)
+		}
+		return nil, err
 	}
-	return parseWindowsProcesses(raw)
+	return raw, nil
 }
 
 func parseWindowsProcesses(raw []byte) ([]adapter.Proc, error) {
