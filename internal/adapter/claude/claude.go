@@ -271,9 +271,16 @@ func (a Adapter) AutoBlockers(string) (adapter.Holders, error) {
 	}
 	h := adapter.Holders{}
 	for _, s := range sessions {
-		if !s.Exited && s.ChildPID > 0 {
-			h.Manual = append(h.Manual, adapter.Proc{PID: s.ChildPID, Command: "qswitch managed claude"})
+		if s.Exited || s.ChildPID <= 0 {
+			continue
 		}
+		// A runner killed before cleanup leaves exited=false on disk. Only block
+		// while its child process still exists, matching managed.Prepare, so a
+		// vanished PID cannot fail credential restore after draining live sessions.
+		if !s.Live && !managed.ProcessExists(s.ChildPID) {
+			continue
+		}
+		h.Manual = append(h.Manual, adapter.Proc{PID: s.ChildPID, Command: "qswitch managed claude"})
 	}
 	if len(h.Manual) > 0 {
 		h.Why = []string{"managed claude cli running"}

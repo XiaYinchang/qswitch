@@ -557,3 +557,52 @@ test('every main-turn rate limit is counted, even when already interrupted', asy
   await $.classic.StopFailure({ error: 'rate_limit', agent_id: 'child' });
   expect(await status($)).toMatchObject({ limit_hits: 1, needs_continue: true });
 });
+
+test('a generation replacement between heartbeats keeps preparation working without wedging', async ($, on) => {
+  const { clock, control } = setup(on);
+  let exits = 0;
+  on('command.run', { command: 'exit' }, () => { exits += 1; return { text: '' }; });
+  await start($);
+  control.action = 'prepare';
+  control.generation = 'generation-1';
+  await clock.advance(750);
+  expect(await status($)).toMatchObject({ ready: true, phase: 'prepare', generation: 'generation-1' });
+
+  // Hold a message during generation-1, then supersede with generation-2 without
+  // an intervening run heartbeat (as coordinator.Prepare does when replacing a
+  // generation or when a manual switch runs during an automatic drain).
+  const held = await $.prompt.submit({ text: 'keep me', wait: false, origin: { kind: 'composer' } });
+  expect(held.drop).toContain('held');
+  control.generation = 'generation-2';
+  await clock.advance(750);
+  expect(await status($)).toMatchObject({ ready: true, phase: 'prepare', generation: 'generation-2', held_messages: 1 });
+
+  // Transition directly into exit for generation-3 and confirm /exiting carries
+  // the held message under the latest generation.
+  control.action = 'exit';
+  control.generation = 'generation-3';
+  await clock.advance(750);
+  expect(exits).toBe(1);
+  const acks = control.requests.filter(r => r.path === '/exiting');
+  expect(acks).toHaveLength(1);
+  expect(acks[0]!.body).toMatchObject({ generation: 'generation-3', held: ['keep me'] });
+});
+
+test('direct transition from switch preparation to self-upgrade still waits for scheduled tasks', async ($, on) => {
+  const { clock, control } = setup(on);
+  await start($);
+  await $.classic.Stop({ stop_hook_active: false, background_tasks: [],
+    session_crons: [{ id: 'cron1', schedule: '7 10 5 11 *', recurring: false, prompt: 'check' }] });
+  control.action = 'prepare';
+  control.generation = 'generation-1';
+  await clock.advance(750);
+  expect(await status($)).toMatchObject({ ready: true, phase: 'prepare', generation: 'generation-1' });
+
+  // Runner released generation-1 and immediately started self-upgrade before the
+  // next heartbeat. The upgrade must still respect the scheduled task.
+  control.action = 'exit';
+  control.generation = 'self-upgrade';
+  await clock.advance(750);
+  expect(control.requests.filter(r => r.path === '/exiting')).toHaveLength(0);
+  expect(await status($)).toMatchObject({ ready: false, reason: 'scheduled session tasks remain', generation: 'self-upgrade' });
+});

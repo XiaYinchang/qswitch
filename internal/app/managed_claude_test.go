@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -195,5 +196,160 @@ func TestManagedClaudeRotationWaitsForEverySessionBeforeCredentialCommit(t *test
 		if !s.exited || !s.released {
 			t.Fatalf("manual switch did not coordinate terminal %d: %+v", i, s)
 		}
+	}
+}
+
+func writeStaleClaudeRecord(t *testing.T, root, id string, childPID int) {
+	t.Helper()
+	dir := filepath.Join(root, id)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "lease"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(map[string]any{
+		"id":         id,
+		"runner_pid": childPID,
+		"child_pid":  childPID,
+		"session_id": "stale-session",
+		"cwd":        t.TempDir(),
+		"ready":      false,
+		"exited":     false,
+		"generation": "",
+		"live":       true,
+	})
+	if err := os.WriteFile(filepath.Join(dir, "status.json"), raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A dead runner left exited=false on disk with a vanished child PID must not
+// let Prepare drain live sessions only for switchLocked/Restore to fail with
+// BusyError and bounce every session back onto the exhausted account.
+func TestManagedClaudeRotationIgnoresDeadStaleRecordAndStopsBeforeDrainOnAliveOrphan(t *testing.T) {
+	a := setupClaudeRecovery(t, "", false)
+	a.Cfg.General.AutoSwitch = true
+	a.Cfg.Claude.Enabled = true
+	a.HTTP.Client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		id := "source"
+		if req.Header.Get("Authorization") == "Bearer target-access" {
+			id = "target"
+		}
+		return claudeRecoveryResponse(req, 200, fmt.Sprintf(`{"account":{"uuid":%q}}`, id)), nil
+	})}
+	if _, _, err := a.Capture(adapter.Claude); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(map[string]any{"claudeAiOauth": claude.Creds{AccessToken: "target-access", RefreshToken: "target-refresh", ExpiresAt: a.now().Add(time.Hour).UnixMilli()}})
+	target, err := claudeBlobFromRaw(raw, claude.OAuthAccount{AccountUUID: "target"}, a.now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.saveBlob(target); err != nil {
+		t.Fatal(err)
+	}
+	for id, class := range map[string]string{"source": "exhausted", "target": "ok"} {
+		pct := 10.0
+		if id == "source" {
+			pct = 100
+		}
+		if err := a.State.UpdateQuotaSnapshot("claude", id, class, pct, a.now().Add(time.Hour).Unix(), a.now().Unix()); err != nil {
+			t.Fatal(err)
+		}
+		if err := a.State.LogQuota("claude", id, class, "http", pct, a.now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := a.State.SetPending(state.Pending{Tool: "claude", FromID: "source", ToID: "target", QueuedAt: a.now().Unix(), Reason: "exhausted"}); err != nil {
+		t.Fatal(err)
+	}
+	a.Adapters[adapter.Claude] = claude.Adapter{List: func() ([]adapter.Proc, error) { return nil, nil }, DataDir: a.DataDir}
+	root := filepath.Join(a.DataDir, "managed-claude")
+	if err := os.MkdirAll(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	var mu sync.Mutex
+	prepared, exited, released, committed := 0, false, false, false
+	gen := ""
+	id := fmt.Sprintf("%064x", 1)
+	token := strings.Repeat("b", 64)
+	dir := filepath.Join(root, id)
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := os.OpenFile(filepath.Join(dir, "lease"), os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Flock(int(lease.Fd()), unix.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { lease.Close() })
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		var c struct {
+			Generation string `json:"generation"`
+			Committed  bool   `json:"committed"`
+		}
+		if r.Method == http.MethodPost {
+			_ = json.NewDecoder(r.Body).Decode(&c)
+		}
+		switch r.URL.Path {
+		case "/prepare":
+			prepared++
+			gen = c.Generation
+		case "/exit":
+			exited = true
+		case "/release":
+			released = true
+			committed = c.Committed
+			gen = ""
+		case "/status":
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": id, "runner_pid": os.Getpid(), "child_pid": 801,
+			"session_id": "live-session", "ready": true, "exited": exited, "generation": gen,
+		})
+	}))
+	t.Cleanup(server.Close)
+	reg, _ := json.Marshal(map[string]any{"id": id, "pid": os.Getpid(), "url": server.URL, "token": token})
+	if err := os.WriteFile(filepath.Join(dir, "registration.json"), reg, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Dead stale record must not hold up credential commit.
+	dead := exec.Command("true")
+	if err := dead.Run(); err != nil {
+		t.Fatal(err)
+	}
+	writeStaleClaudeRecord(t, root, strings.Repeat("d", 64), dead.Process.Pid)
+
+	if err := a.TryApply(adapter.Claude, false); err != nil {
+		t.Fatalf("TryApply failed with dead stale record: %v", err)
+	}
+	pPtr, err := a.State.GetPointer("claude")
+	if err != nil || pPtr.StableID != "target" {
+		t.Fatalf("pointer = %+v, %v; want target", pPtr, err)
+	}
+	if !exited || !released || !committed {
+		t.Fatalf("live runner state exited=%v released=%v committed=%v", exited, released, committed)
+	}
+
+	// Alive orphan child must stop manual switch before preparing or exiting live runners.
+	mu.Lock()
+	prepared, exited, released, committed, gen = 0, false, false, false, ""
+	mu.Unlock()
+	writeStaleClaudeRecord(t, root, strings.Repeat("e", 64), os.Getpid())
+	if err := a.Switch(adapter.Claude, "source", adapter.RestoreOpts{}, true); err == nil {
+		t.Fatal("manual switch succeeded past an alive orphaned Claude process")
+	}
+	mu.Lock()
+	gotPrepared, gotExited := prepared, exited
+	mu.Unlock()
+	if gotPrepared != 0 || gotExited {
+		t.Fatalf("alive orphan should fail before draining live runner: prepared=%d exited=%v", gotPrepared, gotExited)
 	}
 }

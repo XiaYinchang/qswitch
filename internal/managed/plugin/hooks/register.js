@@ -122,7 +122,7 @@ const DRAFT_LIMIT = 8000;
     // exit stops it and the continuation lists it. On 11-04 a switch waited
     // ten minutes for a task due the next day. An upgrade restart tells the
     // session nothing, so it still waits.
-    else if (!asyncWaived && crons.length && phase !== 'prepare') reason = 'scheduled session tasks remain';
+    else if (!asyncWaived && crons.length && (phase !== 'prepare' || generation === 'self-upgrade')) reason = 'scheduled session tasks remain';
     else if (!asyncWaived && agents.some(agent => !terminal(agent.status))) reason = 'known agent is not finished';
     // A draft holds the switch only while someone is typing it; a quiet one
     // goes along with the exit. A switch used to wait for any draft until the
@@ -257,11 +257,11 @@ const DRAFT_LIMIT = 8000;
         }
         return;
       }
-      if (generation && generation !== action.generation) {
-        unknown = 'coordinator changed generation without releasing preparation';
-        changed();
-        return;
-      }
+      // The runner answers /state with its current state, not an event log.
+      // When one generation is released and replaced by another (for example a
+      // manual switch, an exhaustion superseding an expiring switch, or a
+      // runner self-upgrade) between 750 ms heartbeats, adopt the new
+      // generation directly instead of wedging the session.
       if (phase !== 'prepare') {
         asyncTimer?.cancel();
         asyncWaitOver = false;

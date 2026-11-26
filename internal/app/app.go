@@ -536,7 +536,12 @@ func (a *App) Switch(tool adapter.Tool, ref string, opts adapter.RestoreOpts, ki
 	}()
 	var ready bool
 	prepare := func() bool {
-		ready, _, err = managed.Prepare(a.DataDir, generation, nil)
+		var h adapter.Holders
+		h, err = a.switchBlockers(tool)
+		if err != nil {
+			return true
+		}
+		ready, _, err = managed.Prepare(a.DataDir, generation, h.ManualPIDs())
 		return err != nil || ready
 	}
 	var waitErr error

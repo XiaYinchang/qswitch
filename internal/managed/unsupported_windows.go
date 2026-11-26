@@ -40,3 +40,4 @@ func Resume(string) (int, error)                                { return 0, errU
 func Prepare(string, string, []int) (bool, []Waiting, error)    { return false, nil, errUnsupported }
 func Release(string, string, bool) error                        { return errUnsupported }
 func Exiting(string) bool                                       { return false }
+func ProcessExists(int) bool                                    { return false }

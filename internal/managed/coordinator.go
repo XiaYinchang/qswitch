@@ -44,9 +44,12 @@ func remainingIDs(ids []string, live []participant, stale []StatusInfo) ([]strin
 	return kept, nil
 }
 
-// processExists reports whether pid names a process. One owned by another
-// user counts, and so does a reused pid: when unsure, the switch stops.
-func processExists(pid int) bool {
+// ProcessExists reports whether pid names a process. One owned by another
+// user counts, and so does a reused pid: when unsure, callers stop.
+func ProcessExists(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
 	err := unix.Kill(pid, 0)
 	return err == nil || errors.Is(err, unix.EPERM)
 }
@@ -117,7 +120,7 @@ func Prepare(dataDir, generation string, blockers []int) (bool, []Waiting, error
 	// Only a Claude that still runs outside the live runners, as one left
 	// by a killed runner, stops the switch.
 	for _, pid := range blockers {
-		if !byPID[pid] && processExists(pid) {
+		if !byPID[pid] && ProcessExists(pid) {
 			return false, nil, fmt.Errorf("claude process %d is not a live managed child", pid)
 		}
 	}
